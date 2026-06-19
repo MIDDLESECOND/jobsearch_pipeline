@@ -1,0 +1,64 @@
+# ============================================================
+# Job search pipeline configuration — EXAMPLE TEMPLATE
+# Copy this to `config.yaml` and edit for your own search:
+#     cp config.example.yaml config.yaml   (Windows: copy config.example.yaml config.yaml)
+# `config.yaml` is gitignored so your personal search stays local.
+#
+# Edit search terms / add / remove searches freely.
+# Boolean syntax (quotes, OR, AND, NOT) passes through to LinkedIn.
+# ============================================================
+
+settings:
+  location: "United States"
+  hours_old: 13               # lookback per run; tune to how often you run it (dedupe handles overlap)
+  results_per_search: 30
+  delay_between_searches: 20   # seconds; be polite to the guest endpoint
+  # Evaluator engine. Flip `provider` to switch; keep `model` consistent with it.
+  #   anthropic -> claude-sonnet-4-6  (highest quality; needs ANTHROPIC_API_KEY)
+  #   deepseek  -> deepseek-v4-flash  (much cheaper; reasoning model; needs DEEPSEEK_API_KEY)
+  provider: "anthropic"
+  model: "claude-sonnet-4-6"
+  max_description_chars: 12000
+  db_path: "jobs.db"
+  reports_dir: "reports"
+
+# Each search is one LinkedIn query. `tier` is a free-text label surfaced in the
+# report. `job_type` and `min_salary` are optional (see the analyst examples).
+searches:
+  # ---------- Primary-tier titles ----------
+  - name: solutions_architect
+    tier: primary
+    term: '"solutions architect" AND (AI OR automation) NOT principal NOT director NOT staff'
+
+  - name: solutions_engineer
+    tier: primary
+    term: '("solutions engineer" OR "solutions consultant") AND (AI OR automation OR data)'
+
+  - name: applied_ai_delivery
+    tier: primary
+    term: '"forward deployed" OR "AI consultant" OR "AI implementation"'
+
+  # ---------- A specific stack you target ----------
+  - name: power_platform
+    tier: primary
+    term: '"Power Platform" AND (architect OR consultant OR developer)'
+
+  # ---------- A domain filter, if you have one (optional) ----------
+  # - name: your_domain
+  #   tier: primary
+  #   term: '"your industry keyword" OR "another keyword"'
+
+  # ---------- Analyst tier: full-time only, with a salary floor ----------
+  # min_salary drops postings whose KNOWN annual salary is below the floor;
+  # postings with no stated salary are kept.
+  - name: business_analyst
+    tier: analyst
+    term: '"business analyst" AND ("Power BI" OR SQL OR automation)'
+    job_type: fulltime
+    min_salary: 80000
+
+  - name: data_bi_analyst
+    tier: analyst
+    term: '("data analyst" OR "BI analyst" OR "business intelligence analyst") AND ("Power BI" OR Python)'
+    job_type: fulltime
+    min_salary: 80000

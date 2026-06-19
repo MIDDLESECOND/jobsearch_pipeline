@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Local Claude Code config (machine-specific) ----
+.claude/settings.local.json
+
+# ---- Secrets ----
+.env
+*.key
+
+# ---- Personal data (KEPT LOCAL — ship the *.example.* templates instead) ----
+# Real config / profile / guide are private; committed counterparts are the
+# sanitized *.example.* files below.
+config.yaml
+profile.md
+evaluation_guide.md
+
+# ---- Generated / runtime data (third-party scraped content, run output) ----
+jobs.db
+*.db
+logs/
+reports/
+compare_results.json
+
+# ---- Local validation tool (reads the private jobs.db; names real search targets) ----
+backtest_v2.py
+
+# Make sure the shipped example templates are never accidentally ignored
+!config.example.yaml
+!profile.example.md
+!evaluation_guide.example.md

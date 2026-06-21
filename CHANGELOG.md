@@ -7,6 +7,67 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-21 — application-status lifecycle (applied / passed / backlog)
+
+### Why
+The repost feature (below) added a binary `applied` flag, but in practice not every
+fetched job gets triaged in a day: a few links get opened, some get applied to, and some
+get **rejected after human evaluation**. "Not applied" was conflating two opposite cases —
+**passed** (reviewed, decided no → a repost should be *muted*, not re-triaged) and
+**backlog** (never got to it → a repost should still show, you may apply later). The binary
+flag couldn't tell them apart, so every repost of a role you'd already rejected came back
+looking fresh.
+
+### What changed
+- **`applied` (boolean) → `app_status` (lifecycle).** A single column with values
+  `NULL` (backlog/default), `applied`, or `passed`, plus `status_date`. The untouched
+  default *is* the backlog, so no separate "viewed" state is needed (and a static markdown
+  report can't detect link clicks anyway).
+- **New `passed` CLI verb.** `python pipeline.py passed --url <full-or-substring>` mirrors
+  `applied`; both take `--undo` to clear a mis-mark. Decisions propagate across the repost
+  chain to the canonical original, same as before.
+- **Report treatment, with `applied` > `passed` precedence.** Applied → the existing loud
+  `🚫 ALREADY APPLIED`; passed → a quiet `↩ You reviewed & passed on <date>` note, and the
+  job **stays visible** (non-destructive — you can still change your mind). Reads the row's
+  *own* status too, so re-running `report` after marking same-day postings declutters
+  today's report, not just future reposts. Header gained a "previously passed" count;
+  `stats` gained an `app_status` breakdown.
+
+### Decisions worth noting
+- **Single enum, not two booleans.** A controlled vocabulary makes a future funnel state
+  (`interviewing`, `rejected`, …) a one-line addition rather than another migration.
+- **Passed reposts stay visible (muted), not hidden.** Lowest-regret default; switching to
+  hide / separate-section later is a localized `generate_report` edit.
+- **Manual CLI, no click auto-tracking.** Auto-capturing clicks would need a local redirect
+  server and still couldn't distinguish applied from passed — that decision only exists in
+  the user's head.
+
+### Where (files touched)
+- `pipeline.py` — only file changed: `app_status`/`status_date` in `CREATE TABLE`;
+  `_migrate()` adds them and `_migrate_applied_to_status()` folds the old `applied` flag in
+  then drops the dead columns (`DROP COLUMN`, guarded for SQLite < 3.35); `cmd_applied` →
+  generalized `cmd_mark(conn, url, status)`; `applied` + new `passed` subcommands with
+  `--undo`; `_repost_info` / `_repost_tag` / report header / `cmd_stats` updated.
+
+### How we verified
+- Migration ran on the live `jobs.db`: added the two columns, folded `applied` (0 set rows
+  → all 2,677 land in backlog), dropped the old columns; a second `stats` run was a clean
+  idempotent no-op.
+- CLI on a temp DB: `applied`/`passed` set status + date and propagate to the canonical
+  original; `--undo` clears; **precedence holds** (passed-then-applied on one chain renders
+  ALREADY APPLIED).
+- Report render of four chains — applied / passed / backlog / brand-new — produced
+  `🚫 ALREADY APPLIED` / `↩ passed (visible)` / normal / normal respectively; marking a
+  same-day non-repost `passed` and re-rendering muted it (no false repost line).
+- Repost-detection backtest re-run: still **212** flagged, unchanged by the status work.
+
+### Migration / operational notes
+- `jobs.db` is the single source of truth and is gitignored — the in-place column
+  migration is non-tracked. The old `applied`/`applied_date` columns are removed where the
+  SQLite build supports `DROP COLUMN`; on older builds they're left in place, unused.
+
+---
+
 ## 2026-06-21 — repost-aware dedup + applied tracking
 
 ### Why

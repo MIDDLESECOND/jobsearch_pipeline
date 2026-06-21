@@ -9,6 +9,7 @@ Usage:
   python pipeline.py report          # regenerate today's report only (no fetch, no API calls)
   python pipeline.py stats           # quick database stats
   python pipeline.py applied --url X # mark a posting (full URL or unique substring) as applied-to
+  python pipeline.py passed  --url X # mark a posting as reviewed-and-passed (add --undo to either to clear)
 
 Requires env var ANTHROPIC_API_KEY.
 """
@@ -69,8 +70,8 @@ def get_db(cfg):
             norm_title   TEXT,    -- normalized title (abbrevs expanded) for fuzzy matching
             fingerprint  TEXT,    -- blocking key: norm_company|norm_location
             repost_of    TEXT,    -- job_url of the canonical original if this is a repost
-            applied      INTEGER DEFAULT 0,
-            applied_date TEXT
+            app_status   TEXT,    -- NULL (backlog) | applied | passed  (user's decision)
+            status_date  TEXT     -- date app_status was set
         )
     """)
     _migrate(conn)
@@ -82,21 +83,21 @@ def get_db(cfg):
 def _migrate(conn):
     """Bring an existing DB up to the current schema. Idempotent — safe to run
     every startup. Added for the v2 guide: the `bucket` column (channel routing).
-    Repost dedup (v3): content fingerprint + applied tracking columns."""
+    Repost dedup (v3): content fingerprint + application-status tracking columns."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "bucket" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN bucket INTEGER")
         print("[migrate] added column jobs.bucket")
-    repost_cols = [
+    new_cols = [
         ("norm_company", "TEXT"),
         ("norm_title", "TEXT"),
         ("fingerprint", "TEXT"),
         ("repost_of", "TEXT"),
-        ("applied", "INTEGER DEFAULT 0"),
-        ("applied_date", "TEXT"),
+        ("app_status", "TEXT"),   # NULL | applied | passed
+        ("status_date", "TEXT"),
     ]
     added = False
-    for col, decl in repost_cols:
+    for col, decl in new_cols:
         if col not in cols:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
             print(f"[migrate] added column jobs.{col}")
@@ -104,7 +105,30 @@ def _migrate(conn):
     if added:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     conn.commit()
+    _migrate_applied_to_status(conn, cols)
     _backfill_fingerprints(conn)
+
+
+def _migrate_applied_to_status(conn, cols):
+    """v3.1: the binary `applied`/`applied_date` columns became the `app_status`
+    lifecycle (NULL | applied | passed). Fold the old flag into the new column, then
+    drop the dead columns. `DROP COLUMN` needs SQLite >= 3.35; if older, the columns
+    are left in place (harmless — nothing reads them)."""
+    if "applied" not in cols:
+        return
+    conn.execute(
+        "UPDATE jobs SET app_status='applied', status_date=applied_date "
+        "WHERE applied=1 AND app_status IS NULL"
+    )
+    conn.commit()
+    print("[migrate] folded jobs.applied into jobs.app_status")
+    for dead in ("applied", "applied_date"):
+        try:
+            conn.execute(f"ALTER TABLE jobs DROP COLUMN {dead}")
+            print(f"[migrate] dropped column jobs.{dead}")
+        except sqlite3.OperationalError:
+            pass  # SQLite < 3.35: leave it, it's unused
+    conn.commit()
 
 
 def _backfill_fingerprints(conn):
@@ -622,7 +646,9 @@ def generate_report(cfg, conn, for_date=None):
     salary_filtered = [r for r in rows if r["status"] == "salary_filtered"]
 
     reposts = [r for r in rows if r["repost_of"]]
-    applied_reposts = [r for r in reposts if _repost_info(conn, r)[1]]
+    repost_status = [_repost_info(conn, r)[1] for r in reposts]
+    applied_reposts = sum(s == "applied" for s in repost_status)
+    passed_reposts = sum(s == "passed" for s in repost_status)
 
     lines = [f"# Job Pipeline Report — {d}", ""]
     lines.append(
@@ -632,9 +658,14 @@ def generate_report(cfg, conn, for_date=None):
     )
     if reposts:
         n = len(reposts)
+        extra = []
+        if applied_reposts:
+            extra.append(f"🚫 {applied_reposts} ALREADY APPLIED")
+        if passed_reposts:
+            extra.append(f"↩ {passed_reposts} previously passed")
         lines.append(
             f"↻ **{n} repost{'s' if n != 1 else ''}** of roles already seen"
-            + (f" · 🚫 {len(applied_reposts)} of those you've ALREADY APPLIED to" if applied_reposts else "")
+            + (" · " + " · ".join(extra) if extra else "")
         )
     lines.append("")
 
@@ -692,20 +723,32 @@ def generate_report(cfg, conn, for_date=None):
 
 
 def _repost_info(conn, r):
-    """For a posting, return (banner_lines, group_applied). `banner_lines` is a list
-    of markdown lines warning that this role was seen — or applied to — before under a
-    different URL. `group_applied` is True if any URL in the repost chain is applied."""
+    """For a posting, return (banner_lines, effective_status). `effective_status` is the
+    user's decision across the whole repost chain — 'applied', 'passed', or None — with
+    `applied` outranking `passed`. The row's own status counts too, so re-running `report`
+    after marking a same-day posting reflects it immediately. `banner_lines` are the
+    matching markdown lines (loud for applied, quiet for passed) plus the repost note."""
     canonical = r["repost_of"] or r["job_url"]
-    # Every row in the chain: the canonical original plus anything pointing at it.
+    # Every row in the chain: the canonical original plus anything pointing at it
+    # (includes r itself, whether r is the original or a relisting).
     group = conn.execute(
-        "SELECT job_url, first_seen, verdict, applied, applied_date FROM jobs "
+        "SELECT job_url, first_seen, verdict, app_status, status_date FROM jobs "
         "WHERE job_url=? OR repost_of=? ORDER BY first_seen ASC",
         (canonical, canonical),
     ).fetchall()
-    applied_row = next((g for g in group if g["applied"]), None)
+    applied_row = next((g for g in group if g["app_status"] == "applied"), None)
+    passed_row = next((g for g in group if g["app_status"] == "passed"), None)
+
     lines = []
     if applied_row:
-        lines.append(f"- 🚫 **ALREADY APPLIED** ({applied_row['applied_date']}) — do not re-apply")
+        status = "applied"
+        lines.append(f"- 🚫 **ALREADY APPLIED** ({applied_row['status_date']}) — do not re-apply")
+    elif passed_row:
+        status = "passed"
+        lines.append(f"- ↩ You reviewed & passed on {passed_row['status_date']} — skip unless reconsidering")
+    else:
+        status = None
+
     if r["repost_of"]:
         orig = next((g for g in group if g["job_url"] == canonical), None)
         if orig:
@@ -713,15 +756,17 @@ def _repost_info(conn, r):
             lines.append(f"- ↻ Repost — original first seen {seen}, prior verdict {orig['verdict']}")
         else:
             lines.append("- ↻ Repost of a previously seen posting")
-    return lines, bool(applied_row)
+    return lines, status
 
 
 def _repost_tag(conn, r):
     """Compact inline marker for one-liner sections (gate fails, manual review)."""
-    if not r["repost_of"]:
-        return ""
-    _, applied = _repost_info(conn, r)
-    return " · 🚫 **ALREADY APPLIED**" if applied else " · ↻ repost"
+    lines, status = _repost_info(conn, r)
+    if status == "applied":
+        return " · 🚫 **ALREADY APPLIED**"
+    if status == "passed":
+        return " · ↩ passed"
+    return " · ↻ repost" if r["repost_of"] else ""
 
 
 BUCKET_LABELS = {
@@ -765,42 +810,52 @@ def cmd_stats(conn):
         "SELECT status, verdict, COUNT(*) n FROM jobs GROUP BY status, verdict ORDER BY n DESC"
     ):
         print(f"{row['status']:>16} {str(row['verdict']):>10} {row['n']:>5}")
+    print("  -- application status --")
+    for row in conn.execute(
+        "SELECT COALESCE(app_status,'(backlog)') s, COUNT(*) n FROM jobs GROUP BY app_status ORDER BY n DESC"
+    ):
+        print(f"{row['s']:>16} {row['n']:>16}")
 
 
-def cmd_applied(conn, url):
-    """Mark a posting as applied-to. `url` may be a unique substring of the job_url.
-    Also flags the canonical original of a repost chain so the whole group is covered."""
+def cmd_mark(conn, url, status):
+    """Record the user's decision on a posting: `status` is 'applied', 'passed', or None
+    (undo). `url` may be a unique substring of the job_url. The decision propagates to the
+    canonical original of a repost chain, so the whole group is covered."""
+    label = status or "undo"
     if not url:
-        print("[applied] provide --url (full or unique substring of the job_url)", file=sys.stderr)
+        print(f"[{label}] provide --url (full or unique substring of the job_url)", file=sys.stderr)
         return
     matches = conn.execute(
         "SELECT job_url, title, company, repost_of FROM jobs WHERE job_url LIKE ?",
         (f"%{url}%",),
     ).fetchall()
     if not matches:
-        print(f"[applied] no posting matches '{url}'", file=sys.stderr)
+        print(f"[{label}] no posting matches '{url}'", file=sys.stderr)
         return
     if len(matches) > 1:
-        print(f"[applied] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
+        print(f"[{label}] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
         for m in matches:
             print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
         return
     m = matches[0]
     today = date.today().isoformat()
+    stamp = today if status else None
     targets = {m["job_url"], m["repost_of"]} - {None}
     for t in targets:
         conn.execute(
-            "UPDATE jobs SET applied=1, applied_date=? WHERE job_url=?", (today, t)
+            "UPDATE jobs SET app_status=?, status_date=? WHERE job_url=?", (status, stamp, t)
         )
     conn.commit()
-    print(f"[applied] marked applied: {m['title']} — {m['company']} ({today})")
+    verb = f"marked {status}" if status else "cleared status"
+    print(f"[{label}] {verb}: {m['title']} — {m['company']}" + (f" ({today})" if status else ""))
 
 
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
-    ap.add_argument("command", choices=["run", "report", "stats", "applied"])
+    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
-    ap.add_argument("--url", help="job_url (or unique substring) for the `applied` command")
+    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed`")
+    ap.add_argument("--undo", action="store_true", help="clear the status instead of setting it")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -815,8 +870,8 @@ def main():
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":
         cmd_stats(conn)
-    elif args.command == "applied":
-        cmd_applied(conn, args.url)
+    elif args.command in ("applied", "passed"):
+        cmd_mark(conn, args.url, None if args.undo else args.command)
 
 
 if __name__ == "__main__":

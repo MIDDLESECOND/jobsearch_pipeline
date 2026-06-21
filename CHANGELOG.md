@@ -7,6 +7,84 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-21 — repost-aware dedup + applied tracking
+
+### Why
+Dedup was purely `INSERT OR IGNORE` on the `job_url` PRIMARY KEY. LinkedIn mints a
+**fresh job ID/URL every time a role is reposted**, so a relisting of a job already in the
+database — or one already *applied to* — sailed through as a brand-new row, got
+re-evaluated, and landed in the daily report indistinguishable from a genuinely new
+opening. The concrete risk: a **double-apply** to the same role under a different URL. The
+schema had no content fingerprint and no notion of which postings had been applied to.
+
+### What changed
+- **Content fingerprint dedup.** Added a content-identity layer on top of the existing
+  URL dedup (URL `INSERT OR IGNORE` still stands). A posting is matched to a prior one via
+  a `company|location` **blocking key** plus an **exact normalized-title** match, so the
+  same role is recognized across the URL churn of a repost. Normalization folds case,
+  punctuation, company suffixes (LLC/Inc/…), and Sr/Jr→Senior/Junior, so cosmetic drift
+  still matches while a different qualifier (the role-distinguishing word) does not.
+  Reposts are **flagged, not suppressed** — they still insert and evaluate, consistent
+  with manual triage.
+- **`applied` flag + CLI.** New `python pipeline.py applied --url <full-or-substring>`
+  marks a posting applied-to (sets `applied` / `applied_date`) and propagates to the
+  canonical original of a repost chain, so the whole group is covered.
+- **Report markers.** Gates-passed jobs show a `↻ Repost — original first seen … prior
+  verdict …` line; any role whose repost chain has been applied to gets a loud
+  `🚫 ALREADY APPLIED` banner. Gate-fail / manual one-liners get a compact `↻ repost` /
+  `🚫 ALREADY APPLIED` tag. The summary header counts reposts and applied-reposts.
+
+### Decisions worth noting
+- **Match key is company + title + location** (not URL/ID). Location stays in the
+  fingerprint, so a relisting in a different city counts as a distinct role.
+- **Exact title match, not fuzzy — decided by a backtest, reversing the initial design.**
+  The first cut used fuzzy title similarity (threshold 0.72). A backtest over the real
+  2,677-row DB exposed it collapsing **1,598** pairs, the bulk of them *distinct* roles
+  sharing a generic core — `Workday Business Analyst` vs `SalesForce Business Analyst`,
+  `Legal Engineer (Corporate)` vs `(In-House)`. The cost asymmetry runs the *opposite* way
+  from the initial assumption: a false `ALREADY APPLIED` banner on a genuinely new role
+  makes you **skip a job you should apply to**, so false positives are harmful, not benign.
+  Real reposts keep the title verbatim. Switching to exact normalized-title match dropped
+  the flagged set to **212** clean, genuine relistings with no distinct-role collapses.
+- **Known residual limitation:** aggregator/placeholder "companies" (`Jobright.ai`,
+  `RemoteHunter`, `Confidential`) with empty locations and generic titles can still
+  conflate two different underlying jobs — the real employer is hidden, so no fingerprint
+  can separate them. Acceptable given flag-not-suppress + manual triage.
+- **No new dependencies.**
+
+### Where (files touched)
+- `pipeline.py` — six new columns (`norm_company`, `norm_title`, `fingerprint`,
+  `repost_of`, `applied`, `applied_date`) in `CREATE TABLE` + idempotent `_migrate()` with
+  `_backfill_fingerprints()` and a `fingerprint` index; new normalization helpers and an
+  exact-match `_find_repost()`; repost detection wired into `fetch_new_jobs()`'s insert
+  loop; new `cmd_applied()` + `applied` subcommand; report gained `_repost_info()` /
+  `_repost_tag()` and the markers above. *(Only file changed; no config/dependency edits.)*
+
+### How we verified
+- `_migrate()` ran against the existing `jobs.db`, added all six columns, and backfilled
+  fingerprints for **2,677 existing rows**.
+- **Backtest over the real DB (the decisive test).** Fuzzy matching flagged 1,598 pairs,
+  manual inspection showing most were distinct roles sharing a generic core — which drove
+  the switch to exact matching. Exact normalized-title matching flagged **212** reposts,
+  every sampled one a genuine same-title relisting (`Data Analyst @ AARATECH`,
+  `Forward Deployed Engineer … @ [an AI-recruiter agency]`, `SR HRIS ANALYST @ RemoteHunter` across days).
+- Offline `_find_repost`: an identical-title repost matched its original across
+  company-suffix drift (`Acme Corp` → `Acme Corp, LLC`), location-format drift
+  (`Austin, TX` → `Austin TX`), and punctuation drift (`…, AI` → `… - AI`); a reworded
+  title and a different company both correctly returned no match.
+- End-to-end report render showed both banners on a repost and nothing on a genuinely new
+  role; the `applied` CLI's substring resolution, chain propagation, ambiguity, and
+  no-match paths all behaved.
+
+### Migration / operational notes
+- Existing rows are backfilled with fingerprints but **not** retroactively cross-linked
+  (`repost_of` stays NULL for history), so past reports render unchanged. Repost detection
+  applies on the next `python pipeline.py run`, matching new fetches against full history.
+- `jobs.db` and `reports/` are gitignored; the in-place column migration is non-tracked
+  and non-destructive (additive columns only).
+
+---
+
 ## 2026-06-19 — v2 evaluation framework (the "50/0" fix)
 
 ### Why

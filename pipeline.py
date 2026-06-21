@@ -5,9 +5,10 @@ LinkedIn job search pipeline.
   fetch -> dedupe (SQLite) -> salary filter -> Claude gate evaluation -> daily markdown report
 
 Usage:
-  python pipeline.py run       # full cycle: fetch + evaluate + regenerate today's report
-  python pipeline.py report    # regenerate today's report only (no fetch, no API calls)
-  python pipeline.py stats     # quick database stats
+  python pipeline.py run             # full cycle: fetch + evaluate + regenerate today's report
+  python pipeline.py report          # regenerate today's report only (no fetch, no API calls)
+  python pipeline.py stats           # quick database stats
+  python pipeline.py applied --url X # mark a posting (full URL or unique substring) as applied-to
 
 Requires env var ANTHROPIC_API_KEY.
 """
@@ -63,22 +64,70 @@ def get_db(cfg):
             failed_gate  TEXT,
             fit_score    INTEGER,
             bucket       INTEGER, -- 1 | 2 | 3 (channel routing; null for gate fails)
-            eval_json    TEXT
+            eval_json    TEXT,
+            norm_company TEXT,    -- normalized company (suffix-stripped) for repost matching
+            norm_title   TEXT,    -- normalized title (abbrevs expanded) for fuzzy matching
+            fingerprint  TEXT,    -- blocking key: norm_company|norm_location
+            repost_of    TEXT,    -- job_url of the canonical original if this is a repost
+            applied      INTEGER DEFAULT 0,
+            applied_date TEXT
         )
     """)
     _migrate(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     conn.commit()
     return conn
 
 
 def _migrate(conn):
     """Bring an existing DB up to the current schema. Idempotent — safe to run
-    every startup. Added for the v2 guide: the `bucket` column (channel routing)."""
+    every startup. Added for the v2 guide: the `bucket` column (channel routing).
+    Repost dedup (v3): content fingerprint + applied tracking columns."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "bucket" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN bucket INTEGER")
         print("[migrate] added column jobs.bucket")
+    repost_cols = [
+        ("norm_company", "TEXT"),
+        ("norm_title", "TEXT"),
+        ("fingerprint", "TEXT"),
+        ("repost_of", "TEXT"),
+        ("applied", "INTEGER DEFAULT 0"),
+        ("applied_date", "TEXT"),
+    ]
+    added = False
+    for col, decl in repost_cols:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
+            print(f"[migrate] added column jobs.{col}")
+            added = True
+    if added:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     conn.commit()
+    _backfill_fingerprints(conn)
+
+
+def _backfill_fingerprints(conn):
+    """Populate norm_company / norm_title / fingerprint for rows that predate the
+    repost-dedup columns, so historical postings participate in repost detection.
+    One-time: only touches rows where fingerprint is still NULL."""
+    rows = conn.execute(
+        "SELECT job_url, company, title, location FROM jobs WHERE fingerprint IS NULL"
+    ).fetchall()
+    if not rows:
+        return
+    for r in rows:
+        conn.execute(
+            "UPDATE jobs SET norm_company=?, norm_title=?, fingerprint=? WHERE job_url=?",
+            (
+                _norm_company(r["company"]),
+                _norm_title(r["title"]),
+                _fingerprint(r["company"], r["location"]),
+                r["job_url"],
+            ),
+        )
+    conn.commit()
+    print(f"[migrate] backfilled fingerprints for {len(rows)} existing rows")
 
 
 # ---------------------------------------------------------------------- fetch
@@ -90,6 +139,7 @@ def fetch_new_jobs(cfg, conn):
     s = cfg["settings"]
     today_iso = datetime.now().isoformat(timespec="seconds")
     inserted = 0
+    reposts = 0
 
     for search in cfg["searches"]:
         name = search["name"]
@@ -122,16 +172,22 @@ def fetch_new_jobs(cfg, conn):
             desc = row.get("description")
             if not isinstance(desc, str):  # pandas yields NaN (float) for empty cells
                 desc = ""
+            company, title, location = row.get("company"), row.get("title"), row.get("location")
+            norm_company = _norm_company(company)
+            norm_title = _norm_title(title)
+            fingerprint = _fingerprint(company, location)
+            repost_of = _find_repost(conn, fingerprint, norm_title, exclude_url=url)
             cur = conn.execute(
                 """INSERT OR IGNORE INTO jobs
                    (job_url, title, company, location, search_name, tier, date_posted,
-                    first_seen, salary_min, salary_max, description, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'new')""",
+                    first_seen, salary_min, salary_max, description, status,
+                    norm_company, norm_title, fingerprint, repost_of)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?)""",
                 (
                     url,
-                    row.get("title"),
-                    row.get("company"),
-                    row.get("location"),
+                    title,
+                    company,
+                    location,
                     name,
                     search.get("tier", "primary"),
                     str(row.get("date_posted") or ""),
@@ -139,15 +195,22 @@ def fetch_new_jobs(cfg, conn):
                     _num(row.get("min_amount")),
                     _num(row.get("max_amount")),
                     desc[: s["max_description_chars"]],
+                    norm_company,
+                    norm_title,
+                    fingerprint,
+                    repost_of,
                 ),
             )
             inserted += cur.rowcount
+            if cur.rowcount and repost_of:
+                reposts += 1
+                print(f"[repost] {title} — {company} (relisting of {repost_of})")
 
         conn.commit()
         print(f"[fetch] {name}: {len(df)} returned")
         time.sleep(s["delay_between_searches"])
 
-    print(f"[fetch] {inserted} new postings inserted")
+    print(f"[fetch] {inserted} new postings inserted ({reposts} reposts of seen roles)")
     return inserted
 
 
@@ -157,6 +220,96 @@ def _num(v):
         return f if f == f else None  # NaN check
     except (TypeError, ValueError):
         return None
+
+
+# ------------------------------------------------------- repost / content dedup
+#
+# LinkedIn mints a fresh job_url every time a role is reposted, so URL-level
+# dedup (the INSERT OR IGNORE on the PRIMARY KEY) misses relistings. These
+# helpers add a content fingerprint: postings with the same normalized
+# company+location AND the same normalized title are treated as the same role
+# across URL churn — guarding against a double-apply.
+#
+# Matching is EXACT on the normalized title, not fuzzy. A backtest over the real
+# DB (2,677 rows) showed fuzzy title matching collapsing distinct roles that share
+# a generic core — 'Workday Business Analyst' vs 'SalesForce Business Analyst',
+# 'Legal Engineer (Corporate)' vs '(In-House)' — into false reposts. The cost is
+# asymmetric the wrong way: a false "ALREADY APPLIED" banner on a genuinely new
+# role makes you SKIP a job you should apply to. Real reposts keep the title
+# verbatim; a different qualifier means a different role. Normalization (case,
+# punctuation, company suffixes, Sr/Jr→Senior/Junior) absorbs the noise that
+# isn't role-distinguishing; exact match on the result is both safe and accurate.
+
+_COMPANY_SUFFIXES = re.compile(
+    r"\b(?:llc|l\.l\.c|inc|incorporated|corp|corporation|ltd|limited|co|company|"
+    r"plc|gmbh|llp|lp|holdings|group)\b\.?",
+    re.IGNORECASE,
+)
+_TITLE_ABBREVS = {
+    "sr": "senior",
+    "snr": "senior",
+    "jr": "junior",
+    "jnr": "junior",
+    "mgr": "manager",
+    "eng": "engineer",
+    "engr": "engineer",
+    "dev": "developer",
+    "ml": "machine learning",
+    "ai": "ai",  # kept as-is, listed for clarity
+}
+
+
+def _clean(s):
+    """Lowercase, strip punctuation to spaces, collapse whitespace."""
+    if not isinstance(s, str):
+        return ""
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _norm_company(s):
+    s = _clean(_COMPANY_SUFFIXES.sub(" ", s or ""))
+    return s
+
+
+def _norm_title(s):
+    toks = _clean(s).split()
+    expanded = []
+    for t in toks:
+        expanded.append(_TITLE_ABBREVS.get(t, t))
+    return " ".join(expanded).strip()
+
+
+def _norm_location(s):
+    s = _clean(s)
+    # Drop a trailing country qualifier so "Austin, TX, United States" and
+    # "Austin, TX" share a fingerprint.
+    s = re.sub(r"\b(?:united states|usa|us)\b", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _fingerprint(company, location):
+    return f"{_norm_company(company)}|{_norm_location(location)}"
+
+
+def _find_repost(conn, fingerprint, norm_title, exclude_url=None):
+    """Return the canonical job_url of an earlier posting for the same role, or None.
+    A match requires the same fingerprint (normalized company+location) AND an exact
+    normalized-title match. The canonical url is the earliest match's own repost_of
+    when set, so every relisting in a chain points at the single first posting."""
+    if not fingerprint or not norm_title:
+        return None
+    rows = conn.execute(
+        "SELECT job_url, repost_of FROM jobs "
+        "WHERE fingerprint=? AND norm_title=? ORDER BY first_seen ASC",
+        (fingerprint, norm_title),
+    ).fetchall()
+    for r in rows:
+        if exclude_url and r["job_url"] == exclude_url:
+            continue
+        return r["repost_of"] or r["job_url"]
+    return None
 
 
 # -------------------------------------------------------------- salary filter
@@ -468,12 +621,21 @@ def generate_report(cfg, conn, for_date=None):
     errors = [r for r in rows if r["status"] == "error"]
     salary_filtered = [r for r in rows if r["status"] == "salary_filtered"]
 
+    reposts = [r for r in rows if r["repost_of"]]
+    applied_reposts = [r for r in reposts if _repost_info(conn, r)[1]]
+
     lines = [f"# Job Pipeline Report — {d}", ""]
     lines.append(
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
         f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | {len(errors)} errors"
     )
+    if reposts:
+        n = len(reposts)
+        lines.append(
+            f"↻ **{n} repost{'s' if n != 1 else ''}** of roles already seen"
+            + (f" · 🚫 {len(applied_reposts)} of those you've ALREADY APPLIED to" if applied_reposts else "")
+        )
     lines.append("")
 
     lines.append("## ✅ Cold-apply (PASS) — worth your read (triage, not verdict)")
@@ -481,7 +643,7 @@ def generate_report(cfg, conn, for_date=None):
     if not passes:
         lines.append("*None today.*")
     for r in passes:
-        lines.extend(_render_scored_job(r))
+        lines.extend(_render_scored_job(r, conn))
 
     if recruiter:
         lines.append("## 🤝 Recruiter-only — route to a human, do NOT cold-apply")
@@ -493,13 +655,15 @@ def generate_report(cfg, conn, for_date=None):
         )
         lines.append("")
         for r in recruiter:
-            lines.extend(_render_scored_job(r))
+            lines.extend(_render_scored_job(r, conn))
 
     if manual:
         lines.append("## 👀 Needs manual review (no description retrieved)")
         lines.append("")
         for r in manual:
-            lines.append(f"- {r['title']} — {r['company']} ({r['location']}) · [link]({r['job_url']})")
+            lines.append(
+                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(conn, r)} · [link]({r['job_url']})"
+            )
         lines.append("")
 
     lines.append("## ❌ Gate fails")
@@ -509,7 +673,7 @@ def generate_report(cfg, conn, for_date=None):
     for r in fails:
         ev = json.loads(r["eval_json"] or "{}")
         lines.append(
-            f"- **{r['title']} — {r['company']}**: `{r['failed_gate']}` — "
+            f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}: `{r['failed_gate']}` — "
             f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
         )
     lines.append("")
@@ -527,6 +691,39 @@ def generate_report(cfg, conn, for_date=None):
     print(f"[report] written: {out_path}")
 
 
+def _repost_info(conn, r):
+    """For a posting, return (banner_lines, group_applied). `banner_lines` is a list
+    of markdown lines warning that this role was seen — or applied to — before under a
+    different URL. `group_applied` is True if any URL in the repost chain is applied."""
+    canonical = r["repost_of"] or r["job_url"]
+    # Every row in the chain: the canonical original plus anything pointing at it.
+    group = conn.execute(
+        "SELECT job_url, first_seen, verdict, applied, applied_date FROM jobs "
+        "WHERE job_url=? OR repost_of=? ORDER BY first_seen ASC",
+        (canonical, canonical),
+    ).fetchall()
+    applied_row = next((g for g in group if g["applied"]), None)
+    lines = []
+    if applied_row:
+        lines.append(f"- 🚫 **ALREADY APPLIED** ({applied_row['applied_date']}) — do not re-apply")
+    if r["repost_of"]:
+        orig = next((g for g in group if g["job_url"] == canonical), None)
+        if orig:
+            seen = (orig["first_seen"] or "")[:10]
+            lines.append(f"- ↻ Repost — original first seen {seen}, prior verdict {orig['verdict']}")
+        else:
+            lines.append("- ↻ Repost of a previously seen posting")
+    return lines, bool(applied_row)
+
+
+def _repost_tag(conn, r):
+    """Compact inline marker for one-liner sections (gate fails, manual review)."""
+    if not r["repost_of"]:
+        return ""
+    _, applied = _repost_info(conn, r)
+    return " · 🚫 **ALREADY APPLIED**" if applied else " · ↻ repost"
+
+
 BUCKET_LABELS = {
     1: "Bucket 1 — required AI depth a generation ahead (recruiter/referral)",
     2: "Bucket 2 — acceptable-tier BI/BA (cold-apply where title gap is small)",
@@ -534,12 +731,13 @@ BUCKET_LABELS = {
 }
 
 
-def _render_scored_job(r):
+def _render_scored_job(r, conn):
     """Render one gates-passed job (PASS or RECRUITER_ONLY) as report lines."""
     ev = json.loads(r["eval_json"] or "{}")
     score = r["fit_score"]
     band = "strong" if (score or 0) >= 14 else ("acceptable" if (score or 0) >= 10 else "likely pass")
     out = [f"### {r['title']} — {r['company']}  ·  **{score}/18** ({band})"]
+    out.extend(_repost_info(conn, r)[0])
     out.append(f"- {r['location']}  ·  tier: {r['tier']}  ·  search: `{r['search_name']}`")
     if r["bucket"]:
         out.append("- " + BUCKET_LABELS.get(r["bucket"], "Bucket " + str(r["bucket"])))
@@ -569,10 +767,40 @@ def cmd_stats(conn):
         print(f"{row['status']:>16} {str(row['verdict']):>10} {row['n']:>5}")
 
 
+def cmd_applied(conn, url):
+    """Mark a posting as applied-to. `url` may be a unique substring of the job_url.
+    Also flags the canonical original of a repost chain so the whole group is covered."""
+    if not url:
+        print("[applied] provide --url (full or unique substring of the job_url)", file=sys.stderr)
+        return
+    matches = conn.execute(
+        "SELECT job_url, title, company, repost_of FROM jobs WHERE job_url LIKE ?",
+        (f"%{url}%",),
+    ).fetchall()
+    if not matches:
+        print(f"[applied] no posting matches '{url}'", file=sys.stderr)
+        return
+    if len(matches) > 1:
+        print(f"[applied] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
+        for m in matches:
+            print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
+        return
+    m = matches[0]
+    today = date.today().isoformat()
+    targets = {m["job_url"], m["repost_of"]} - {None}
+    for t in targets:
+        conn.execute(
+            "UPDATE jobs SET applied=1, applied_date=? WHERE job_url=?", (today, t)
+        )
+    conn.commit()
+    print(f"[applied] marked applied: {m['title']} — {m['company']} ({today})")
+
+
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
-    ap.add_argument("command", choices=["run", "report", "stats"])
+    ap.add_argument("command", choices=["run", "report", "stats", "applied"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
+    ap.add_argument("--url", help="job_url (or unique substring) for the `applied` command")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -587,6 +815,8 @@ def main():
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":
         cmd_stats(conn)
+    elif args.command == "applied":
+        cmd_applied(conn, args.url)
 
 
 if __name__ == "__main__":

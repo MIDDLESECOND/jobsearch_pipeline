@@ -2,16 +2,21 @@
 """
 LinkedIn job search pipeline.
 
-  fetch -> dedupe (SQLite) -> salary filter -> Claude gate evaluation -> daily markdown report
+  fetch -> dedupe (SQLite) -> salary filter -> hard-requirement filters -> LLM gate
+  evaluation (Claude or DeepSeek) -> daily markdown report
 
 Usage:
-  python pipeline.py run             # full cycle: fetch + evaluate + regenerate today's report
-  python pipeline.py report          # regenerate today's report only (no fetch, no API calls)
-  python pipeline.py stats           # quick database stats
-  python pipeline.py applied --url X # mark a posting (full URL or unique substring) as applied-to
-  python pipeline.py passed  --url X # mark a posting as reviewed-and-passed (add --undo to either to clear)
+  python pipeline.py run                       # full cycle: fetch + filter + evaluate + report
+  python pipeline.py report                     # regenerate today's report only (no fetch, no API calls)
+  python pipeline.py stats                      # quick database stats
+  python pipeline.py applied --url X            # mark a posting (full URL or unique substring) as applied-to
+  python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
+  python pipeline.py reject  --url X --gate G   # override the model: mark a hard-fail it missed
+                                                #   (--pattern P also writes a reusable rule to filters.yaml)
+  # add --undo to applied / passed / reject to clear what you set
 
-Requires env var ANTHROPIC_API_KEY.
+Requires the API key for the configured provider (config.yaml): DEEPSEEK_API_KEY by default,
+or ANTHROPIC_API_KEY when provider is "anthropic".
 """
 
 import argparse
@@ -71,7 +76,10 @@ def get_db(cfg):
             fingerprint  TEXT,    -- blocking key: norm_company|norm_location
             repost_of    TEXT,    -- job_url of the canonical original if this is a repost
             app_status   TEXT,    -- NULL (backlog) | applied | passed  (user's decision)
-            status_date  TEXT     -- date app_status was set
+            status_date  TEXT,    -- date app_status was set
+            filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
+            filter_gate  TEXT,    -- which gate the override represents
+            filter_date  TEXT     -- date the override was set
         )
     """)
     _migrate(conn)
@@ -95,6 +103,9 @@ def _migrate(conn):
         ("repost_of", "TEXT"),
         ("app_status", "TEXT"),   # NULL | applied | passed
         ("status_date", "TEXT"),
+        ("filter_source", "TEXT"),  # NULL | manual | rule:<name>
+        ("filter_gate", "TEXT"),
+        ("filter_date", "TEXT"),
     ]
     added = False
     for col, decl in new_cols:
@@ -360,6 +371,85 @@ def apply_salary_filter(cfg, conn):
     conn.commit()
     if filtered:
         print(f"[salary] {filtered} postings below floor, filtered")
+
+
+# ----------------------------------------------------- hard-requirement filters
+#
+# DeepSeek Flash (the cheap default evaluator) under-filters by design — some postings
+# that miss a hard requirement (clearance, citizenship, 10+ years) slip through as PASS.
+# These deterministic, user-maintained rules catch them BEFORE the paid eval: zero cost,
+# instant, fully predictable. The companion `reject` command writes rules here as you
+# spot misses. Mirrors apply_salary_filter — a deterministic pre-eval hard rule.
+
+FILTERS_PATH = BASE_DIR / "filters.yaml"
+
+
+def load_filters():
+    """Read filters.yaml → list of rule dicts. Returns [] if the file is absent or empty."""
+    if not FILTERS_PATH.exists():
+        return []
+    with open(FILTERS_PATH, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("hard_filters") or []
+
+
+def save_filters(rules):
+    """Write the ruleset back. filters.yaml is tool-owned, so normalizing on write is fine."""
+    with open(FILTERS_PATH, "w", encoding="utf-8") as f:
+        f.write("# Hard-requirement filters — postings matching a pattern are auto-failed\n")
+        f.write("# before evaluation. A pattern is a case-insensitive substring unless it is\n")
+        f.write("# prefixed `re:`, which makes it a regex. Managed by `pipeline.py reject`;\n")
+        f.write("# safe to hand-edit. See README.\n")
+        yaml.safe_dump({"hard_filters": rules}, f, sort_keys=False, allow_unicode=True)
+
+
+def _pattern_matches(pattern, text):
+    """True if `pattern` matches `text`. `re:`-prefixed patterns are case-insensitive
+    regexes; everything else is a case-insensitive substring."""
+    if pattern.startswith("re:"):
+        try:
+            return re.search(pattern[3:], text, re.IGNORECASE) is not None
+        except re.error:
+            return False
+    return pattern.lower() in text.lower()
+
+
+def _rule_hit(rule, text):
+    """Return the first pattern in `rule` that matches `text`, or None."""
+    for pat in rule.get("any") or []:
+        if _pattern_matches(pat, text):
+            return pat
+    return None
+
+
+def apply_hard_filters(cfg, conn):
+    """Auto-fail new postings that match a user-maintained hard-requirement rule, before
+    the paid eval. Matched rows get status='rule_filtered' (skipped by evaluate_new_jobs)."""
+    rules = load_filters()
+    if not rules:
+        return
+    rows = conn.execute(
+        "SELECT job_url, title, description FROM jobs WHERE status='new'"
+    ).fetchall()
+    today = date.today().isoformat()
+    filtered = 0
+    for r in rows:
+        text = f"{r['title'] or ''}\n{r['description'] or ''}"
+        # Rules are tried in file order; the FIRST match wins and records its gate. If a
+        # posting could match several rules, reorder filters.yaml to control attribution.
+        for rule in rules:
+            if _rule_hit(rule, text):
+                conn.execute(
+                    "UPDATE jobs SET status='rule_filtered', verdict='GATE_FAIL', "
+                    "failed_gate=?, filter_source=?, filter_gate=?, filter_date=? WHERE job_url=?",
+                    (rule.get("gate", "other"), "rule:" + rule.get("name", "?"),
+                     rule.get("gate", "other"), today, r["job_url"]),
+                )
+                filtered += 1
+                break
+    conn.commit()
+    if filtered:
+        print(f"[filter] {filtered} postings auto-failed by hard rules (eval skipped, cost saved)")
 
 
 # ----------------------------------------------------------------- evaluation
@@ -638,10 +728,13 @@ def generate_report(cfg, conn, for_date=None):
         "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC", (d,)
     ).fetchall()
 
-    passes = [r for r in rows if r["verdict"] == "PASS"]
-    recruiter = [r for r in rows if r["verdict"] == "RECRUITER_ONLY"]
-    fails = [r for r in rows if r["verdict"] == "GATE_FAIL"]
-    manual = [r for r in rows if r["status"] == "needs_manual"]
+    # Hard-fail overrides (your rules + manual rejects) are pulled out first so they don't
+    # also appear under their model verdict (a manual reject keeps its original PASS verdict).
+    hard_filtered = [r for r in rows if r["filter_source"]]
+    passes = [r for r in rows if r["verdict"] == "PASS" and not r["filter_source"]]
+    recruiter = [r for r in rows if r["verdict"] == "RECRUITER_ONLY" and not r["filter_source"]]
+    fails = [r for r in rows if r["verdict"] == "GATE_FAIL" and not r["filter_source"]]
+    manual = [r for r in rows if r["status"] == "needs_manual" and not r["filter_source"]]
     errors = [r for r in rows if r["status"] == "error"]
     salary_filtered = [r for r in rows if r["status"] == "salary_filtered"]
 
@@ -654,7 +747,8 @@ def generate_report(cfg, conn, for_date=None):
     lines.append(
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
-        f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | {len(errors)} errors"
+        f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | "
+        f"{len(hard_filtered)} hard-filtered | {len(errors)} errors"
     )
     if reposts:
         n = len(reposts)
@@ -708,6 +802,26 @@ def generate_report(cfg, conn, for_date=None):
             f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
         )
     lines.append("")
+
+    if hard_filtered:
+        lines.append("## 🚫 Hard-fail filters (your rules + manual rejects)")
+        lines.append("")
+        lines.append(
+            "*Auto-failed by a `filters.yaml` rule or rejected by you — overrides the model. "
+            "Skim to catch an over-aggressive rule.*"
+        )
+        lines.append("")
+        for r in hard_filtered:
+            src = r["filter_source"] or ""
+            tag = f"`rule: {src[5:]}`" if src.startswith("rule:") else "`manual`"
+            note = " (model under-filtered)" if (src == "manual" and r["verdict"] in ("PASS", "RECRUITER_ONLY")) else ""
+            # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
+            # so a rule can't silently bury a relisting of a role you already applied to.
+            lines.append(
+                f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)} · {tag} · "
+                f"gate `{r['filter_gate']}`{note} · [link]({r['job_url']})"
+            )
+        lines.append("")
 
     if errors:
         lines.append("## ⚠️ Evaluation errors (re-run `python pipeline.py run` to retry is NOT automatic — check log)")
@@ -815,6 +929,46 @@ def cmd_stats(conn):
         "SELECT COALESCE(app_status,'(backlog)') s, COUNT(*) n FROM jobs GROUP BY app_status ORDER BY n DESC"
     ):
         print(f"{row['s']:>16} {row['n']:>16}")
+    fsrc = conn.execute(
+        "SELECT COUNT(*) n FROM jobs WHERE filter_source IS NOT NULL"
+    ).fetchone()["n"]
+    if fsrc:
+        print("  -- hard-fail overrides --")
+        for row in conn.execute(
+            "SELECT filter_source s, COUNT(*) n FROM jobs WHERE filter_source IS NOT NULL "
+            "GROUP BY filter_source ORDER BY n DESC"
+        ):
+            print(f"{row['s']:>16} {row['n']:>16}")
+
+
+def _resolve_posting(conn, url, label):
+    """Resolve a --url (full or unique substring) to a single jobs row, or None. Prints a
+    helpful message on no-match / ambiguity. Shared by the `applied`/`passed`/`reject`
+    commands so they behave identically."""
+    if not url:
+        print(f"[{label}] provide --url (full or unique substring of the job_url)", file=sys.stderr)
+        return None
+    # Escape LIKE metacharacters so a substring containing % or _ matches literally
+    # (the resolved row drives a destructive UPDATE, so a mis-match must not happen).
+    safe = url.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    matches = conn.execute(
+        "SELECT * FROM jobs WHERE job_url LIKE ? ESCAPE '\\'", (f"%{safe}%",)
+    ).fetchall()
+    if not matches:
+        print(f"[{label}] no posting matches '{url}'", file=sys.stderr)
+        return None
+    if len(matches) > 1:
+        print(f"[{label}] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
+        for m in matches:
+            print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
+        return None
+    return matches[0]
+
+
+def _chain_targets(m):
+    """The set of job_urls a per-posting decision should apply to: this posting plus the
+    canonical original of its repost chain, so a decision follows the role across relistings."""
+    return {m["job_url"], m["repost_of"]} - {None}
 
 
 def cmd_mark(conn, url, status):
@@ -822,26 +976,12 @@ def cmd_mark(conn, url, status):
     (undo). `url` may be a unique substring of the job_url. The decision propagates to the
     canonical original of a repost chain, so the whole group is covered."""
     label = status or "undo"
-    if not url:
-        print(f"[{label}] provide --url (full or unique substring of the job_url)", file=sys.stderr)
+    m = _resolve_posting(conn, url, label)
+    if m is None:
         return
-    matches = conn.execute(
-        "SELECT job_url, title, company, repost_of FROM jobs WHERE job_url LIKE ?",
-        (f"%{url}%",),
-    ).fetchall()
-    if not matches:
-        print(f"[{label}] no posting matches '{url}'", file=sys.stderr)
-        return
-    if len(matches) > 1:
-        print(f"[{label}] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
-        for m in matches:
-            print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
-        return
-    m = matches[0]
     today = date.today().isoformat()
     stamp = today if status else None
-    targets = {m["job_url"], m["repost_of"]} - {None}
-    for t in targets:
+    for t in _chain_targets(m):
         conn.execute(
             "UPDATE jobs SET app_status=?, status_date=? WHERE job_url=?", (status, stamp, t)
         )
@@ -850,12 +990,90 @@ def cmd_mark(conn, url, status):
     print(f"[{label}] {verb}: {m['title']} — {m['company']}" + (f" ({today})" if status else ""))
 
 
+def cmd_reject(conn, url, gate, pattern, note, undo):
+    """Manually correct the model: mark a posting as a hard-fail it missed (distinct from the
+    softer `passed`). `--pattern` additionally promotes the catch into a deterministic rule in
+    filters.yaml so future postings with the same requirement are auto-failed. `--undo` clears
+    the override (it does not remove any rule)."""
+    label = "reject"
+    m = _resolve_posting(conn, url, label)
+    if m is None:
+        return
+    if gate not in GATE_NAMES + ["other"]:
+        print(f"[{label}] --gate must be one of {GATE_NAMES + ['other']}", file=sys.stderr)
+        return
+
+    today = date.today().isoformat()
+    if undo:
+        for t in _chain_targets(m):
+            conn.execute(
+                "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL WHERE job_url=?",
+                (t,),
+            )
+        conn.commit()
+        print(f"[{label}] cleared override: {m['title']} — {m['company']}")
+        return
+
+    for t in _chain_targets(m):
+        # Also lift a still-'new' row out of status='new' so it isn't sent to the paid
+        # evaluator on the next run — you've already overruled it. Already-evaluated rows
+        # keep their status (the report groups them by filter_source either way).
+        conn.execute(
+            "UPDATE jobs SET filter_source='manual', filter_gate=?, filter_date=?, "
+            "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END WHERE job_url=?",
+            (gate, today, t),
+        )
+    conn.commit()
+    print(f"[{label}] rejected (gate: {gate}): {m['title']} — {m['company']} ({today})")
+
+    if pattern:
+        _add_filter_rule(conn, gate, pattern, note, m)
+
+
+def _add_filter_rule(conn, gate, pattern, note, posting):
+    """Promote a pattern into filters.yaml under the rule named for `gate`. Shows the matching
+    sentence from this posting and how many existing postings the pattern would also catch
+    (false-positive preview) before saving. De-dupes identical patterns."""
+    # False-positive preview: how many existing postings would this pattern also match?
+    rows = conn.execute("SELECT title, description FROM jobs").fetchall()
+    hits = sum(1 for r in rows if _pattern_matches(pattern, f"{r['title'] or ''}\n{r['description'] or ''}"))
+    # Show the sentence in THIS posting that the pattern matches, to sanity-check the phrase.
+    desc = posting["description"] or ""
+    snippet = next(
+        (s.strip() for s in re.split(r"(?<=[.!?\n])\s+", desc) if _pattern_matches(pattern, s)),
+        None,
+    )
+    print(f"[reject] pattern {pattern!r} → would match {hits} existing posting(s) in the DB")
+    if snippet:
+        print(f"[reject] matched here: …{snippet[:200]}…")
+
+    rules = load_filters()
+    # Match on `gate` (not `name`) so a hand-edited rule whose name differs from its gate
+    # is still extended rather than duplicated.
+    rule = next((r for r in rules if r.get("gate") == gate), None)
+    if rule is None:
+        rule = {"name": gate, "gate": gate, "note": note or "", "any": []}
+        rules.append(rule)
+    elif note and not rule.get("note"):
+        rule["note"] = note
+    if pattern in (rule.get("any") or []):
+        print(f"[reject] pattern already in rule '{gate}' — nothing to add")
+        return
+    rule.setdefault("any", []).append(pattern)
+    save_filters(rules)
+    print(f"[reject] added pattern to rule '{gate}' in {FILTERS_PATH.name} "
+          f"({len(rule['any'])} pattern(s) now)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
-    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed"])
+    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
-    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed`")
-    ap.add_argument("--undo", action="store_true", help="clear the status instead of setting it")
+    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject`")
+    ap.add_argument("--undo", action="store_true", help="clear the status/override instead of setting it")
+    ap.add_argument("--gate", default="other", help="which hard gate a `reject` represents")
+    ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
+    ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -864,6 +1082,7 @@ def main():
     if args.command == "run":
         fetch_new_jobs(cfg, conn)
         apply_salary_filter(cfg, conn)
+        apply_hard_filters(cfg, conn)
         evaluate_new_jobs(cfg, conn)
         generate_report(cfg, conn, args.date)
     elif args.command == "report":
@@ -872,6 +1091,8 @@ def main():
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):
         cmd_mark(conn, args.url, None if args.undo else args.command)
+    elif args.command == "reject":
+        cmd_reject(conn, args.url, args.gate, args.pattern, args.note, args.undo)
 
 
 if __name__ == "__main__":

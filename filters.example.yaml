@@ -1,0 +1,48 @@
+# Hard-requirement filters — deterministic, zero-cost gate checks that run BEFORE the paid
+# model eval. Any posting whose title/description matches a pattern is auto-failed
+# (status=rule_filtered, verdict=GATE_FAIL) and skipped by the evaluator, so it costs nothing.
+#
+# Use these to catch the cheap model's known blind spots — hard requirements you can't meet
+# that it tends to let through (clearance, citizenship, seniority floors, contract-only).
+#
+# A pattern is a CASE-INSENSITIVE SUBSTRING by default. Prefix it with `re:` to make it a
+# regular expression (case-insensitive), e.g. for numeric ranges.
+#
+# CAUTION: a match auto-fails the posting AND skips the (paid) eval entirely, so a too-broad
+# pattern silently discards good jobs. Test new patterns — `reject --pattern` prints how many
+# existing postings a pattern would catch before saving. Mind regex quantifiers: `10\+?` makes
+# the `+` optional, so it also matches a bare "10 years"; require the `+` if you only mean "10+".
+#
+# Grow this file as you go: `python pipeline.py reject --url <id> --gate work_auth
+# --pattern "secret clearance"` appends a pattern here and shows how many existing postings
+# it would also match first. You can also hand-edit it. Copy to filters.yaml to activate
+# (the real file is gitignored).
+#
+# `gate` should be one of the six hard gates (or `other`):
+#   years_floor | domain_requirement | role_substance | tool_requirement | work_auth | employment_type
+
+hard_filters:
+  - name: work_auth
+    gate: work_auth
+    note: "Clearance / citizenship requirements I can't meet"
+    any:
+      - "security clearance"
+      - "active clearance"
+      - "ts/sci"
+      - "top secret"
+      - "must be a u.s. citizen"
+      - "us citizenship is required"
+
+  - name: years_floor
+    gate: years_floor
+    note: "Seniority floors above my experience"
+    any:
+      - "re:\\b(1[0-9]|[2-9][0-9])\\+\\s*years"   # 10+ years and up (the + is required, so a bare "10 years" won't match)
+
+  - name: employment_type
+    gate: employment_type
+    note: "Contract / temp roles — I want permanent full-time only"
+    any:
+      - "w2 contract"
+      - "contract-to-hire"
+      - "6-month contract"

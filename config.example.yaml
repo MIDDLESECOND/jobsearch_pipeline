@@ -14,13 +14,16 @@ settings:
   results_per_search: 30
   delay_between_searches: 20   # seconds; be polite to the guest endpoint
   # Evaluator engine. Flip `provider` to switch; keep `model` consistent with it.
-  #   anthropic -> claude-sonnet-4-6  (highest quality; needs ANTHROPIC_API_KEY)
-  #   deepseek  -> deepseek-v4-flash  (much cheaper; reasoning model; needs DEEPSEEK_API_KEY)
-  provider: "anthropic"
-  model: "claude-sonnet-4-6"
+  #   deepseek  -> deepseek-v4-flash  (default; ~50x cheaper; reasoning model; needs DEEPSEEK_API_KEY)
+  #   anthropic -> claude-sonnet-4-6  (highest quality; pricier; needs ANTHROPIC_API_KEY)
+  provider: "deepseek"
+  model: "deepseek-v4-flash"
   max_description_chars: 12000
   db_path: "jobs.db"
   reports_dir: "reports"
+
+# Optional: deterministic hard-requirement filters (auto-fail postings missing a hard
+# requirement before the paid eval) live in a separate `filters.yaml` — see filters.example.yaml.
 
 # Each search is one LinkedIn query. `tier` is a free-text label surfaced in the
 # report. `job_type` and `min_salary` are optional (see the analyst examples).

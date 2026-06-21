@@ -1071,7 +1071,8 @@ def main():
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject`")
     ap.add_argument("--undo", action="store_true", help="clear the status/override instead of setting it")
-    ap.add_argument("--gate", default="other", help="which hard gate a `reject` represents")
+    ap.add_argument("--gate", default="other",
+                    help="hard gate a `reject` represents — one of: " + ", ".join(GATE_NAMES + ["other"]))
     ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
     ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule")
     args = ap.parse_args()

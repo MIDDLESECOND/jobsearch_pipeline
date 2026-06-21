@@ -7,6 +7,70 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-21 — hard-requirement filters + manual reject
+
+### Why
+DeepSeek Flash (the cheap default evaluator) **under-filters** by design — it occasionally
+passes a posting that misses a hard requirement (security clearance, US citizenship, a 10+
+year floor, contract-only). The candidate needed a way to (1) apply *their own* hard-fail
+verdict when they catch a miss, distinct from the softer `passed`, and (2) turn that catch
+into a cheap deterministic rule so the same requirement is caught automatically next time —
+without paying for a stronger model.
+
+### What changed
+- **`reject` command** — `python pipeline.py reject --url X --gate <name>` records a manual
+  hard-fail override (new `filter_source='manual'` + `filter_gate` columns). It keeps the
+  model's original verdict (so the report can flag "model under-filtered" when you overrule a
+  PASS), pulls the posting out of cold-apply, and propagates across the repost chain like
+  `applied`/`passed`. `--undo` clears it.
+- **Deterministic rules (`filters.yaml`)** — a new `apply_hard_filters` pass runs **before**
+  the paid eval (mirroring `apply_salary_filter`): any new posting whose title/description
+  matches a rule is set `status='rule_filtered'`, `verdict='GATE_FAIL'`, and **skipped by the
+  evaluator** — so it costs nothing. A pattern is a case-insensitive substring unless prefixed
+  `re:` (regex).
+- **Assisted authoring** — `reject --pattern P` promotes the catch into `filters.yaml` under
+  the gate's rule, first printing the matching sentence and **how many existing postings P
+  would also match** (false-positive preview). De-dupes identical patterns.
+- **Auditable report section** — `🚫 Hard-fail filters (your rules + manual rejects)` lists
+  rule- and manually-failed postings tagged with source + gate, kept out of the verdict
+  sections so they don't double-appear; an over-aggressive rule stays visible, not silent.
+  Summary header + `stats` gained hard-filter counts.
+
+### Decisions worth noting
+- **Rules live in a dedicated `filters.yaml`, not `config.yaml`.** The tool appends to it
+  programmatically; keeping it separate means the hand-commented `config.yaml` is never
+  rewritten. Rules carry `note`/structure as data (no YAML comments to lose on round-trip).
+- **Matcher: phrases by default, `re:` for regex.** Simple for the common case (clearance,
+  citizenship), powerful when needed (numeric year floors), no regex tax on quick edits.
+- **Pre-eval, not post-eval.** Running the deterministic filter before the model both saves
+  API spend and makes the override authoritative regardless of what the model would say.
+- **Manual reject keeps the model verdict** rather than overwriting it, so the cheap model's
+  under-filter rate stays measurable.
+
+### Where (files touched)
+- `pipeline.py` — `filter_source`/`filter_gate`/`filter_date` columns + migration;
+  `load_filters`/`save_filters`/`apply_hard_filters` and the `_pattern_matches`/`_rule_hit`
+  matchers; `reject` command with `_resolve_posting`/`_chain_targets` factored out of
+  `cmd_mark`; `apply_hard_filters` wired into the `run` sequence; report grouping + Hard-fail
+  section; `stats` breakdown.
+- `filters.example.yaml` — **new** template; `filters.yaml` gitignored.
+- `README.md` — `reject` in Commands + new "§7 Hard-fail filters".
+
+### How we verified
+- Migration added the three columns on the live `jobs.db` and was idempotent on re-run.
+- Offline: the substring + `re:` regex matchers (incl. a malformed regex → safe no-match);
+  `apply_hard_filters` flags a clearance posting (`rule_filtered` + `GATE_FAIL`) and leaves a
+  non-matching one `new`; the matched row is **excluded from the evaluator's `status='new'`
+  set** (cost short-circuit confirmed).
+- `reject` on a temp DB: manual override propagates across a repost chain, prints the
+  false-positive count + matched sentence, appends the pattern to `filters.yaml`; `--undo`
+  clears it. Report places a rule-filtered and a manually-rejected former-PASS only in the
+  Hard-fail section (PASS stays in cold-apply) with the "model under-filtered" note.
+- Regression: repost detection and `applied`/`passed` rendering unchanged alongside the new
+  override (the backtest's absolute count tracks DB growth, not a logic change).
+
+---
+
 ## 2026-06-21 — application-status lifecycle (applied / passed / backlog)
 
 ### Why

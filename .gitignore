@@ -24,6 +24,7 @@ Thumbs.db
 config.yaml
 profile.md
 evaluation_guide.md
+filters.yaml
 
 # ---- Generated / runtime data (third-party scraped content, run output) ----
 jobs.db
@@ -39,3 +40,4 @@ backtest_v2.py
 !config.example.yaml
 !profile.example.md
 !evaluation_guide.example.md
+!filters.example.yaml

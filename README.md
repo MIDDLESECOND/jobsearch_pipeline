@@ -60,10 +60,11 @@ Command Prompt) opened in the project folder. The five commands:
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
 | `applied --url X` | Mark a posting as **applied-to**. |
 | `passed --url X` | Mark a posting as **reviewed & decided no**. |
+| `reject --url X` | Override the model: mark a posting as a **hard-fail it let through**; `--pattern` also writes a reusable rule (see §7). |
 
 **`--url` takes a unique substring**, not the whole URL — the LinkedIn job id is easiest. If
 the substring matches more than one posting, the command refuses and lists them so you can be
-more specific. Add **`--undo`** to `applied`/`passed` to clear a status you set by mistake.
+more specific. Add **`--undo`** to `applied`/`passed`/`reject` to clear what you set by mistake.
 
 ```
 python pipeline.py run                         # morning fetch + report
@@ -144,6 +145,31 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
 - **No marker** = backlog (you haven't acted on it yet) — shows normally. You set the applied/
   passed states with the `applied` / `passed` commands (see Commands); the full rationale is in
   [`CHANGELOG.md`](CHANGELOG.md).
+
+There's also a **🚫 Hard-fail filters** section for postings you (or a rule) flagged as a hard
+requirement you can't meet — see §7.
+
+## 7. Hard-fail filters (catching the cheap model's misses)
+
+The default DeepSeek evaluator is cheap and deliberately **under-filters** — it occasionally
+lets through a posting you actually can't apply to (security clearance, US citizenship, a 10+
+year floor, contract-only). Two ways to handle it:
+
+- **Reject the one in front of you.** `python pipeline.py reject --url <id> --gate work_auth`
+  records *your* hard-fail verdict, pulls the posting out of cold-apply into the report's
+  **🚫 Hard-fail filters** section, and sticks across reposts. It keeps the model's original
+  verdict, so a "(model under-filtered)" note shows when you overrule a PASS.
+- **Stop it recurring.** Add `--pattern "secret clearance"` and `reject` also writes that
+  phrase into **`filters.yaml`**, a deterministic ruleset that auto-fails *future* postings
+  matching it — **before** the paid eval, so it costs nothing. Before saving, it shows the
+  matching sentence and how many existing postings the pattern would also catch (a
+  false-positive check). The `--gate` should be one of the six gates (or `other`).
+
+A pattern is a **case-insensitive substring** unless you prefix it `re:`, which makes it a
+**regex** (e.g. `re:\b1[0-9]\+? years` for 10+ years). `filters.yaml` is gitignored and
+hand-editable — copy `filters.example.yaml` to start, or just let `reject` build it as you go.
+Rule-failed and manually-rejected postings both appear in the auditable Hard-fail section so an
+over-aggressive rule can't silently bury good jobs.
 
 ## Troubleshooting
 

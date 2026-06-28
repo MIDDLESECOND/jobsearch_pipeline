@@ -155,6 +155,13 @@ def api_decision():
 
     conn = pipeline.get_db(pipeline.load_config())
     try:
+        # The decision propagates across a repost chain (cmd_mark/cmd_reject update the canonical
+        # original too). Compute that target set so the UI can update every affected card, not just
+        # the one clicked — repost_of is static, so resolving it before the write is fine.
+        row = conn.execute(
+            "SELECT job_url, repost_of FROM jobs WHERE job_url=?", (job_url,)
+        ).fetchone()
+        affected = sorted(pipeline._chain_targets(row)) if row else []
         # job_url is unique, so passing it as the CLI's "unique substring" resolves to one row
         # and reuses the exact same propagation / status logic as the command line.
         if action in ("applied", "passed"):
@@ -167,7 +174,11 @@ def api_decision():
             ok = pipeline.cmd_reject(conn, job_url, "other", None, None, True)
     finally:
         conn.close()
-    return jsonify({"ok": bool(ok), "message": "done" if ok else "no matching posting"})
+    return jsonify({
+        "ok": bool(ok),
+        "message": "done" if ok else "no matching posting",
+        "affected": affected if ok else [],
+    })
 
 
 def serve(host="127.0.0.1", port=5000):

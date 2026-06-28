@@ -254,7 +254,11 @@ async function decide(div, j, action, gate) {
       // A chain sibling sharing today's view is rare; if one is present, reload to reflect it.
       const sibling = [...list.querySelectorAll(".card")]
         .some(el => el.dataset.url !== j.job_url && affected.has(el.dataset.url));
-      if (sibling) load();
+      if (sibling) {
+        const y = window.scrollY;  // the reload rebuilds the list and resets scroll to the top
+        await load();
+        window.scrollTo(0, y);     // same cards return in the same order → restore exact position
+      }
     } else {
       // backlog / applied / passed: every affected row leaves the view → drop those cards.
       list.querySelectorAll(".card").forEach(el => { if (affected.has(el.dataset.url)) el.remove(); });

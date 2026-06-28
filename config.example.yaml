@@ -21,6 +21,10 @@ settings:
   max_description_chars: 12000
   db_path: "jobs.db"
   reports_dir: "reports"
+  # Optional: your claude.ai project for JD feedback. The triage UI's "Send to Claude" button
+  # copies a posting's description to your clipboard and opens this URL in a tab so you can paste
+  # (Ctrl+V) and run. Leave blank to just copy without opening a tab. Free under Claude Max.
+  feedback_project_url: ""
 
 # Optional: deterministic hard-requirement filters (auto-fail postings missing a hard
 # requirement before the paid eval) live in a separate `filters.yaml` — see filters.example.yaml.

@@ -104,6 +104,22 @@ It reads and writes the same `jobs.db`, makes no judgement of its own, and is lo
 `--pattern` rule-writing flow stays on the CLI (`reject --pattern`), since it shows a
 false-positive preview before saving. Stop the server with Ctrl-C.
 
+**Send to Claude.** Each card has a **Send to Claude** button that copies the posting (a short
+header plus the stored description) to your clipboard and opens your claude.ai project in a tab,
+so you just paste (Ctrl+V) and run — no opening LinkedIn and copying by hand. Set your project
+URL once in `config.yaml`:
+
+```yaml
+settings:
+  feedback_project_url: "https://claude.ai/project/XXXXXXXX"
+```
+
+Leave it blank to just copy the JD without opening a tab. Because the pipeline already stores the
+full "About the job" text, this never re-scrapes LinkedIn. The rare posting longer than
+`max_description_chars` (~2%) is marked **⚠ JD may be truncated** and the posting URL is always
+included in the copied text so you can open the original. This uses your claude.ai project (and
+its files/instructions) directly, so it's covered by your Claude plan — no API key or extra cost.
+
 ## 4. Schedule (Task Scheduler)
 
 1. Open **Task Scheduler** → **Create Task** (not "Basic Task").

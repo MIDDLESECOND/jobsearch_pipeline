@@ -51,6 +51,11 @@
   select { padding: .33rem .4rem; border: 1px solid #d0d4da; border-radius: 6px; font-size: .82rem; }
   a { color: #2563eb; }
   .empty { text-align: center; color: #889; padding: 3rem 1rem; }
+  .links { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  button.claude { background: #d97706; color: #fff; border-color: #d97706; font-size: .78rem;
+                  padding: .25rem .6rem; }
+  .trunc { font-size: .74rem; color: #b45309; }
+  .toast { font-size: .76rem; color: #166534; }
 </style>
 </head>
 <body>
@@ -69,6 +74,7 @@
 
 <script>
 const GATES = {{ gates | tojson }};
+const FEEDBACK_URL = {{ feedback_url | tojson }};
 let view = "today";
 
 const tabs = document.querySelectorAll(".tab");
@@ -132,10 +138,18 @@ function card(j) {
     ${j.one_line ? `<div class="oneline">${esc(j.one_line)}</div>` : ""}
     ${j.fit_score != null ? `<div class="scores">${scoreLine(j.score_breakdown||{})}</div>` : ""}
     ${flags}
-    <div class="meta"><a href="${esc(j.job_url)}" target="_blank" rel="noopener">Posting ↗</a></div>
+    <div class="meta links">
+      <a href="${esc(j.job_url)}" target="_blank" rel="noopener">Posting ↗</a>
+      ${j.has_description ? `<button class="claude" type="button">Send to Claude</button>` : ""}
+      ${j.truncated ? `<span class="trunc">⚠ JD may be truncated</span>` : ""}
+      <span class="toast"></span>
+    </div>
     <div class="actions"></div>
   `;
   const actions = div.querySelector(".actions");
+
+  const claudeBtn = div.querySelector(".claude");
+  if (claudeBtn) claudeBtn.addEventListener("click", () => sendToClaude(div, j.job_url));
 
   const decided = j.app_status || j.filter_source;
   if (j.app_status) {
@@ -163,6 +177,43 @@ function btn(label, cls, onClick) {
   const b = document.createElement("button");
   b.className = cls; b.textContent = label; b.addEventListener("click", onClick);
   return b;
+}
+
+async function copyText(text) {
+  // navigator.clipboard works on http://127.0.0.1 (localhost is a secure context); fall back to
+  // a hidden textarea + execCommand for older browsers.
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e2) { return false; }
+  }
+}
+
+async function sendToClaude(div, job_url) {
+  const toast = div.querySelector(".toast");
+  // Open the project tab first, synchronously, to keep the user-gesture (avoids popup blocking).
+  if (FEEDBACK_URL) window.open(FEEDBACK_URL, "claude_project");
+  toast.textContent = "Fetching JD…";
+  try {
+    const res = await fetch("/api/clip?job_url=" + encodeURIComponent(job_url));
+    if (!res.ok) { toast.textContent = "No description to copy"; return; }
+    const data = await res.json();
+    const copied = await copyText(data.text);
+    if (!copied) { toast.textContent = "Copy failed — select & copy manually"; return; }
+    toast.textContent = FEEDBACK_URL
+      ? "Copied — paste into your Claude project (Ctrl+V)"
+      : "JD copied — set settings.feedback_project_url to auto-open your project";
+  } catch (e) {
+    toast.textContent = "Error: " + e;
+  }
 }
 
 async function decide(div, job_url, action, gate) {

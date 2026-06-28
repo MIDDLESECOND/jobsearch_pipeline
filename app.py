@@ -28,8 +28,9 @@ def _band(score):
     return "strong" if s >= 14 else ("acceptable" if s >= 10 else "likely pass")
 
 
-def row_to_dict(row):
-    """Flatten a jobs row + its eval_json into the fields the UI renders."""
+def row_to_dict(row, cap):
+    """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
+    configured max_description_chars — a stored description at that length was truncated."""
     ev = {}
     try:
         ev = json.loads(row["eval_json"] or "{}")
@@ -61,10 +62,14 @@ def row_to_dict(row):
         "filter_source": row["filter_source"],
         "filter_gate": row["filter_gate"],
         "is_repost": bool(row["repost_of"]),
+        # Cheap booleans for the "Send to Claude" button — not the description text itself,
+        # so the list payload stays small.
+        "has_description": bool(row["description"]),
+        "truncated": bool(row["description"] and len(row["description"]) >= cap),
     }
 
 
-def jobs_for_view(conn, view, for_date):
+def jobs_for_view(conn, view, for_date, cap):
     """Run the query for a view and return a list of UI dicts."""
     if view == "backlog":
         # Only actionable undecided jobs — exclude GATE_FAIL, which the model already
@@ -84,23 +89,59 @@ def jobs_for_view(conn, view, for_date):
             "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC",
             (for_date,),
         ).fetchall()
-    return [row_to_dict(r) for r in rows]
+    return [row_to_dict(r, cap) for r in rows]
 
 
 @app.route("/")
 def index():
-    return render_template("index.html", gates=GATE_OPTIONS, today=date.today().isoformat())
+    cfg = pipeline.load_config()
+    return render_template(
+        "index.html",
+        gates=GATE_OPTIONS,
+        today=date.today().isoformat(),
+        feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
+    )
 
 
 @app.route("/api/jobs")
 def api_jobs():
     view = request.args.get("view", "today")
     for_date = request.args.get("date") or date.today().isoformat()
-    conn = pipeline.get_db(pipeline.load_config())
+    cfg = pipeline.load_config()
+    cap = cfg["settings"]["max_description_chars"]
+    conn = pipeline.get_db(cfg)
     try:
-        return jsonify(jobs_for_view(conn, view, for_date))
+        return jsonify(jobs_for_view(conn, view, for_date, cap))
     finally:
         conn.close()
+
+
+@app.route("/api/clip")
+def api_clip():
+    """Assemble the clipboard text for one posting (header + JD) to paste into the claude.ai
+    project. Kept off the list payload so /api/jobs stays small."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"text": "", "truncated": False}), 400
+    cfg = pipeline.load_config()
+    cap = cfg["settings"]["max_description_chars"]
+    conn = pipeline.get_db(cfg)
+    try:
+        row = conn.execute(
+            "SELECT title, company, location, description, job_url FROM jobs WHERE job_url=?",
+            (job_url,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["description"]:
+        return jsonify({"text": "", "truncated": False}), 404
+    header = (
+        f"{row['title'] or '(no title)'} — {row['company'] or '(no company)'}\n"
+        f"Location: {row['location'] or 'n/a'}\n"
+        f"Posting: {row['job_url']}\n\n"
+    )
+    text = header + row["description"]
+    return jsonify({"text": text, "truncated": len(row["description"]) >= cap})
 
 
 @app.route("/api/decision", methods=["POST"])

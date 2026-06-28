@@ -75,6 +75,7 @@
 <script>
 const GATES = {{ gates | tojson }};
 const FEEDBACK_URL = {{ feedback_url | tojson }};
+const TODAY = {{ today | tojson }};
 let view = "today";
 
 const tabs = document.querySelectorAll(".tab");
@@ -122,6 +123,7 @@ function scoreLine(b) {
 function card(j) {
   const div = document.createElement("div");
   div.className = "card";
+  div.dataset.url = j.job_url;  // lets a decision update every affected (repost-chain) card
   const salary = fmtSalary(j.salary_min, j.salary_max);
   const score = j.fit_score != null ? `<span class="score">${j.fit_score}/18</span> (${j.band})` : "";
   const verdict = j.verdict ? `<span class="verdict v-${j.verdict}">${j.verdict}</span>` : "";
@@ -153,20 +155,20 @@ function card(j) {
 
   const decided = j.app_status || j.filter_source;
   if (j.app_status) {
-    actions.appendChild(btn("Undo", "undo", () => decide(div, j.job_url, "undo_app")));
+    actions.appendChild(btn("Undo", "undo", () => decide(div, j, "undo_app")));
   } else if (j.filter_source === "manual") {
     // Only manual rejects are safe to undo here. A rule-filtered row (filter_source
     // "rule:…") stays display-only — edit filters.yaml to change the rule.
-    actions.appendChild(btn("Undo reject", "undo", () => decide(div, j.job_url, "undo_reject")));
+    actions.appendChild(btn("Undo reject", "undo", () => decide(div, j, "undo_reject")));
   }
   if (!decided) {
-    actions.appendChild(btn("Applied", "apply", () => decide(div, j.job_url, "applied")));
-    actions.appendChild(btn("Passed", "pass", () => decide(div, j.job_url, "passed")));
+    actions.appendChild(btn("Applied", "apply", () => decide(div, j, "applied")));
+    actions.appendChild(btn("Passed", "pass", () => decide(div, j, "passed")));
     const sel = document.createElement("select");
     sel.innerHTML = `<option value="">gate…</option>` + gateOpts;
     actions.appendChild(btn("Reject", "reject", () => {
       const g = sel.value || "other";
-      decide(div, j.job_url, "reject", g);
+      decide(div, j, "reject", g);
     }));
     actions.appendChild(sel);
   }
@@ -218,17 +220,48 @@ async function sendToClaude(div, job_url) {
   }
 }
 
-async function decide(div, job_url, action, gate) {
+function setCount(n) {
+  countEl.textContent = n + " posting" + (n === 1 ? "" : "s");
+}
+
+// Mirror server-side cmd_mark / cmd_reject on the local job object so we can update the card
+// without refetching the whole list.
+function patchJob(j, action, gate) {
+  if (action === "applied" || action === "passed") { j.app_status = action; j.status_date = TODAY; }
+  else if (action === "undo_app") { j.app_status = null; j.status_date = null; }
+  else if (action === "reject") { j.filter_source = "manual"; j.filter_gate = gate || "other"; }
+  else if (action === "undo_reject") { j.filter_source = null; j.filter_gate = null; }
+}
+
+async function decide(div, j, action, gate) {
+  const v = view;  // capture: the user may switch tabs while the POST is in flight
   div.classList.add("busy");
   try {
     const res = await fetch("/api/decision", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job_url, action, gate}),
+      body: JSON.stringify({job_url: j.job_url, action, gate}),
     });
     const data = await res.json();
     if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
-    load();  // refresh so the card moves to/leaves the right view
+    if (v !== view) { load(); return; }  // tab changed mid-flight — just reload the new view
+    patchJob(j, action, gate);
+    // The decision propagates across the repost chain, so more than the clicked card may change.
+    const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
+    if (v === "today") {
+      // The clicked card still belongs to today's date — re-render it in place.
+      div.replaceWith(card(j));
+      // A chain sibling sharing today's view is rare; if one is present, reload to reflect it.
+      const sibling = [...list.querySelectorAll(".card")]
+        .some(el => el.dataset.url !== j.job_url && affected.has(el.dataset.url));
+      if (sibling) load();
+    } else {
+      // backlog / applied / passed: every affected row leaves the view → drop those cards.
+      list.querySelectorAll(".card").forEach(el => { if (affected.has(el.dataset.url)) el.remove(); });
+      const n = list.querySelectorAll(".card").length;
+      setCount(n);
+      if (n === 0) list.innerHTML = `<div class="empty">Nothing here.</div>`;
+    }
   } catch (e) {
     alert("error: " + e); div.classList.remove("busy");
   }
@@ -240,7 +273,7 @@ async function load() {
   if (view === "today") params.set("date", dateInput.value);
   const res = await fetch("/api/jobs?" + params);
   const jobs = await res.json();
-  countEl.textContent = jobs.length + " posting" + (jobs.length === 1 ? "" : "s");
+  setCount(jobs.length);
   list.innerHTML = "";
   if (!jobs.length) { list.innerHTML = `<div class="empty">Nothing here.</div>`; return; }
   jobs.forEach(j => list.appendChild(card(j)));

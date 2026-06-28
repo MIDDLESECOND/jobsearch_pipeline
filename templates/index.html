@@ -199,14 +199,16 @@ async function copyText(text) {
 
 async function sendToClaude(div, job_url) {
   const toast = div.querySelector(".toast");
-  // Open the project tab first, synchronously, to keep the user-gesture (avoids popup blocking).
-  if (FEEDBACK_URL) window.open(FEEDBACK_URL, "claude_project");
   toast.textContent = "Fetching JD…";
   try {
     const res = await fetch("/api/clip?job_url=" + encodeURIComponent(job_url));
     if (!res.ok) { toast.textContent = "No description to copy"; return; }
     const data = await res.json();
+    // Copy BEFORE opening the project tab. Opening a tab moves focus to it, and a clipboard
+    // write on an unfocused document fails ("Document is not focused") — so copy while this
+    // page still has focus, then open the tab.
     const copied = await copyText(data.text);
+    if (FEEDBACK_URL) window.open(FEEDBACK_URL, "claude_project");
     if (!copied) { toast.textContent = "Copy failed — select & copy manually"; return; }
     toast.textContent = FEEDBACK_URL
       ? "Copied — paste into your Claude project (Ctrl+V)"

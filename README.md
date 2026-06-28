@@ -51,13 +51,14 @@ First run will take a few minutes (9 searches × 20s delay + evaluations). Then 
 ## 3. Commands (CLI)
 
 You drive the pipeline by typing `python pipeline.py <command>` in a terminal (PowerShell or
-Command Prompt) opened in the project folder. The five commands:
+Command Prompt) opened in the project folder. The commands:
 
 | Command | What it does |
 |---------|--------------|
 | `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. The only one that hits the network/API (costs money). |
 | `report` | Rebuild a report from the database — **free**, no fetching, no API calls. Defaults to today; `--date YYYY-MM-DD` for a past day. |
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
+| `ui` | Launch a **local web UI** for triaging postings by clicking instead of typing (see §6.1). |
 | `applied --url X` | Mark a posting as **applied-to**. |
 | `passed --url X` | Mark a posting as **reviewed & decided no**. |
 | `reject --url X` | Override the model: mark a posting as a **hard-fail it let through**; `--pattern` also writes a reusable rule (see §7). |
@@ -82,6 +83,26 @@ to refresh. Passed jobs become muted, and a future repost of anything you applie
 stays flagged (see Reading the report). Jobs you never mark stay in the backlog and keep
 showing — nothing is hidden without your say-so. Marking is also how reposts avoid a
 double-apply: an `applied` decision follows the role across every future relisting.
+
+### 6.1 The triage UI (click instead of type)
+
+If marking postings one `--url` at a time is slow, run a small local web app instead:
+
+```
+python pipeline.py ui
+```
+
+It opens `http://127.0.0.1:5000` in your browser. The page shows the same postings the report
+does, as cards with their verdict, score breakdown, bucket, flags and a link to the posting.
+Each card has **Applied** / **Passed** / **Reject** buttons (Reject has a gate dropdown), so a
+click does exactly what the matching CLI command does — including repost-chain propagation. Tabs
+switch between **Today** (with a date picker), the undecided **Backlog**, and your **Applied** /
+**Passed** history; **Undo** reverses a decision.
+
+It reads and writes the same `jobs.db`, makes no judgement of its own, and is local-only
+(single user, no login). It needs Flask — `pip install -r requirements.txt` covers it. The
+`--pattern` rule-writing flow stays on the CLI (`reject --pattern`), since it shows a
+false-positive preview before saving. Stop the server with Ctrl-C.
 
 ## 4. Schedule (Task Scheduler)
 

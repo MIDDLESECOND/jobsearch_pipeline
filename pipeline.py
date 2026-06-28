@@ -9,6 +9,7 @@ Usage:
   python pipeline.py run                       # full cycle: fetch + filter + evaluate + report
   python pipeline.py report                     # regenerate today's report only (no fetch, no API calls)
   python pipeline.py stats                      # quick database stats
+  python pipeline.py ui                         # local web UI to triage postings (applied/passed/reject)
   python pipeline.py applied --url X            # mark a posting (full URL or unique substring) as applied-to
   python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
   python pipeline.py reject  --url X --gate G   # override the model: mark a hard-fail it missed
@@ -978,7 +979,7 @@ def cmd_mark(conn, url, status):
     label = status or "undo"
     m = _resolve_posting(conn, url, label)
     if m is None:
-        return
+        return False
     today = date.today().isoformat()
     stamp = today if status else None
     for t in _chain_targets(m):
@@ -988,6 +989,7 @@ def cmd_mark(conn, url, status):
     conn.commit()
     verb = f"marked {status}" if status else "cleared status"
     print(f"[{label}] {verb}: {m['title']} — {m['company']}" + (f" ({today})" if status else ""))
+    return True
 
 
 def cmd_reject(conn, url, gate, pattern, note, undo):
@@ -998,10 +1000,10 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
     label = "reject"
     m = _resolve_posting(conn, url, label)
     if m is None:
-        return
+        return False
     if gate not in GATE_NAMES + ["other"]:
         print(f"[{label}] --gate must be one of {GATE_NAMES + ['other']}", file=sys.stderr)
-        return
+        return False
 
     today = date.today().isoformat()
     if undo:
@@ -1012,7 +1014,7 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
             )
         conn.commit()
         print(f"[{label}] cleared override: {m['title']} — {m['company']}")
-        return
+        return True
 
     for t in _chain_targets(m):
         # Also lift a still-'new' row out of status='new' so it isn't sent to the paid
@@ -1028,6 +1030,7 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
 
     if pattern:
         _add_filter_rule(conn, gate, pattern, note, m)
+    return True
 
 
 def _add_filter_rule(conn, gate, pattern, note, posting):
@@ -1067,7 +1070,7 @@ def _add_filter_rule(conn, gate, pattern, note, posting):
 
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
-    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject"])
+    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject`")
     ap.add_argument("--undo", action="store_true", help="clear the status/override instead of setting it")
@@ -1076,6 +1079,16 @@ def main():
     ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
     ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule")
     args = ap.parse_args()
+
+    if args.command == "ui":
+        # Lazy import so the core pipeline runs without Flask installed.
+        try:
+            import app
+        except ImportError:
+            print("[ui] Flask is required — run: pip install -r requirements.txt", file=sys.stderr)
+            return
+        app.serve()
+        return
 
     cfg = load_config()
     conn = get_db(cfg)

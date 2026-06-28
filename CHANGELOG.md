@@ -7,6 +7,34 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-28 — management-drift assistive flag
+
+### Why
+A day's exploration surfaced a recurring false positive: **"Program Manager" / "AI Program
+Manager"** postings that pass all six gates, max out *both* starred AI lines (the role is genuinely
+AI-adjacent), and land at 12–14/18 → PASS — yet the substance is vendor coordination, governance,
+and adoption-driving. The role is *management of* AI delivery, not *doing* it: a trajectory mismatch
+for an IC builder. Structurally the same leak as the 50/0 finding (a real screen-out hiding in
+scorecard lines with no verdict cap), here in `title_trajectory` / `learning_value`. The user
+triages passes manually and does not want these auto-hidden, so the fix surfaces rather than filters.
+
+### What changed
+- **`evaluation_guide.md` — `title_trajectory` row** gains a "Management-drift watch" clause: a
+  Program-Manager-family / coordination title with no hands-on build verbs ("architect," "build,"
+  "develop against," "integrate") in the responsibilities block scores `title_trajectory` 0–1 and
+  emits a `management-drift` flag.
+- **`evaluation_guide.md` — starred-line rules** gains a "Management-drift (assistive flag, not a
+  cap)" note documenting the pattern and that it surfaces (flag + honest `title_trajectory`) without
+  changing the verdict.
+
+### What did NOT change
+- **No verdict/routing change, no schema change, no code change.** The verdict stays PASS; the flag
+  renders as a `⚠️ management-drift` line in the report (existing `flags` plumbing). This is
+  deliberately *not* a code-enforced cap (unlike the `ai_artifact_depth` 50/0 line) until the
+  pattern proves structural over more data — at which point it can be promoted.
+
+---
+
 ## 2026-06-21 — hard-requirement filters + manual reject
 
 ### Why

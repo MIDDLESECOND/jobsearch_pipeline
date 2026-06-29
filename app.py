@@ -62,6 +62,12 @@ def row_to_dict(row, cap):
         "filter_source": row["filter_source"],
         "filter_gate": row["filter_gate"],
         "is_repost": bool(row["repost_of"]),
+        # The canonical original's decision, so the UI can derive a relisting's effective status
+        # (its own app_status is NULL — only the canonical carries the decision). Mirrors the
+        # report's _repost_info; the client recomputes "effective" after a decision (see patchJob).
+        "chain_app_status": row["c_app_status"],
+        "chain_filter_source": row["c_filter_source"],
+        "chain_status_date": row["c_status_date"],
         # Cheap booleans for the "Send to Claude" button — not the description text itself,
         # so the list payload stays small.
         "has_description": bool(row["description"]),
@@ -70,23 +76,34 @@ def row_to_dict(row, cap):
 
 
 def jobs_for_view(conn, view, for_date, cap):
-    """Run the query for a view and return a list of UI dicts."""
+    """Run the query for a view and return a list of UI dicts. Every query LEFT JOINs the
+    canonical original of a repost chain (c) so row_to_dict can read the c_* decision columns
+    uniformly and surface a relisting's effective (chain) decision."""
+    # SELECT j.*, plus the canonical's decision columns aliased for row_to_dict's chain_* passthrough.
+    cols = ("j.*, c.app_status AS c_app_status, c.status_date AS c_status_date, "
+            "c.filter_source AS c_filter_source")
+    join = " FROM jobs j LEFT JOIN jobs c ON c.job_url = j.repost_of "
     if view == "backlog":
         # Only actionable undecided jobs — exclude GATE_FAIL, which the model already
-        # hard-rejected (they'd otherwise swamp the list).
+        # hard-rejected (they'd otherwise swamp the list). Also exclude relistings whose chain
+        # is already decided (a legacy evaluated repost the skip-eval pass never retro-touched).
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE app_status IS NULL AND filter_source IS NULL "
-            "AND status='evaluated' AND verdict IN ('PASS','RECRUITER_ONLY') "
-            "ORDER BY fit_score DESC"
+            "SELECT " + cols + join +
+            "WHERE j.app_status IS NULL AND j.filter_source IS NULL "
+            "AND j.status='evaluated' AND j.verdict IN ('PASS','RECRUITER_ONLY') "
+            "AND (j.repost_of IS NULL OR (c.app_status IS NULL AND c.filter_source IS NULL)) "
+            "ORDER BY j.fit_score DESC"
         ).fetchall()
     elif view in ("applied", "passed"):
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE app_status=? ORDER BY status_date DESC, fit_score DESC",
+            "SELECT " + cols + join +
+            "WHERE j.app_status=? ORDER BY j.status_date DESC, j.fit_score DESC",
             (view,),
         ).fetchall()
     else:  # "today" (default) — postings first seen on the given date
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC",
+            "SELECT " + cols + join +
+            "WHERE substr(j.first_seen,1,10)=? ORDER BY j.fit_score DESC",
             (for_date,),
         ).fetchall()
     return [row_to_dict(r, cap) for r in rows]

@@ -103,10 +103,26 @@ function esc(s) {
     ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
+// The decision in force for a card, walking a relisting back to its canonical original (its own
+// app_status is null — only the canonical carries the decision). Own decision wins, else the
+// chain's. Mirrors pipeline's _repost_info / the server join.
+function effectiveStatus(j) {
+  if (j.app_status) return j.app_status;
+  if (j.filter_source) return "rejected";
+  if (j.chain_app_status) return j.chain_app_status;
+  if (j.chain_filter_source) return "rejected";
+  return null;
+}
+function effectiveDate(j) { return j.status_date || j.chain_status_date || ""; }
+
 function statusTag(j) {
-  if (j.app_status === "applied") return `<span class="tag applied">applied ${esc(j.status_date||"")}</span>`;
-  if (j.app_status === "passed") return `<span class="tag passed">passed ${esc(j.status_date||"")}</span>`;
-  if (j.filter_source) return `<span class="tag rejected">rejected · ${esc(j.filter_gate||"")}</span>`;
+  const eff = effectiveStatus(j);
+  const d = esc(effectiveDate(j));
+  // Loud "↻ already …" prefix when the decision is inherited from the chain, not made on this row.
+  const pre = (j.is_repost && !j.app_status && !j.filter_source) ? "↻ already " : "";
+  if (eff === "applied") return `<span class="tag applied">${pre}applied ${d}</span>`;
+  if (eff === "passed") return `<span class="tag passed">${pre}passed ${d}</span>`;
+  if (eff === "rejected") return `<span class="tag rejected">${pre}rejected${j.filter_gate ? " · " + esc(j.filter_gate) : ""}</span>`;
   return "";
 }
 
@@ -153,7 +169,9 @@ function card(j) {
   const claudeBtn = div.querySelector(".claude");
   if (claudeBtn) claudeBtn.addEventListener("click", () => sendToClaude(div, j.job_url));
 
-  const decided = j.app_status || j.filter_source;
+  // A chain-decided relisting (decision inherited from its canonical) is read-only here — undo it
+  // on the original, which lives in the Applied/Passed view.
+  const decided = effectiveStatus(j);
   if (j.app_status) {
     actions.appendChild(btn("Undo", "undo", () => decide(div, j, "undo_app")));
   } else if (j.filter_source === "manual") {
@@ -231,6 +249,13 @@ function patchJob(j, action, gate) {
   else if (action === "undo_app") { j.app_status = null; j.status_date = null; }
   else if (action === "reject") { j.filter_source = "manual"; j.filter_gate = gate || "other"; }
   else if (action === "undo_reject") { j.filter_source = null; j.filter_gate = null; }
+  // The decision propagates to the canonical original (server-side _chain_targets), so keep the
+  // cached chain_* fields in sync with this row's new decision. Otherwise the today-view in-place
+  // re-render would read a stale inherited decision (e.g. after Undo) and wrongly show the card as
+  // already-decided / read-only until a full reload.
+  j.chain_app_status = j.app_status || null;
+  j.chain_status_date = j.status_date || null;
+  j.chain_filter_source = j.filter_source || null;
 }
 
 async function decide(div, j, action, gate) {

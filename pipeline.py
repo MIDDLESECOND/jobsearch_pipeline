@@ -66,7 +66,7 @@ def get_db(cfg):
             salary_min   REAL,
             salary_max   REAL,
             description  TEXT,
-            status       TEXT,   -- new | evaluated | needs_manual | salary_filtered | error
+            status       TEXT,   -- new | evaluated | needs_manual | salary_filtered | rule_filtered | repost_decided | error
             verdict      TEXT,   -- PASS | GATE_FAIL | RECRUITER_ONLY
             failed_gate  TEXT,
             fit_score    INTEGER,
@@ -453,6 +453,21 @@ def apply_hard_filters(cfg, conn):
         print(f"[filter] {filtered} postings auto-failed by hard rules (eval skipped, cost saved)")
 
 
+def skip_decided_reposts(conn):
+    """Skip the paid eval for a relisting whose role the user has already decided. A repost links
+    to its canonical original via `repost_of`, and every applied/passed/reject decision propagates
+    to that canonical (see _chain_targets), so the canonical's decision state is authoritative for
+    the whole chain. Matched rows get status='repost_decided' (skipped by evaluate_new_jobs).
+    Mirrors apply_salary_filter / apply_hard_filters — a deterministic pre-eval pass."""
+    cur = conn.execute(
+        "UPDATE jobs SET status='repost_decided' WHERE status='new' AND repost_of IN "
+        "(SELECT job_url FROM jobs WHERE app_status IS NOT NULL OR filter_source IS NOT NULL)"
+    )
+    conn.commit()
+    if cur.rowcount:
+        print(f"[repost-skip] {cur.rowcount} relistings of already-decided roles (eval skipped, cost saved)")
+
+
 # ----------------------------------------------------------------- evaluation
 
 SYSTEM_TEMPLATE = """You are a strict job-posting evaluator for one specific candidate. \
@@ -738,6 +753,7 @@ def generate_report(cfg, conn, for_date=None):
     manual = [r for r in rows if r["status"] == "needs_manual" and not r["filter_source"]]
     errors = [r for r in rows if r["status"] == "error"]
     salary_filtered = [r for r in rows if r["status"] == "salary_filtered"]
+    repost_skipped = [r for r in rows if r["status"] == "repost_decided"]
 
     reposts = [r for r in rows if r["repost_of"]]
     repost_status = [_repost_info(conn, r)[1] for r in reposts]
@@ -749,7 +765,7 @@ def generate_report(cfg, conn, for_date=None):
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
         f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | "
-        f"{len(hard_filtered)} hard-filtered | {len(errors)} errors"
+        f"{len(hard_filtered)} hard-filtered | {len(repost_skipped)} repost-skipped | {len(errors)} errors"
     )
     if reposts:
         n = len(reposts)
@@ -1097,6 +1113,7 @@ def main():
         fetch_new_jobs(cfg, conn)
         apply_salary_filter(cfg, conn)
         apply_hard_filters(cfg, conn)
+        skip_decided_reposts(conn)
         evaluate_new_jobs(cfg, conn)
         generate_report(cfg, conn, args.date)
     elif args.command == "report":

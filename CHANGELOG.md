@@ -7,6 +7,32 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-29 — skip eval & flag relistings of already-decided roles
+
+### Why
+When LinkedIn relists a job the user has already applied to (or passed/rejected) under a fresh URL,
+dedup correctly links the relisting to its canonical original (`repost_of`), and the markdown report
+flags it via `_repost_info`. But the **web triage UI** only read each row's *own* `app_status` —
+which is NULL on a relisting (only the canonical carries the decision) — so an already-applied job
+re-surfaced as a fresh card with no warning, and the backlog query (`WHERE app_status IS NULL`) let
+it back into the triage list. These relistings also burned a *paid* eval every time, despite a known
+outcome (example: `4434454595`, a relisting of applied `4431753799`).
+
+### What changed
+- **New pre-eval pass `skip_decided_reposts` (`pipeline.py`)** — runs after the salary/hard-filter
+  passes, before the paid eval. A `status='new'` relisting whose canonical original is already
+  decided (`app_status` set, or `filter_source` set for a reject) is moved to the new terminal
+  status **`repost_decided`**, which `evaluate_new_jobs` skips. Decisions always propagate to the
+  canonical (`_chain_targets`), so the canonical is authoritative for the whole chain. Adds the
+  `repost_decided` value to the `jobs.status` enum comment (no new column).
+- **Web UI chain-effective decision (`app.py`, `templates/index.html`)** — every view query LEFT
+  JOINs the canonical original; the client derives an *effective* status (own decision, else the
+  chain's). A relisting now shows an "↻ already applied/passed/rejected" chip, renders read-only,
+  and the backlog view excludes decided-chain relistings (covering legacy rows already evaluated
+  before this change).
+
+---
+
 ## 2026-06-28 — management-drift assistive flag
 
 ### Why

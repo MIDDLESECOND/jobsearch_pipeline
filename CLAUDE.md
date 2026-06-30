@@ -4,11 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A personal LinkedIn job-search pipeline: it scrapes configured searches via python-jobspy
-(logged-out guest endpoints — **never** add login cookies), dedupes into SQLite, runs each new
-posting through an LLM "gate-check" evaluation, and writes one markdown report per day. Single-user
-CLI tool, not a service. Everything runs through `pipeline.py`; the other top-level files are
-config/data, not code.
+A personal job-search pipeline: it pulls configured searches from LinkedIn (scraped via
+python-jobspy logged-out guest endpoints — **never** add login cookies) and from the Adzuna API
+(sanctioned, free), dedupes into SQLite, runs each new posting through an LLM "gate-check"
+evaluation, and writes one markdown report per day. Single-user CLI tool, not a service. Everything
+runs through `pipeline.py`; the other top-level files are config/data, not code.
+
+Why two sources: LinkedIn is the one *scrape* target that still works — Indeed, Glassdoor,
+ZipRecruiter, and Google Jobs are all behind anti-bot walls (probed and confirmed). Adzuna is an
+official API, so it sidesteps that entirely. It's optional: active only for searches with an
+`adzuna:` block and only when `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set, else the run is LinkedIn-only.
+Adzuna rows carry only a 500-char description snippet, and ML-*predicted* salaries are dropped to NULL
+(so the deterministic salary filter never acts on a guess); both facts are flagged in the report/UI.
 
 ## Commands
 
@@ -35,7 +42,9 @@ No test framework. Validation is two scripts that read the real `jobs.db`: `pyth
 - **The `run` stage order is load-bearing.** Each stage gates on the `status` column, and only
   `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost filters (salary, then
   hard-requirement rules) run *before* the LLM and short-circuit obvious rejects. A new pre-eval
-  filter must set a non-`new` status, mirroring the existing salary/hard-filter passes.
+  filter must set a non-`new` status, mirroring the existing salary/hard-filter passes. Both fetchers
+  (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`) run first and only insert `status='new'` rows,
+  so everything downstream is source-agnostic — the `source` column is for provenance/flagging only.
 
 - **SQLite (`jobs.db`) is the single source of truth; reports are disposable derivations.** Never
   reconstruct state from `reports/` (per-day and lossy). The schema and all migrations live inline
@@ -46,7 +55,10 @@ No test framework. Validation is two scripts that read the real `jobs.db`: `pyth
   content fingerprint (normalized company+location + **exact** normalized title) catches LinkedIn
   relistings under fresh URLs. Title matching is intentionally exact, not fuzzy — a backtest showed
   fuzzy matching collapsed distinct roles sharing a generic core. User decisions
-  (applied/passed/reject) propagate across a repost chain.
+  (applied/passed/reject) propagate across a repost chain. Caveat: this fingerprint is *within-source*
+  in practice — Adzuna's location strings ("Grand Central, Manhattan") rarely match LinkedIn's
+  ("New York, NY"), so the same role cross-posted to both usually appears once per source. Loosening
+  to company+title-only was rejected: it reintroduces the false-repost class the exact match avoids.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system
@@ -68,5 +80,6 @@ No test framework. Validation is two scripts that read the real `jobs.db`: `pyth
 - **Personal files are gitignored; `*.example.*` are the committed templates** (`config.yaml`,
   `profile.md`, `evaluation_guide.md`, `filters.yaml`, `jobs.db`, `reports/`, `logs/`). When changing
   the *shape* of config or filters, update the matching `.example` file.
-- **Windows environment**: PowerShell/cmd; API keys via `setx` (`DEEPSEEK_API_KEY` default,
-  `ANTHROPIC_API_KEY` for anthropic) with a registry-read fallback.
+- **Windows environment**: PowerShell/cmd; API keys via `setx` with a registry-read fallback
+  (`_ensure_api_key`): `DEEPSEEK_API_KEY` (default eval provider) or `ANTHROPIC_API_KEY`, plus
+  `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` for the optional Adzuna source.

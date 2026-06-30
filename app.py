@@ -44,6 +44,7 @@ def row_to_dict(row, cap):
         "location": row["location"],
         "tier": row["tier"],
         "search_name": row["search_name"],
+        "source": row["source"],
         "salary_min": row["salary_min"],
         "salary_max": row["salary_max"],
         "verdict": row["verdict"],

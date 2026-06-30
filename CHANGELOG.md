@@ -7,6 +7,73 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-29 — review fixes: fail-closed 50/0, chain propagation, location normalization
+
+### Why
+A multi-agent code review (with adversarial verification of every finding) surfaced five real
+issues spanning routing, the repost-decision propagation path, fingerprinting, and the web UI.
+A second max-effort review pass over the fixes themselves caught follow-on gaps (NaN/Infinity
+slipping the cap, the `repost_decided` sibling class, rule-attribution clobbering), folded in below.
+
+### What changed
+- **50/0 cap now fails closed (`normalize_result`, `pipeline.py`).** The load-bearing
+  `ai_artifact_depth == 0` → RECRUITER_ONLY cap fired only on a literal `0`, but the output spec
+  allows a null/partial `score_breakdown`. A PASS with a missing or non-numeric depth slipped
+  through to bucket 2. It now caps unless depth is a **finite number** — None, missing, string, and
+  `NaN`/`Infinity` (which `json.loads` parses from bare tokens) all fail closed to RECRUITER_ONLY /
+  bucket 1, so the rule no longer depends on the model emitting the literal `0`.
+- **Per-posting decisions propagate across the *whole* repost chain (`_chain_targets`, `pipeline.py`).**
+  `_chain_targets` previously returned only the named row plus its canonical original, leaving
+  *sibling* relistings (R1, R3 when you decide on R2) with stale verdicts/overrides — they kept
+  surfacing in regenerated reports. It now resolves the full chain (canonical + every relisting) so
+  `applied`/`passed`/`reject` and the web UI's `affected` set cover all members. Signature changed to
+  `_chain_targets(conn, m)`.
+- **`reject --undo` no longer strands a pre-eval row, and decisions preserve rule attribution
+  (`cmd_reject`, `pipeline.py`).** The forward path lifts a still-`new` row to `rule_filtered` to skip
+  the paid eval; undo cleared the override but not the status, permanently excluding the row from
+  evaluation. Undo now restores `status='new'` for a `rule_filtered` row with no verdict. Both the
+  forward and undo passes now only touch `filter_source='manual'` rows, so propagating a manual
+  reject (or its undo) across a chain never clobbers or wipes a sibling already auto-failed by a
+  `filters.yaml` rule (`rule:<name>`).
+- **`repost_decided` siblings are now self-correcting (`skip_decided_reposts`, `pipeline.py`).** A
+  relisting skipped because its chain had a decision was never un-skipped when that decision was
+  undone — stranded at `repost_decided`, excluded from eval forever. The pass now reconciles in BOTH
+  directions: `new → repost_decided` when the chain is decided, and `repost_decided → new` when the
+  chain decision is gone, so undo (of `applied`/`passed`/`reject`) re-queues the sibling on the next run.
+- **Location normalization is comma-aware (`_norm_location`, `pipeline.py`; `_NORM_VERSION`/schema).**
+  The fingerprint missed within-LinkedIn relistings whose location label drifted ("Rochester, New
+  York Metropolitan Area" vs "Rochester, NY"). `_norm_location` now parses the raw `City, State,
+  Country` structure: drops the country, then strips metro cruft from the **trailing** (state/region)
+  component and maps a full state name → 2-letter abbrev, while leaving the city verbatim (so "New
+  York, NY" isn't mangled to "ny ny"). A one-time `_recompute_fingerprints` (gated on `PRAGMA
+  user_version`) re-derives `norm_company`/`norm_title`/`fingerprint` for all rows so old rows and new
+  inserts share a key space (`repost_of` links are left as-is). Verified against the live DB: exactly
+  one real repost group merges (an ECLARO relisting), zero over-collapse across the full table. Added
+  an `idx_repost_of` index (chain resolution is now per-decision) and raised the SQLite connect
+  `timeout` to 30s so a concurrent open during the recompute waits rather than erroring.
+  *(Metro-cruft stripping is kept to the tail on purpose: `area`/`region` are ordinary words inside
+  real city names — "Capital Region", "Bay Area" — so stripping them from city components would
+  over-collapse distinct places, the worse error. LinkedIn metro labels in the city slot ("Greater
+  Boston") are left as a known under-match.)*
+- **Web UI decision route hardened (`api_decision`, `app.py`).** The only state-changing route
+  (`POST /api/decision`) had no CSRF protection and parsed any body via `get_json(force=True)`,
+  so a cross-site `text/plain` "simple request" could corrupt triage state. It now refuses a
+  mismatched `Origin` (cross-site) and requires real `application/json` (forcing a CORS preflight a
+  cross-site page can't satisfy).
+
+### Decisions worth noting
+- **Location normalization stays conservative on state-present-vs-absent.** "New York, NY" and
+  "New York, United States" are *not* collapsed — that residual would require dropping a present
+  state, reintroducing the same-city-different-state false-repost risk the exact-match design avoids.
+  Per the documented cost asymmetry, a false "ALREADY APPLIED" (skip a real job) is the worse error,
+  so under-matching here is the intended trade.
+- The fingerprint recompute re-derives the normalized columns (`norm_company`/`norm_title`/
+  `fingerprint`) but leaves existing `repost_of` links as-is (consistent with the original backfill —
+  historical rows aren't retro-cross-linked).
+  The fix takes effect for *future* relistings matching against the recomputed history.
+
+---
+
 ## 2026-06-29 — second source: Adzuna API (multi-source provenance)
 
 ### Why

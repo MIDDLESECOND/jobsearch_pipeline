@@ -7,8 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A personal job-search pipeline: it pulls configured searches from LinkedIn (scraped via
 python-jobspy logged-out guest endpoints — **never** add login cookies) and from the Adzuna API
 (sanctioned, free), dedupes into SQLite, runs each new posting through an LLM "gate-check"
-evaluation, and writes one markdown report per day. Single-user CLI tool, not a service. Everything
-runs through `pipeline.py`; the other top-level files are config/data, not code.
+evaluation, and writes one markdown report per day. Single-user CLI tool, not a service. The CLI
+and pipeline stages live in `pipeline.py`; the repost/content-dedup and decision-chain core is
+`chain.py` (imported back into `pipeline`'s namespace, so `pipeline.X` still resolves); the local
+triage UI is `app.py` (Flask) + `templates/index.html`. Unit tests are in `tests/` (`python -m
+pytest`) — synthetic fixtures, never the real `jobs.db`. Other top-level files are config/data.
 
 Why two sources: LinkedIn is the one *scrape* target that still works — Indeed, Glassdoor,
 ZipRecruiter, and Google Jobs are all behind anti-bot walls (probed and confirmed). Adzuna is an
@@ -68,8 +71,10 @@ No test framework. Validation is two scripts that read the real `jobs.db`: `pyth
   one role by hand — earliest `first_seen` becomes canonical, the link is recorded in `repost_source`
   (`manual` / `manual:<prev_url>`) so undo can reconstruct the split — without any fuzzy matching (the
   user asserts the duplicate; code only records and propagates it). CLI and UI share one core
-  (`_dupe_resolve` / `_dupe_commit` / `_dupe_unlink`); the guard/conflict logic lives there, not in
-  either front-end.
+  (`_dupe_resolve` / `_dupe_commit` / `_dupe_unlink`) in `chain.py`; the guard/conflict logic lives
+  there, not in either front-end. **The "what has the user decided about this role's chain?" question
+  has exactly one implementation — `chain.effective_decision` — used by the report (`_repost_info`),
+  the web UI (`row_to_dict`), and the dupe conflict guard, so the three can't drift.**
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

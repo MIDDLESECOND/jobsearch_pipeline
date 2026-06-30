@@ -24,15 +24,12 @@ app = Flask(__name__)
 GATE_OPTIONS = pipeline.GATE_NAMES + ["other"]
 
 
-def _band(score):
-    """Match the report's score-band wording (pipeline._render_scored_job)."""
-    s = score or 0
-    return "strong" if s >= 14 else ("acceptable" if s >= 10 else "likely pass")
-
-
-def row_to_dict(row, cap):
+def row_to_dict(row, cap, dec):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
-    configured max_description_chars — a stored description at that length was truncated."""
+    configured max_description_chars — a stored description at that length was truncated.
+    `dec` is pipeline.effective_decision(conn, row) — the chain-wide decision, computed by the
+    same function the report and dupe guard use, so the UI's "already applied/passed/rejected"
+    marker can't drift from theirs."""
     ev = {}
     try:
         ev = json.loads(row["eval_json"] or "{}")
@@ -52,7 +49,7 @@ def row_to_dict(row, cap):
         "verdict": row["verdict"],
         "failed_gate": row["failed_gate"],
         "fit_score": row["fit_score"],
-        "band": _band(row["fit_score"]) if row["fit_score"] is not None else None,
+        "band": pipeline.score_band(row["fit_score"]) if row["fit_score"] is not None else None,
         "bucket": bucket,
         "bucket_label": pipeline.BUCKET_LABELS.get(bucket),
         # Pass the breakdown through as-stored — older rows use a different set of score
@@ -68,12 +65,14 @@ def row_to_dict(row, cap):
         # Manually-linked relisting (repost_source set) → the UI offers an "Unlink" control; an
         # auto-detected repost (repost_source NULL) is not user-unlinkable here.
         "is_manual_repost": row["repost_source"] is not None,
-        # The canonical original's decision, so the UI can derive a relisting's effective status
-        # (its own app_status is NULL — only the canonical carries the decision). Mirrors the
-        # report's _repost_info; the client recomputes "effective" after a decision (see patchJob).
-        "chain_app_status": row["c_app_status"],
-        "chain_filter_source": row["c_filter_source"],
-        "chain_status_date": row["c_status_date"],
+        # The chain-wide decision (from pipeline.effective_decision), so the UI can show a
+        # relisting's effective status even when its own app_status is NULL (only the canonical
+        # carries the decision). The client only truthiness-checks chain_filter_source, so the
+        # reject side collapses to a sentinel string. The client recomputes "effective" after a
+        # decision (see patchJob).
+        "chain_app_status": dec["app_status"],
+        "chain_filter_source": "manual" if dec["reject"] else None,
+        "chain_status_date": dec["status_date"],
         # Cheap booleans for the "Send to Claude" button — not the description text itself,
         # so the list payload stays small.
         "has_description": bool(row["description"]),
@@ -82,37 +81,39 @@ def row_to_dict(row, cap):
 
 
 def jobs_for_view(conn, view, for_date, cap):
-    """Run the query for a view and return a list of UI dicts. Every query LEFT JOINs the
-    canonical original of a repost chain (c) so row_to_dict can read the c_* decision columns
-    uniformly and surface a relisting's effective (chain) decision."""
-    # SELECT j.*, plus the canonical's decision columns aliased for row_to_dict's chain_* passthrough.
-    cols = ("j.*, c.app_status AS c_app_status, c.status_date AS c_status_date, "
-            "c.filter_source AS c_filter_source")
-    join = " FROM jobs j LEFT JOIN jobs c ON c.job_url = j.repost_of "
+    """Fetch rows for a view and return a list of UI dicts. The chain decision each row shows
+    comes from pipeline.effective_decision (one source of truth, shared with the report and the
+    dupe guard) rather than a per-view SQL join — so the three can't drift."""
     if view == "backlog":
         # Only actionable undecided jobs — exclude GATE_FAIL, which the model already
-        # hard-rejected (they'd otherwise swamp the list). Also exclude relistings whose chain
-        # is already decided (a legacy evaluated repost the skip-eval pass never retro-touched).
+        # hard-rejected (they'd otherwise swamp the list). Relistings whose chain is already
+        # decided are filtered out below, via the shared effective_decision.
         rows = conn.execute(
-            "SELECT " + cols + join +
-            "WHERE j.app_status IS NULL AND j.filter_source IS NULL "
-            "AND j.status='evaluated' AND j.verdict IN ('PASS','RECRUITER_ONLY') "
-            "AND (j.repost_of IS NULL OR (c.app_status IS NULL AND c.filter_source IS NULL)) "
-            "ORDER BY j.fit_score DESC"
+            "SELECT * FROM jobs WHERE app_status IS NULL AND filter_source IS NULL "
+            "AND status='evaluated' AND verdict IN ('PASS','RECRUITER_ONLY') "
+            "ORDER BY fit_score DESC"
         ).fetchall()
     elif view in ("applied", "passed"):
         rows = conn.execute(
-            "SELECT " + cols + join +
-            "WHERE j.app_status=? ORDER BY j.status_date DESC, j.fit_score DESC",
+            "SELECT * FROM jobs WHERE app_status=? ORDER BY status_date DESC, fit_score DESC",
             (view,),
         ).fetchall()
     else:  # "today" (default) — postings first seen on the given date
         rows = conn.execute(
-            "SELECT " + cols + join +
-            "WHERE substr(j.first_seen,1,10)=? ORDER BY j.fit_score DESC",
+            "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC",
             (for_date,),
         ).fetchall()
-    return [row_to_dict(r, cap) for r in rows]
+
+    out = []
+    for r in rows:
+        dec = pipeline.effective_decision(conn, r)
+        # Backlog: drop a relisting whose chain the user already decided (its own app_status is
+        # NULL, but the canonical/sibling carries the decision). Mirrors the old join's
+        # `j.repost_of IS NULL OR canonical-undecided` clause.
+        if view == "backlog" and r["repost_of"] is not None and (dec["app_status"] or dec["reject"]):
+            continue
+        out.append(row_to_dict(r, cap, dec))
+    return out
 
 
 @app.route("/")

@@ -219,40 +219,29 @@ def _resolve_posting(conn, url, label):
     return matches[0]
 
 
-def _chain_targets(conn, m):
-    """The set of job_urls a per-posting decision should apply to: the entire repost chain —
-    the canonical original PLUS every relisting that points at it — so a decision follows the
-    role across all relistings, not just the one named and its canonical. (Resolving only the
-    named row and its repost_of would leave sibling relistings with stale verdicts/overrides.)"""
-    canonical = m["repost_of"] or m["job_url"]
-    rows = conn.execute(
-        "SELECT job_url FROM jobs WHERE job_url=? OR repost_of=?", (canonical, canonical)
-    ).fetchall()
-    return {r["job_url"] for r in rows}
-
-
 def _chain_members(conn, canonical_url):
     """All job_urls in the flat chain rooted at `canonical_url`: the canonical itself
-    plus every relisting pointing at it. Mirrors _chain_targets but keyed by url."""
+    plus every relisting pointing at it."""
     rows = conn.execute(
         "SELECT job_url FROM jobs WHERE job_url=? OR repost_of=?", (canonical_url, canonical_url)
     ).fetchall()
     return {r["job_url"] for r in rows}
 
 
-def _chain_decision(conn, member_urls):
-    """The user's decision across a set of chain members, or None if undecided. Returns a
-    dict with the app_status side ('applied' outranks 'passed') and the reject side (any
-    filter_source), with the dates/gate to replicate when propagating. Used both to detect a
-    cross-chain conflict and to copy the surviving decision onto newly-linked members."""
-    if not member_urls:
-        return None
-    qs = ",".join("?" * len(member_urls))
-    rows = conn.execute(
-        f"SELECT app_status, status_date, filter_source, filter_gate, filter_date "
-        f"FROM jobs WHERE job_url IN ({qs})",
-        tuple(member_urls),
-    ).fetchall()
+def _chain_targets(conn, m):
+    """The set of job_urls a per-posting decision should apply to: the entire repost chain of row
+    `m` — its canonical original PLUS every relisting pointing at it — so a decision follows the
+    role across all relistings, not just the one named. (Resolving only the named row and its
+    repost_of would leave sibling relistings with stale verdicts/overrides.) Same set as
+    _chain_members, keyed by a row rather than a canonical url."""
+    return _chain_members(conn, m["repost_of"] or m["job_url"])
+
+
+def _decide(rows):
+    """Reduce a set of chain-member rows to the user's decision dict, or None if undecided.
+    PURE (no DB). Rows must carry app_status, status_date, filter_source, filter_gate, filter_date.
+    'applied' outranks 'passed'; the reject side is any member with a filter_source. Shared by
+    _chain_decision and effective_decision so the reduction logic lives once."""
     applied = next((r for r in rows if r["app_status"] == "applied"), None)
     passed = next((r for r in rows if r["app_status"] == "passed"), None)
     rej = next((r for r in rows if r["filter_source"]), None)
@@ -266,6 +255,22 @@ def _chain_decision(conn, member_urls):
         "filter_gate": rej["filter_gate"] if rej else None,
         "filter_date": rej["filter_date"] if rej else None,
     }
+
+
+def _chain_decision(conn, member_urls):
+    """The user's decision across an arbitrary set of chain members, or None if undecided. Used to
+    detect a cross-chain conflict and to copy the surviving decision onto newly-linked members
+    (where the member set isn't a single canonical-rooted chain, so it can't share
+    effective_decision's one-query path)."""
+    if not member_urls:
+        return None
+    qs = ",".join("?" * len(member_urls))
+    rows = conn.execute(
+        f"SELECT app_status, status_date, filter_source, filter_gate, filter_date "
+        f"FROM jobs WHERE job_url IN ({qs})",
+        tuple(member_urls),
+    ).fetchall()
+    return _decide(rows)
 
 
 def _decision_sig(dec):
@@ -301,10 +306,18 @@ def effective_decision(conn, row):
       original_verdict      the canonical original's model verdict, or None
     """
     canonical_url = row["repost_of"] or row["job_url"]
-    dec = _chain_decision(conn, _chain_members(conn, canonical_url)) or {}
-    canon = conn.execute(
-        "SELECT first_seen, verdict FROM jobs WHERE job_url=?", (canonical_url,)
-    ).fetchone()
+    # One query for the whole chain: fetch every member row with the columns _decide needs PLUS the
+    # canonical's first_seen/verdict for the repost note (the canonical is itself a member). Replaces
+    # the old three-query path (_chain_members + _chain_decision + a separate canonical SELECT).
+    rows = conn.execute(
+        "SELECT job_url, first_seen, verdict, app_status, status_date, "
+        "filter_source, filter_gate, filter_date FROM jobs WHERE job_url=? OR repost_of=?",
+        (canonical_url, canonical_url),
+    ).fetchall()
+    dec = _decide(rows) or {}
+    # The canonical's own row (None only if repost_of points at a row that doesn't exist — an
+    # orphaned manual edit; original_* then stay None, as before).
+    canon = next((r for r in rows if r["job_url"] == canonical_url), None)
     return {
         "app_status": dec.get("app_status"),
         "status_date": dec.get("status_date"),

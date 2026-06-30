@@ -33,6 +33,12 @@ def test_company_none_is_empty():
     assert pipeline._norm_company(None) == ""
 
 
+def test_company_nan_is_empty():
+    # pandas yields float NaN for an empty company cell; NaN is truthy, so the regex sub
+    # must not run on it (would TypeError). Same intent as None -> "".
+    assert pipeline._norm_company(float("nan")) == ""
+
+
 # ----- _norm_title -------------------------------------------------------------
 
 def test_title_abbrevs_expanded():

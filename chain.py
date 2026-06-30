@@ -65,7 +65,11 @@ def _clean(s):
 
 
 def _norm_company(s):
-    s = _clean(_COMPANY_SUFFIXES.sub(" ", s or ""))
+    # Guard non-str BEFORE the regex sub: pandas yields float NaN for an empty company cell
+    # (as it does for description — see fetch.py), and NaN is truthy, so `s or ""` would keep
+    # it and _COMPANY_SUFFIXES.sub() would TypeError on a float. _clean()'s own isinstance
+    # guard runs too late (after the sub). Mirrors _norm_location's non-str -> "".
+    s = _clean(_COMPANY_SUFFIXES.sub(" ", s if isinstance(s, str) else ""))
     return s
 
 
@@ -170,6 +174,13 @@ def skip_decided_reposts(conn):
     # relisting of a decided chain is skipped, and a previously-skipped relisting whose chain
     # decision was since undone returns to 'new' to be (re-)evaluated. Without the reverse pass
     # an undo would strand the sibling at 'repost_decided' forever (never re-evaluated).
+    # Keyed off the canonical (repost_of) only, which is sound for the decisions this is meant to
+    # propagate: applied/passed/manual-reject all write chain-wide (incl. the canonical) via the
+    # propagate_* helpers, so the canonical is authoritative for them. NOT chain-wide for the
+    # deterministic rule filters — apply_hard_filters stamps filter_source on the single matched
+    # row only — so a rule-rejected NON-canonical relisting can leave its canonical "undecided"
+    # here while effective_decision (chain-wide) reports the role rejected. Accepted: the only cost
+    # is one extra eval on a later relisting whose own text didn't re-trip the rule; no wrong verdict.
     decided = ("(SELECT job_url FROM jobs WHERE app_status IS NOT NULL "
                "OR filter_source IS NOT NULL)")
     cur = conn.execute(

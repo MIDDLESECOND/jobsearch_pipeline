@@ -94,7 +94,12 @@ def normalize_result(result):
         verdict = "GATE_FAIL"
 
     if verdict in ("PASS", "RECRUITER_ONLY"):
-        bd = result.get("score_breakdown") or {}
+        # Guard the CONTAINER type, not just the depth value: the model can emit
+        # score_breakdown as a non-dict (list/string/number), and bd.get() would then
+        # AttributeError. This runs OUTSIDE the eval retry try/except, so an unguarded
+        # throw aborts the whole batch, not one row — fail closed to {} instead.
+        bd = result.get("score_breakdown")
+        bd = bd if isinstance(bd, dict) else {}
         depth = bd.get("ai_artifact_depth")
         # The 50/0 cap is load-bearing and must not depend on the model emitting a
         # literal 0: the output spec allows a null/partial score_breakdown, so any depth

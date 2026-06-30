@@ -7,6 +7,43 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-30 — manual duplicate linking (`dupe` command)
+
+### Why
+`_find_repost` only links reposts at fetch time, and only on an exact normalized company+location+title
+match — by design conservative. It misses a relisting whose title/location drifted, and (in practice)
+the same role cross-posted to Adzuna vs LinkedIn, whose location strings never normalize alike. When the
+user spotted such a duplicate there was no retroactive fix: marking each posting separately didn't
+propagate decisions, didn't eval-skip the dupe, and didn't flag them as one role. The only recourse was
+a raw `UPDATE jobs SET repost_of=...`.
+
+### What changed
+- **New `dupe` command (`cmd_dupe`, `pipeline.py`).** `pipeline.py dupe --url A --of B [--yes] [--undo]`
+  links two existing rows as the same role, reusing the existing chain machinery (`repost_of` +
+  `_chain_targets` + `skip_decided_reposts`). Adds **no** fuzzy matching and does **not** loosen the
+  fingerprint — the user asserts the duplicate; the code only records and propagates it.
+  - **Canonical = earliest `first_seen`** (tie-break on `job_url`); the other side is repointed under it.
+  - **Repoints the whole sub-chain.** If the merged-in side already owned relistings, every one is
+    repointed to the new canonical — the flat one-level chain model (`_chain_targets`) would orphan a
+    child left pointing at the demoted original.
+  - **Conflict guard.** If both sides are already decided *differently* (`applied`/`passed`/reject gate),
+    it aborts rather than overwriting one — no silent data loss.
+  - **Decision propagation.** A surviving decision is copied across the unified chain preserving the
+    original `status_date`/`filter_date` (the one thing `cmd_mark`/`cmd_reject` can't do after the fact),
+    then `skip_decided_reposts` eval-skips any still-`new` member.
+  - **Confirmation preview** before commit (skippable with `--yes`; non-interactive stdin *or* Ctrl-C
+    fails safe to "no") — a wrong merge buries a real job under another role's decision.
+  - **Nested-merge guard.** The `manual:<prev>` encoding is single-level, so re-merging a chain that
+    already holds a manual link would strand the inner link (un-undoable). `dupe` refuses and names the
+    inner link(s) to undo first.
+- **New `repost_source` column (schema + inline migration, `pipeline.py`).** `NULL` = auto-detected,
+  `'manual'` = user-linked original, `'manual:<prev_url>'` = user-linked relisting with its prior parent
+  encoded so `--undo` reconstructs the original two chains. Additive migration; existing rows backfill NULL.
+- **Report/UI unchanged** — both already render off `repost_of`, so a manual link surfaces with the same
+  `↻ repost` / ALREADY APPLIED treatment as an auto-detected one.
+
+---
+
 ## 2026-06-29 — review fixes: fail-closed 50/0, chain propagation, location normalization
 
 ### Why

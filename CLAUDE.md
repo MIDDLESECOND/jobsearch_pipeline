@@ -30,6 +30,10 @@ python pipeline.py stats                  # DB counts
 python pipeline.py applied --url <id> [--undo]
 python pipeline.py passed  --url <id> [--undo]
 python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
+
+# Manually link a duplicate the fingerprint missed (drifted title, or LinkedIn<->Adzuna cross-post).
+# Earliest-first_seen posting becomes canonical; any decision propagates across the merged chain:
+python pipeline.py dupe    --url <id> --of <other-id> [--yes] [--undo]
 ```
 
 No test framework. Validation is two scripts that read the real `jobs.db`: `python backtest_v2.py`
@@ -59,6 +63,10 @@ No test framework. Validation is two scripts that read the real `jobs.db`: `pyth
   in practice — Adzuna's location strings ("Grand Central, Manhattan") rarely match LinkedIn's
   ("New York, NY"), so the same role cross-posted to both usually appears once per source. Loosening
   to company+title-only was rejected: it reintroduces the false-repost class the exact match avoids.
+  The manual escape hatch for a miss is `pipeline.py dupe --url A --of B` (`cmd_dupe`): it links two
+  existing rows as one role by hand — earliest `first_seen` becomes canonical, the link is recorded
+  in `repost_source` (`manual` / `manual:<prev_url>`) so `--undo` can reconstruct the split — without
+  any fuzzy matching (the user asserts the duplicate; code only records and propagates it).
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

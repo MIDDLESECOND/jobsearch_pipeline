@@ -7,11 +7,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A personal job-search pipeline: it pulls configured searches from LinkedIn (scraped via
 python-jobspy logged-out guest endpoints — **never** add login cookies) and from the Adzuna API
 (sanctioned, free), dedupes into SQLite, runs each new posting through an LLM "gate-check"
-evaluation, and writes one markdown report per day. Single-user CLI tool, not a service. The CLI
-and pipeline stages live in `pipeline.py`; the repost/content-dedup and decision-chain core is
-`chain.py` (imported back into `pipeline`'s namespace, so `pipeline.X` still resolves); the local
-triage UI is `app.py` (Flask) + `templates/index.html`. Unit tests are in `tests/` (`python -m
-pytest`) — synthetic fixtures, never the real `jobs.db`. Other top-level files are config/data.
+evaluation, and writes one markdown report per day. Single-user CLI tool, not a service.
+
+**Module layout** (a one-way DAG; `pipeline.py` re-imports the public names from each into its own
+namespace, so every `pipeline.X` reference from `app.py` / the tests / the validation scripts keeps
+resolving):
+- `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
+  `effective_decision`, propagation). Imports stdlib only.
+- `core.py` — paths, the cross-cutting constants, `load_config`, the SQLite open/schema/**migrations**,
+  and `_ensure_api_key`. The foundation; imports only `chain`.
+- `fetch.py` — the two sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API).
+- `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
+- `filters.py` — the deterministic pre-eval salary + hard-requirement filters.
+- `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
+- `pipeline.py` — the CLI/orchestrator (`run` stage order + the `cmd_*` decision commands + `main`).
+- `app.py` (Flask) + `templates/index.html` — the local triage UI.
+
+Unit tests are in `tests/` (`python -m pytest`) — synthetic fixtures, never the real `jobs.db`.
+Other top-level files are config/data.
 
 Why two sources: LinkedIn is the one *scrape* target that still works — Indeed, Glassdoor,
 ZipRecruiter, and Google Jobs are all behind anti-bot walls (probed and confirmed). Adzuna is an

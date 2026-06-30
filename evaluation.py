@@ -11,6 +11,7 @@ Imports only core (paths, constants, the API-key resolver).
 import json
 import math
 import re
+import sys
 import time
 
 from core import PROFILE_PATH, GUIDE_PATH, GATE_NAMES, VERDICTS, _ensure_api_key

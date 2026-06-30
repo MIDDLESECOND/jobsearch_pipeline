@@ -27,10 +27,8 @@ from datetime import date
 
 # The foundation (paths, cross-cutting constants, config, the DB open/schema/migration path, the
 # API-key resolver) lives in core.py; the repost/content-dedup + decision-chain core in chain.py.
-# Both are re-imported into this module's namespace so the pipeline-stage code here — and every
-# `pipeline.X` reference from app.py / the tests / the validation scripts — keeps working unchanged.
-import chain  # noqa: E402
-import core   # noqa: E402,F401
+# Their public names are re-imported into this module's namespace so the pipeline-stage code here —
+# and every `pipeline.X` reference from app.py / the tests / the validation scripts — keeps working.
 from core import (  # noqa: E402,F401
     BASE_DIR, CONFIG_PATH, PROFILE_PATH, GUIDE_PATH,
     GATE_NAMES, SCORE_DIMS, VERDICTS,

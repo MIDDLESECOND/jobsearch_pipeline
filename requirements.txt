@@ -3,3 +3,4 @@ anthropic>=0.40.0
 pyyaml>=6.0
 flask>=3.0
 pytest>=8.0          # unit tests in tests/ — run: python -m pytest
+pyflakes>=3.0        # static undefined-name gate (tests/test_no_undefined_names.py)

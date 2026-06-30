@@ -52,10 +52,15 @@ python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
 python pipeline.py dupe    --url <id> --of <other-id> [--yes] [--undo]
 ```
 
-No test framework. Validation is two scripts that read the real `jobs.db`: `python backtest_v2.py`
-(asserts expected verdicts on known postings — the eval-framework regression guard) and
-`python compare_models.py` (cross-model comparison → `compare_results.json`). Scheduling is
-`run_pipeline.bat` via Windows Task Scheduler.
+Tests: `python -m pytest` runs the unit suite in `tests/` — synthetic in-memory fixtures over the
+pure logic (normalization, fingerprint/repost, the 50/0 routing cap, filters, the chain/dupe
+machinery), never the real `jobs.db`. It includes `test_no_undefined_names.py`, a pyflakes gate that
+fails on any undefined name in a module — the cheap guard for the extraction-refactor footgun where
+a moved function references a name its new file forgot to import (a NameError on a path the network
+tests can't reach). Two extra scripts validate against the real DB: `python backtest_v2.py` (asserts
+expected verdicts on known postings — the eval-framework regression guard) and `python
+compare_models.py` (cross-model comparison → `compare_results.json`). Scheduling is `run_pipeline.bat`
+via Windows Task Scheduler.
 
 ## Architecture invariants (the non-obvious parts)
 

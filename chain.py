@@ -317,6 +317,73 @@ def effective_decision(conn, row):
     }
 
 
+# ----------------------------------------------- chain writes (decision propagation)
+#
+# A per-posting decision applies to the whole repost chain, not just the named row. These three
+# functions own those writes so the SET clauses — and the load-bearing status='new' -> 'rule_filtered'
+# lift on a reject — live in ONE place. cmd_mark, cmd_reject, and _dupe_commit all route through
+# them, so the write paths can't drift the way they did when each had its own inline UPDATE.
+# (The read counterpart is effective_decision; callers commit.)
+
+# SET clause for a manual hard-fail override: stamp 'manual' + attribution, and lift a still-'new'
+# row to 'rule_filtered' so the next run's paid eval skips it (an already-evaluated row keeps its
+# status — the report groups by filter_source either way). Two placeholders: (gate, date).
+_REJECT_SET = ("filter_source='manual', filter_gate=?, filter_date=?, "
+               "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END")
+
+
+def propagate_app_status(conn, member_urls, status, status_date):
+    """Set the user's applied/passed decision (or clear it, status=None) across every member of a
+    repost chain, so the decision follows the role across all relistings. Shared by cmd_mark and
+    the dupe merge."""
+    members = set(member_urls)
+    if not members:
+        return
+    qs = ",".join("?" * len(members))
+    conn.execute(
+        f"UPDATE jobs SET app_status=?, status_date=? WHERE job_url IN ({qs})",
+        (status, status_date, *members),
+    )
+
+
+def propagate_reject(conn, member_urls, gate, date, force_url=None, overwrite_manual=False):
+    """Stamp the manual hard-fail override across a chain, with the 'don't clobber a sibling's
+    rule:<name> attribution' guard in one place.
+      force_url         a url stamped unconditionally — the explicitly rejected row, re-attributed
+                        even if a filters.yaml rule had auto-failed it (None in the merge case).
+      overwrite_manual  whether an existing filter_source='manual' may be overwritten: True for a
+                        direct reject re-asserting on siblings; False for a merge, which leaves ANY
+                        prior attribution (manual or rule) intact and only fills in un-attributed rows."""
+    members = set(member_urls)
+    if force_url is not None:
+        conn.execute(f"UPDATE jobs SET {_REJECT_SET} WHERE job_url=?", (gate, date, force_url))
+        members.discard(force_url)
+    if members:
+        qs = ",".join("?" * len(members))
+        guard = "filter_source IS NULL" + (" OR filter_source='manual'" if overwrite_manual else "")
+        conn.execute(
+            f"UPDATE jobs SET {_REJECT_SET} WHERE job_url IN ({qs}) AND ({guard})",
+            (gate, date, *members),
+        )
+
+
+def clear_reject(conn, member_urls):
+    """Undo a manual reject across a chain: clear ONLY filter_source='manual' rows (a sibling
+    auto-failed by a filters.yaml rule keeps its 'rule:<name>'), and restore status='new' for a row
+    the reject had lifted out of 'new' before it was ever evaluated (rule_filtered + no verdict), so
+    it isn't permanently excluded from the eval stage."""
+    members = set(member_urls)
+    if not members:
+        return
+    qs = ",".join("?" * len(members))
+    conn.execute(
+        "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL, "
+        "status=CASE WHEN status='rule_filtered' AND verdict IS NULL THEN 'new' ELSE status END "
+        f"WHERE job_url IN ({qs}) AND filter_source='manual'",
+        tuple(members),
+    )
+
+
 # ------------------------------------------------------- manual repost linking
 #
 # `_find_repost` only links reposts at fetch time, and only when normalized
@@ -405,21 +472,13 @@ def _dupe_commit(conn, plan):
 
     if dec:
         all_members = winner_members | loser_members
-        qs = ",".join("?" * len(all_members))
         if dec["app_status"]:
-            conn.execute(
-                f"UPDATE jobs SET app_status=?, status_date=? WHERE job_url IN ({qs})",
-                (dec["app_status"], dec["status_date"], *all_members),
-            )
+            propagate_app_status(conn, all_members, dec["app_status"], dec["status_date"])
         if dec["reject"]:
-            # Stamp only members without an attribution yet — don't clobber a sibling's rule:<name>
-            # (mirrors cmd_reject's propagation guard).
-            conn.execute(
-                f"UPDATE jobs SET filter_source='manual', filter_gate=?, filter_date=?, "
-                f"status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END "
-                f"WHERE job_url IN ({qs}) AND filter_source IS NULL",
-                (dec["filter_gate"], dec["filter_date"], *all_members),
-            )
+            # Merge: fill in only members with no attribution yet (overwrite_manual=False) — leave
+            # any existing manual/rule attribution intact.
+            propagate_reject(conn, all_members, dec["filter_gate"], dec["filter_date"],
+                             overwrite_manual=False)
     conn.commit()
     skip_decided_reposts(conn)  # eval-skip any still-'new' member now under a decided canonical
     return sorted(winner_members | loser_members)

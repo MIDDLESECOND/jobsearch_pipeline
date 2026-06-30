@@ -77,6 +77,18 @@ def test_cmd_reject_does_not_clobber_a_rule_sibling(conn):
     assert rows["r1"] == "rule:clearance"   # sibling's rule attribution preserved
 
 
+def test_cmd_reject_lifts_new_row_and_undo_restores_it(conn):
+    # A still-'new' row rejected before eval is lifted to 'rule_filtered'; undo returns it to 'new'
+    # so it isn't permanently excluded from the eval stage.
+    make_job(conn, job_url="c", status="new", verdict=None, filter_source=None)
+    pipeline.cmd_reject(conn, "c", "work_auth", None, None, False)
+    row = conn.execute("SELECT status, filter_source FROM jobs WHERE job_url='c'").fetchone()
+    assert (row["status"], row["filter_source"]) == ("rule_filtered", "manual")
+    pipeline.cmd_reject(conn, "c", "work_auth", None, None, True)  # undo
+    row = conn.execute("SELECT status, filter_source FROM jobs WHERE job_url='c'").fetchone()
+    assert (row["status"], row["filter_source"]) == ("new", None)
+
+
 # ----- skip_decided_reposts (forward + reverse reconcile) ----------------------
 
 def test_skip_decided_reposts_skips_new_relisting_of_decided_role(conn):
@@ -178,3 +190,22 @@ def test_dupe_commit_links_and_propagates_then_unlink_restores(conn):
     late = conn.execute("SELECT * FROM jobs WHERE job_url='late'").fetchone()
     assert late["repost_of"] is None
     assert late["repost_source"] is None
+
+
+def test_dupe_merge_propagates_reject_without_clobbering_rule(conn):
+    # Merge a rejected chain into an undecided one: the un-attributed members get 'manual', but a
+    # member already auto-failed by a filters.yaml rule keeps its 'rule:<name>' (overwrite_manual=False).
+    make_job(conn, job_url="early", first_seen="2026-06-01T00:00:00",
+             filter_source="manual", filter_gate="work_auth", filter_date="2026-06-01")
+    make_job(conn, job_url="late", first_seen="2026-06-05T00:00:00", filter_source=None)
+    make_job(conn, job_url="late_rule", repost_of="late", filter_source="rule:clearance",
+             filter_gate="work_auth")
+
+    plan, err = pipeline._dupe_resolve(conn, "late", "early")
+    assert err is None
+    pipeline._dupe_commit(conn, plan)
+
+    rows = {r["job_url"]: r["filter_source"]
+            for r in conn.execute("SELECT job_url, filter_source FROM jobs")}
+    assert rows["late"] == "manual"            # was un-attributed → filled in by the merge
+    assert rows["late_rule"] == "rule:clearance"  # rule attribution left intact

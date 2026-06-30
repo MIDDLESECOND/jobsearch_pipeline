@@ -67,9 +67,11 @@ def row_to_dict(row, cap, dec):
         "is_manual_repost": row["repost_source"] is not None,
         # The chain-wide decision (from pipeline.effective_decision), so the UI can show a
         # relisting's effective status even when its own app_status is NULL (only the canonical
-        # carries the decision). The client only truthiness-checks chain_filter_source, so the
-        # reject side collapses to a sentinel string. The client recomputes "effective" after a
-        # decision (see patchJob).
+        # carries the decision). The client only truthiness-checks chain_filter_source (index.html),
+        # so the reject side collapses to the "manual" sentinel — this DROPS the real rule:<name> /
+        # manual attribution that dec still carries; a future consumer needing it should read
+        # dec["filter_gate"] (as the report does) rather than this field. Client recomputes
+        # "effective" after a decision (see patchJob).
         "chain_app_status": dec["app_status"],
         "chain_filter_source": "manual" if dec["reject"] else None,
         "chain_status_date": dec["status_date"],
@@ -108,8 +110,11 @@ def jobs_for_view(conn, view, for_date, cap):
     for r in rows:
         dec = pipeline.effective_decision(conn, r)
         # Backlog: drop a relisting whose chain the user already decided (its own app_status is
-        # NULL, but the canonical/sibling carries the decision). Mirrors the old join's
-        # `j.repost_of IS NULL OR canonical-undecided` clause.
+        # NULL, but the canonical/sibling carries the decision). This replaces the old join's
+        # `j.repost_of IS NULL OR canonical-undecided` clause. Note effective_decision spans the
+        # WHOLE chain (canonical + all siblings), not just the canonical row the old join looked at
+        # — intentional, and equivalent under normal flow since a decision propagates to every
+        # member; it only differs (more robustly) if chain rows are out of sync from a raw DB edit.
         if view == "backlog" and r["repost_of"] is not None and (dec["app_status"] or dec["reject"]):
             continue
         out.append(row_to_dict(r, cap, dec))

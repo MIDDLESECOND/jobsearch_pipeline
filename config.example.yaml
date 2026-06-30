@@ -25,30 +25,63 @@ settings:
   # copies a posting's description to your clipboard and opens this URL in a tab so you can paste
   # (Ctrl+V) and run. Leave blank to just copy without opening a tab. Free under Claude Max.
   feedback_project_url: ""
+  # Optional second source: the Adzuna API. Active only for searches that define an `adzuna:`
+  # block (see below), and only if ADZUNA_APP_ID / ADZUNA_APP_KEY are set (register free at
+  # https://developer.adzuna.com/, then `setx ADZUNA_APP_ID ...` / `setx ADZUNA_APP_KEY ...`).
+  # Heads-up: Adzuna descriptions are capped at 500 chars (a snippet) and its lookback is in
+  # DAYS, not hours — these rows are flagged in the report/UI so you know the eval saw thin text.
+  adzuna:
+    country: "us"            # Adzuna country code (URL path segment)
+    where: ""               # location filter within country; blank = countrywide
+    results_per_search: 50   # Adzuna page size, max 50
+    max_days_old: 1          # lookback in days; tune to how often you run the pipeline
+    delay_between_calls: 2   # seconds between API calls; be polite to the free tier
 
 # Optional: deterministic hard-requirement filters (auto-fail postings missing a hard
 # requirement before the paid eval) live in a separate `filters.yaml` — see filters.example.yaml.
 
 # Each search is one LinkedIn query. `tier` is a free-text label surfaced in the
 # report. `job_type` and `min_salary` are optional (see the analyst examples).
+#
+# Optional `adzuna:` block — runs this search against the Adzuna API too. Adzuna can't parse
+# LinkedIn boolean syntax, so you describe the query with its own params (all AND-combined):
+#   what_phrase: exact phrase   what_or: any-of words   what_exclude: none-of words   what_and: all-of words
+# Adzuna allows only ONE what_phrase per call, so to OR several phrases give a LIST of blocks
+# (one API call each) — see solutions_engineer / applied_ai_delivery below.
 searches:
   # ---------- Primary-tier titles ----------
   - name: solutions_architect
     tier: primary
     term: '"solutions architect" AND (AI OR automation) NOT principal NOT director NOT staff'
+    adzuna:
+      what_phrase: "solutions architect"
+      what_or: "AI automation"
+      what_exclude: "principal director staff"
 
   - name: solutions_engineer
     tier: primary
     term: '("solutions engineer" OR "solutions consultant") AND (AI OR automation OR data)'
+    adzuna:                       # list form: one call per phrase (OR of phrases)
+      - what_phrase: "solutions engineer"
+        what_or: "AI automation data"
+      - what_phrase: "solutions consultant"
+        what_or: "AI automation data"
 
   - name: applied_ai_delivery
     tier: primary
     term: '"forward deployed" OR "AI consultant" OR "AI implementation"'
+    adzuna:
+      - what_phrase: "forward deployed"
+      - what_phrase: "AI consultant"
+      - what_phrase: "AI implementation"
 
   # ---------- A specific stack you target ----------
   - name: power_platform
     tier: primary
     term: '"Power Platform" AND (architect OR consultant OR developer)'
+    adzuna:
+      what_phrase: "Power Platform"
+      what_or: "architect consultant developer"
 
   # ---------- A domain filter, if you have one (optional) ----------
   # - name: your_domain
@@ -63,9 +96,21 @@ searches:
     term: '"business analyst" AND ("Power BI" OR SQL OR automation)'
     job_type: fulltime
     min_salary: 80000
+    # min_salary still applies to Adzuna rows — but only on REAL posted salaries; Adzuna's
+    # ML-predicted salaries are stored as NULL (unstated) and therefore kept, not filtered.
+    adzuna:
+      what_phrase: "business analyst"
+      what_or: "Power BI SQL automation"
 
   - name: data_bi_analyst
     tier: analyst
     term: '("data analyst" OR "BI analyst" OR "business intelligence analyst") AND ("Power BI" OR Python)'
     job_type: fulltime
     min_salary: 80000
+    adzuna:
+      - what_phrase: "data analyst"
+        what_or: "Power BI Python"
+      - what_phrase: "BI analyst"
+        what_or: "Power BI Python"
+      - what_phrase: "business intelligence analyst"
+        what_or: "Power BI Python"

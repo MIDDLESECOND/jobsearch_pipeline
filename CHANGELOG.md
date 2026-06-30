@@ -7,6 +7,66 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-29 — second source: Adzuna API (multi-source provenance)
+
+### Why
+The pipeline had only one working source (LinkedIn). Probing the obvious additions showed Indeed,
+Glassdoor, ZipRecruiter, and Google Jobs are all behind Cloudflare/anti-bot walls from a normal IP —
+swapping scrapers won't beat that. Adzuna offers a **sanctioned free REST API** (no scraping, no
+blocking) that returned 2,477 matches on a single probe, so it's added as a second source feeding
+the same dedup → salary-filter → hard-filter → eval → report path.
+
+### What changed
+- **New `source` column on `jobs`** (`TEXT`, `'linkedin'` | `'adzuna'`) — added in the `CREATE TABLE`
+  and idempotent `_migrate` (`pipeline.py`); existing rows backfill to `'linkedin'`. `fetch_new_jobs`
+  now stamps `source='linkedin'`.
+- **New `fetch_adzuna(cfg, conn)` (`pipeline.py`)** — called in `run` right after `fetch_new_jobs`,
+  before the filters. Queries the Adzuna API (stdlib `urllib`) for every search with an `adzuna:`
+  block, maps results onto the same row shape (reusing `_norm_company`/`_norm_title`/`_fingerprint`/
+  `_find_repost`), and inserts as `status='new'`, `source='adzuna'`. Dedup is best-effort across
+  sources (see Decisions) — URL-level always holds; the content fingerprint only collapses a
+  LinkedIn↔Adzuna duplicate when both render the same company+location+title.
+- **Predicted-salary guard** — Adzuna may return an ML-predicted salary (`salary_is_predicted`).
+  Those are stored as NULL so the deterministic salary filter never rejects a real job on an estimate;
+  only genuinely-posted salaries are kept.
+- **Thin-text flag** — Adzuna descriptions are capped at 500 chars. A new `_source_tag` marks Adzuna
+  rows in the report (scored, gate-fail, manual, hard-filtered sections); the web UI (`app.py`
+  `row_to_dict` + `templates/index.html`) shows a `source: adzuna · 📋 500-char snippet` marker.
+
+### Decisions worth noting
+- **Cross-source dedup is intentionally limited.** The content fingerprint is `norm_company |
+  norm_location` + exact title, and Adzuna's location strings differ structurally from LinkedIn's
+  ("Grand Central, Manhattan" vs "New York, NY"), so the same role on both sources usually does *not*
+  collapse — it appears once per source. We deliberately did **not** loosen the match to
+  company+title-only: the original fingerprint matching was backtested to *avoid* false reposts
+  (distinct roles sharing a generic title), and a false "ALREADY APPLIED" banner makes you skip a job
+  you should apply to — a worse failure than seeing a role twice. URL-level dedup and same-source
+  fingerprinting are unaffected.
+- Adzuna's own `salary_min` API param is deliberately **not** used — it would filter on predicted
+  salaries. The existing `apply_salary_filter` handles per-search `min_salary` on real salaries only.
+- Adzuna is fetched newest-first (`sort_by=date`) and only the first page (≤`results_per_page`) is
+  pulled per query — a deliberate cap mirroring LinkedIn's `results_per_search`, not full pagination.
+- Adzuna can't parse LinkedIn boolean syntax, so queries are described per-search with Adzuna's
+  `what_phrase`/`what_or`/`what_exclude` params; OR-of-phrases is a *list* of query blocks (one API
+  call each), since Adzuna allows only one `what_phrase` per call.
+- Thin 500-char descriptions mean Adzuna rows often score `ai_artifact_depth == 0`, which the guide's
+  load-bearing "50/0" rule caps to RECRUITER_ONLY — a safe default for low-context postings.
+
+### Where (files touched)
+- `pipeline.py` — `source` column + migration/backfill; `fetch_new_jobs` source stamp; new
+  `fetch_adzuna` + `_adzuna_search`; `run` wiring; `_source_tag` + report annotations.
+- `app.py` — `row_to_dict` passes `source` through.
+- `templates/index.html` — `card()` renders the source/thin-text marker.
+- `config.yaml` / `config.example.yaml` — `settings.adzuna` block + per-search `adzuna:` blocks.
+
+### How we verified
+- `stats` ran the migration (`source` column added + backfilled) once, idempotently.
+- `run` fetched Adzuna postings (`source='adzuna'`), with reposts of seen LinkedIn roles detected.
+- Predicted-salary rows stored NULL salary; report/UI show the Adzuna marker; `backtest_v2.py` passes.
+- No-key fallback: with credentials unset, `fetch_adzuna` no-ops and the run completes LinkedIn-only.
+
+---
+
 ## 2026-06-29 — skip eval & flag relistings of already-decided roles
 
 ### Why

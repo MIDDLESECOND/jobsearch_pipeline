@@ -1,8 +1,14 @@
 # Job Search Pipeline — Setup (Windows)
 
-Fetches your configured LinkedIn searches via the logged-out guest endpoints, dedupes against
-a local SQLite database, runs each new posting through a gate-check evaluation framework
-(Claude **or** DeepSeek), and writes one markdown report per day in `reports/`.
+Fetches your configured searches from LinkedIn (logged-out guest endpoints) and, optionally, the
+Adzuna API, dedupes against a local SQLite database, runs each new posting through a gate-check
+evaluation framework (Claude **or** DeepSeek), and writes one markdown report per day in `reports/`.
+
+LinkedIn is the one *scrape* source that still works — Indeed, Glassdoor, ZipRecruiter, and Google
+Jobs are all blocked by anti-bot walls. Adzuna is an official **API** (free), so it's a reliable
+second source. It's optional and off until you add credentials + an `adzuna:` block to a search
+(see step 5 and `config.example.yaml`). Adzuna postings come with only a 500-char description
+snippet and are flagged as such in the report and UI.
 
 Dedup is two-layer: exact job URL, **plus** a content fingerprint (company + title + location)
 that catches the same role relisted under a fresh URL — so a repost doesn't read as new, and
@@ -38,6 +44,15 @@ you create the real files from them in setup below. Nothing personal is committe
    setx DEEPSEEK_API_KEY "sk-..."
    ```
    Close and reopen Command Prompt after this.
+6. *(Optional)* Enable the Adzuna source: register a free app at https://developer.adzuna.com/,
+   then set both credentials and add an `adzuna:` block to the searches you want it to cover
+   (see `config.example.yaml` for the query syntax — Adzuna uses its own `what_phrase`/`what_or`
+   params, not LinkedIn boolean):
+   ```
+   setx ADZUNA_APP_ID "..."
+   setx ADZUNA_APP_KEY "..."
+   ```
+   Without these, the pipeline simply runs LinkedIn-only.
 
 ## 2. Test run
 

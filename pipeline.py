@@ -80,7 +80,8 @@ def get_db(cfg):
             status_date  TEXT,    -- date app_status was set
             filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
             filter_gate  TEXT,    -- which gate the override represents
-            filter_date  TEXT     -- date the override was set
+            filter_date  TEXT,    -- date the override was set
+            source       TEXT     -- where the posting came from: 'linkedin' | 'adzuna'
         )
     """)
     _migrate(conn)
@@ -107,6 +108,7 @@ def _migrate(conn):
         ("filter_source", "TEXT"),  # NULL | manual | rule:<name>
         ("filter_gate", "TEXT"),
         ("filter_date", "TEXT"),
+        ("source", "TEXT"),  # 'linkedin' | 'adzuna' — multi-source provenance
     ]
     added = False
     for col, decl in new_cols:
@@ -116,6 +118,10 @@ def _migrate(conn):
             added = True
     if added:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
+    # Every pre-source row was a LinkedIn scrape; backfill so reports/UI can rely on it.
+    if "source" not in cols:
+        conn.execute("UPDATE jobs SET source='linkedin' WHERE source IS NULL")
+        print("[migrate] backfilled jobs.source='linkedin' for existing rows")
     conn.commit()
     _migrate_applied_to_status(conn, cols)
     _backfill_fingerprints(conn)
@@ -217,8 +223,8 @@ def fetch_new_jobs(cfg, conn):
                 """INSERT OR IGNORE INTO jobs
                    (job_url, title, company, location, search_name, tier, date_posted,
                     first_seen, salary_min, salary_max, description, status,
-                    norm_company, norm_title, fingerprint, repost_of)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?)""",
+                    norm_company, norm_title, fingerprint, repost_of, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,'linkedin')""",
                 (
                     url,
                     title,
@@ -256,6 +262,149 @@ def _num(v):
         return f if f == f else None  # NaN check
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------- Adzuna fetch
+#
+# Adzuna is a sanctioned REST API (free tier) used as a SECOND source alongside the
+# LinkedIn scrape. We added it after confirming Indeed/Glassdoor/ZipRecruiter/Google are
+# all behind anti-bot walls; Adzuna's API is not. Two quirks shape the mapping below:
+#   * descriptions are hard-capped at 500 chars by the API — a snippet, not the full JD —
+#     so these rows are flagged in the report/UI (the eval judges them on thin text);
+#   * salaries may be ML-PREDICTED (the `salary_is_predicted` flag). A predicted number must
+#     not reach the deterministic salary filter, so we store it as NULL ("unstated", kept).
+# Everything else flows through the same dedup/eval/report path as LinkedIn.
+
+ADZUNA_SEARCH_URL = "https://api.adzuna.com/v1/api/jobs/{country}/search/1"
+# Adzuna keyword params we forward from a query block; anything else in the block is ignored.
+# All are AND-combined by Adzuna; within `what_or`/`what_exclude` the words are any-of/none-of.
+_ADZUNA_WHAT_KEYS = ("what", "what_and", "what_phrase", "what_or", "what_exclude")
+
+
+def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
+    """One Adzuna API call. `query` is a dict of what_* params. Returns the results list."""
+    import urllib.parse
+    import urllib.request
+
+    params = {
+        "app_id": app_id,
+        "app_key": app_key,
+        "results_per_page": rpp,
+        "max_days_old": max_days,
+        # Sort newest-first, not by relevance (Adzuna's default). With only one page fetched,
+        # relevance sort would re-return the same top-N every run and never reach newer
+        # lower-relevance postings; date sort makes each run surface what's actually new.
+        "sort_by": "date",
+        "content-type": "application/json",
+    }
+    if where:
+        params["where"] = where
+    for k in _ADZUNA_WHAT_KEYS:
+        v = query.get(k)
+        if v:
+            params[k] = v
+    url = ADZUNA_SEARCH_URL.format(country=country) + "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.load(resp).get("results", [])
+
+
+def fetch_adzuna(cfg, conn):
+    """Fetch postings from the Adzuna API for every search that defines an `adzuna:` block;
+    insert unseen ones as status='new', source='adzuna'. No-op (with a notice) if the
+    ADZUNA_APP_ID / ADZUNA_APP_KEY credentials are absent, so `run` still works LinkedIn-only."""
+    app_id = _ensure_api_key("ADZUNA_APP_ID", label="adzuna")
+    app_key = _ensure_api_key("ADZUNA_APP_KEY", label="adzuna")
+    if not (app_id and app_key):
+        print("[adzuna] ADZUNA_APP_ID / ADZUNA_APP_KEY not set — skipping Adzuna source")
+        return 0
+
+    s = cfg["settings"]
+    adz = s.get("adzuna") or {}
+    country = adz.get("country", "us")
+    where = adz.get("where") or ""
+    rpp = adz.get("results_per_search", 50)
+    max_days = adz.get("max_days_old", 1)
+    delay = adz.get("delay_between_calls", 2)
+    today_iso = datetime.now().isoformat(timespec="seconds")
+    inserted = 0
+    reposts = 0
+
+    for search in cfg["searches"]:
+        block = search.get("adzuna")
+        if not block:
+            continue
+        name = search["name"]
+        # A block is one query dict, or a list of them (used to express OR-of-phrases —
+        # Adzuna allows only a single what_phrase per call, so each variant is its own call).
+        queries = block if isinstance(block, list) else [block]
+        for query in queries:
+            # A query with no what_* keys would match EVERYTHING — skip it rather than pull a
+            # page of arbitrary jobs (guards against an empty/typo'd config block).
+            if not any(query.get(k) for k in _ADZUNA_WHAT_KEYS):
+                print(f"[adzuna] {name}: query block has no what_* keys — skipping", file=sys.stderr)
+                continue
+            label = query.get("what_phrase") or query.get("what") or query.get("what_or") or "?"
+            print(f"[adzuna] {name}: {label}")
+            try:
+                results = _adzuna_search(country, app_id, app_key, query, where, rpp, max_days)
+            except Exception as e:
+                print(f"[adzuna] {name} ({label}) FAILED: {e}", file=sys.stderr)
+                time.sleep(delay)
+                continue
+
+            for r in results:
+                url = r.get("redirect_url")
+                if not isinstance(url, str) or not url:
+                    continue
+                title = r.get("title")
+                company = (r.get("company") or {}).get("display_name")
+                location = (r.get("location") or {}).get("display_name")
+                desc = r.get("description")
+                if not isinstance(desc, str):
+                    desc = ""
+                # Predicted salaries are Adzuna's ML guess, not the posting's — drop to NULL so
+                # the deterministic salary filter never rejects a real job on an estimate.
+                # Accept any truthy encoding ("1"/1/True/"true"), not just the documented "1".
+                predicted = str(r.get("salary_is_predicted") or "").strip().lower() in ("1", "true")
+                salary_min = None if predicted else _num(r.get("salary_min"))
+                salary_max = None if predicted else _num(r.get("salary_max"))
+                norm_company = _norm_company(company)
+                norm_title = _norm_title(title)
+                fingerprint = _fingerprint(company, location)
+                repost_of = _find_repost(conn, fingerprint, norm_title, exclude_url=url)
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO jobs
+                       (job_url, title, company, location, search_name, tier, date_posted,
+                        first_seen, salary_min, salary_max, description, status,
+                        norm_company, norm_title, fingerprint, repost_of, source)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,'adzuna')""",
+                    (
+                        url,
+                        title,
+                        company,
+                        location,
+                        name,
+                        search.get("tier", "primary"),
+                        str(r.get("created") or ""),
+                        today_iso,
+                        salary_min,
+                        salary_max,
+                        desc[: s["max_description_chars"]],
+                        norm_company,
+                        norm_title,
+                        fingerprint,
+                        repost_of,
+                    ),
+                )
+                inserted += cur.rowcount
+                if cur.rowcount and repost_of:
+                    reposts += 1
+            conn.commit()
+            print(f"[adzuna] {name} ({label}): {len(results)} returned")
+            time.sleep(delay)
+
+    print(f"[adzuna] {inserted} new postings inserted ({reposts} reposts of seen roles)")
+    return inserted
 
 
 # ------------------------------------------------------- repost / content dedup
@@ -566,10 +715,11 @@ def normalize_result(result):
     return result
 
 
-def _ensure_api_key(var="ANTHROPIC_API_KEY"):
+def _ensure_api_key(var="ANTHROPIC_API_KEY", label="eval"):
     """Return the named API key, self-healing the common Windows case where the
     key was set with `setx` but the current shell was opened before that and so
-    never inherited it. Falls back to the persistent HKCU user environment."""
+    never inherited it. Falls back to the persistent HKCU user environment.
+    `label` is just the log-prefix for the load notice (e.g. "eval" vs "adzuna")."""
     key = os.environ.get(var)
     if key:
         return key
@@ -581,7 +731,7 @@ def _ensure_api_key(var="ANTHROPIC_API_KEY"):
                 val, _ = winreg.QueryValueEx(k, var)
             if val:
                 os.environ[var] = val
-                print(f"[eval] loaded {var} from persistent user environment")
+                print(f"[{label}] loaded {var} from persistent user environment")
                 return val
         except (OSError, FileNotFoundError):
             pass
@@ -804,7 +954,7 @@ def generate_report(cfg, conn, for_date=None):
         lines.append("")
         for r in manual:
             lines.append(
-                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(conn, r)} · [link]({r['job_url']})"
+                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(conn, r)}{_source_tag(r)} · [link]({r['job_url']})"
             )
         lines.append("")
 
@@ -815,7 +965,7 @@ def generate_report(cfg, conn, for_date=None):
     for r in fails:
         ev = json.loads(r["eval_json"] or "{}")
         lines.append(
-            f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}: `{r['failed_gate']}` — "
+            f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}{_source_tag(r)}: `{r['failed_gate']}` — "
             f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
         )
     lines.append("")
@@ -835,7 +985,7 @@ def generate_report(cfg, conn, for_date=None):
             # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
             # so a rule can't silently bury a relisting of a role you already applied to.
             lines.append(
-                f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)} · {tag} · "
+                f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}{_source_tag(r)} · {tag} · "
                 f"gate `{r['filter_gate']}`{note} · [link]({r['job_url']})"
             )
         lines.append("")
@@ -900,6 +1050,16 @@ def _repost_tag(conn, r):
     return " · ↻ repost" if r["repost_of"] else ""
 
 
+def _source_tag(r):
+    """Flag postings from a thin-data source so the verdict's context is visible. Adzuna only
+    gives a 500-char snippet, so its evals are made on far less text than a LinkedIn JD."""
+    # Tolerate rows from a SELECT that omits `source` (this file mixes Row and dict rows).
+    source = r["source"] if "source" in r.keys() else None
+    if source == "adzuna":
+        return " · 📋 adzuna (500-char snippet — verdict on thin text)"
+    return ""
+
+
 BUCKET_LABELS = {
     1: "Bucket 1 — required AI depth a generation ahead (recruiter/referral)",
     2: "Bucket 2 — acceptable-tier BI/BA (cold-apply where title gap is small)",
@@ -914,7 +1074,7 @@ def _render_scored_job(r, conn):
     band = "strong" if (score or 0) >= 14 else ("acceptable" if (score or 0) >= 10 else "likely pass")
     out = [f"### {r['title']} — {r['company']}  ·  **{score}/18** ({band})"]
     out.extend(_repost_info(conn, r)[0])
-    out.append(f"- {r['location']}  ·  tier: {r['tier']}  ·  search: `{r['search_name']}`")
+    out.append(f"- {r['location']}  ·  tier: {r['tier']}  ·  search: `{r['search_name']}`{_source_tag(r)}")
     if r["bucket"]:
         out.append("- " + BUCKET_LABELS.get(r["bucket"], "Bucket " + str(r["bucket"])))
     if r["salary_min"] or r["salary_max"]:
@@ -1111,6 +1271,7 @@ def main():
 
     if args.command == "run":
         fetch_new_jobs(cfg, conn)
+        fetch_adzuna(cfg, conn)
         apply_salary_filter(cfg, conn)
         apply_hard_filters(cfg, conn)
         skip_decided_reposts(conn)

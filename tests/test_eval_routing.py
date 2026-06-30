@@ -62,6 +62,16 @@ def test_depth_nan_fails_closed():
     assert r["bucket"] == 1
 
 
+def test_non_dict_breakdown_fails_closed():
+    # The model can emit score_breakdown as a non-dict (list/string/number); normalize_result
+    # must fail closed, not AttributeError on bd.get() — that throw is outside the eval retry
+    # boundary and would abort the whole batch.
+    for bad in ([3, 2, 1], "0/3 each", 5):
+        r = _norm(verdict="PASS", fit_score=16, score_breakdown=bad)
+        assert r["verdict"] == "RECRUITER_ONLY"
+        assert r["bucket"] == 1
+
+
 def test_recruiter_only_input_with_depth0_stays_bucket1():
     r = _norm(verdict="RECRUITER_ONLY", fit_score=14, score_breakdown=_bd(0))
     assert r["verdict"] == "RECRUITER_ONLY"

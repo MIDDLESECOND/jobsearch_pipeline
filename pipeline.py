@@ -79,6 +79,8 @@ def get_db(cfg):
             norm_title   TEXT,    -- normalized title (abbrevs expanded) for fuzzy matching
             fingerprint  TEXT,    -- blocking key: norm_company|norm_location
             repost_of    TEXT,    -- job_url of the canonical original if this is a repost
+            repost_source TEXT,   -- NULL = auto (_find_repost) | 'manual' = user-linked original |
+                                  -- 'manual:<prev_url>' = user-linked relisting (prev parent encoded for undo)
             app_status   TEXT,    -- NULL (backlog) | applied | passed  (user's decision)
             status_date  TEXT,    -- date app_status was set
             filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
@@ -109,6 +111,7 @@ def _migrate(conn):
         ("norm_title", "TEXT"),
         ("fingerprint", "TEXT"),
         ("repost_of", "TEXT"),
+        ("repost_source", "TEXT"),  # NULL=auto | manual | manual:<prev_url>  (manual-link provenance)
         ("app_status", "TEXT"),   # NULL | applied | passed
         ("status_date", "TEXT"),
         ("filter_source", "TEXT"),  # NULL | manual | rule:<name>
@@ -1364,12 +1367,246 @@ def _add_filter_rule(conn, gate, pattern, note, posting):
           f"({len(rule['any'])} pattern(s) now)")
 
 
+# ------------------------------------------------------- manual repost linking
+#
+# `_find_repost` only links reposts at fetch time, and only when normalized
+# company+location AND exact title match — deliberately conservative, so it
+# misses a relisting whose title/location drifted and (in practice) the same role
+# cross-posted to Adzuna vs LinkedIn. `dupe` is the manual escape hatch: link two
+# postings already in the DB as the same role, reusing the existing chain machinery
+# (repost_of + _chain_targets + skip_decided_reposts). It adds NO fuzzy matching —
+# the user asserts the duplicate; the code just records and propagates it safely.
+
+def _chain_members(conn, canonical_url):
+    """All job_urls in the flat chain rooted at `canonical_url`: the canonical itself
+    plus every relisting pointing at it. Mirrors _chain_targets but keyed by url."""
+    rows = conn.execute(
+        "SELECT job_url FROM jobs WHERE job_url=? OR repost_of=?", (canonical_url, canonical_url)
+    ).fetchall()
+    return {r["job_url"] for r in rows}
+
+
+def _chain_decision(conn, member_urls):
+    """The user's decision across a set of chain members, or None if undecided. Returns a
+    dict with the app_status side ('applied' outranks 'passed') and the reject side (any
+    filter_source), with the dates/gate to replicate when propagating. Used both to detect a
+    cross-chain conflict and to copy the surviving decision onto newly-linked members."""
+    if not member_urls:
+        return None
+    qs = ",".join("?" * len(member_urls))
+    rows = conn.execute(
+        f"SELECT app_status, status_date, filter_source, filter_gate, filter_date "
+        f"FROM jobs WHERE job_url IN ({qs})",
+        tuple(member_urls),
+    ).fetchall()
+    applied = next((r for r in rows if r["app_status"] == "applied"), None)
+    passed = next((r for r in rows if r["app_status"] == "passed"), None)
+    rej = next((r for r in rows if r["filter_source"]), None)
+    app_row = applied or passed
+    if app_row is None and rej is None:
+        return None
+    return {
+        "app_status": app_row["app_status"] if app_row else None,
+        "status_date": app_row["status_date"] if app_row else None,
+        "reject": rej is not None,
+        "filter_gate": rej["filter_gate"] if rej else None,
+        "filter_date": rej["filter_date"] if rej else None,
+    }
+
+
+def _decision_sig(dec):
+    """Conflict-comparison signature: two decided chains clash unless these match."""
+    if dec is None:
+        return None
+    return (dec["app_status"], dec["reject"], dec["filter_gate"])
+
+
+def _fmt_decision(dec):
+    if dec is None:
+        return "undecided"
+    bits = []
+    if dec["app_status"]:
+        bits.append(f"{dec['app_status']} {dec['status_date'] or ''}".strip())
+    if dec["reject"]:
+        bits.append(f"rejected (gate: {dec['filter_gate']})")
+    return ", ".join(bits) or "undecided"
+
+
+def cmd_dupe(conn, url, of_url, undo, assume_yes):
+    """Manually link two existing postings as the same role (a duplicate `_find_repost` missed).
+    The earliest-`first_seen` posting becomes the canonical original; the other (and any relistings
+    it owned) is repointed under it via `repost_of`, marked `repost_source='manual'` for provenance.
+    Any existing applied/passed/reject decision propagates across the unified chain; a still-`new`
+    member is then eval-skipped by `skip_decided_reposts`. `--undo` splits the manual link apart."""
+    label = "dupe"
+    a = _resolve_posting(conn, url, label)
+    if a is None:
+        return False
+    if undo:
+        return _dupe_undo(conn, a, label)
+    if not of_url:
+        print(f"[{label}] provide --of (a unique substring of the other posting's job_url)", file=sys.stderr)
+        return False
+    b = _resolve_posting(conn, of_url, label)
+    if b is None:
+        return False
+
+    # Resolve each side to its chain's canonical, so we link canonical-to-canonical (never build
+    # a 2-level chain the flat _chain_targets can't traverse).
+    a_canon_url = a["repost_of"] or a["job_url"]
+    b_canon_url = b["repost_of"] or b["job_url"]
+    if a_canon_url == b_canon_url:
+        print(f"[{label}] already the same role — nothing to link", file=sys.stderr)
+        return False
+    a_canon = conn.execute("SELECT * FROM jobs WHERE job_url=?", (a_canon_url,)).fetchone()
+    b_canon = conn.execute("SELECT * FROM jobs WHERE job_url=?", (b_canon_url,)).fetchone()
+
+    # Earliest first_seen wins; tie-break on job_url so the choice is deterministic.
+    if (a_canon["first_seen"] or "", a_canon["job_url"]) <= (b_canon["first_seen"] or "", b_canon["job_url"]):
+        winner, loser = a_canon, b_canon
+    else:
+        winner, loser = b_canon, a_canon
+    winner_members = _chain_members(conn, winner["job_url"])
+    loser_members = _chain_members(conn, loser["job_url"])
+
+    # Nested-merge guard: the `manual:<prev>` encoding is single-level, so re-merging a chain that
+    # already contains a manual link would relabel it and strand the inner link (un-undoable). The
+    # merged-in side is the one whose members get repointed, so block when IT holds a manual link
+    # (a canonical always has repost_source=NULL; only manually-linked members are non-NULL).
+    qs_l = ",".join("?" * len(loser_members))
+    nested = conn.execute(
+        f"SELECT title, company, job_url FROM jobs WHERE job_url IN ({qs_l}) AND repost_source IS NOT NULL",
+        tuple(loser_members),
+    ).fetchall()
+    if nested:
+        print(f"[{label}] the merged-in role still contains manual link(s) — undo those first:", file=sys.stderr)
+        for n in nested:
+            print(f"    {n['title']} — {n['company']}  (dupe --url {n['job_url']} --undo)", file=sys.stderr)
+        return False
+
+    # Conflict guard: never overwrite one side's decision with a different one — abort instead.
+    w_dec = _chain_decision(conn, winner_members)
+    l_dec = _chain_decision(conn, loser_members)
+    if w_dec and l_dec and _decision_sig(w_dec) != _decision_sig(l_dec):
+        print(f"[{label}] CONFLICT — both roles already decided, differently:", file=sys.stderr)
+        print(f"    keep : {winner['title']} — {winner['company']}  [{_fmt_decision(w_dec)}]", file=sys.stderr)
+        print(f"    merge: {loser['title']} — {loser['company']}  [{_fmt_decision(l_dec)}]", file=sys.stderr)
+        print(f"    resolve first (undo one side), then re-run dupe.", file=sys.stderr)
+        return False
+    dec = w_dec or l_dec  # the surviving decision (only one set, or both equal)
+
+    # Preview + confirm: a wrong merge buries a real job under another role's decision.
+    print(f"[{label}] link as the SAME role:")
+    print(f"    canonical (kept) : {winner['title']} — {winner['company']} ({winner['first_seen']})")
+    print(f"    relisting (merge): {loser['title']} — {loser['company']} ({loser['first_seen']})")
+    if len(loser_members) > 1:
+        print(f"    + {len(loser_members) - 1} relisting(s) already under the merged side")
+    if dec:
+        print(f"    decision propagated to the whole chain: {_fmt_decision(dec)}")
+    if not assume_yes and not _confirm(f"[{label}] proceed?"):
+        print(f"[{label}] aborted", file=sys.stderr)
+        return False
+
+    # Repoint the loser canonical AND every relisting it owned onto the winner canonical (the flat
+    # model breaks if a child is left pointing at the now-demoted loser). Encode each row's prior
+    # parent in repost_source so --undo can reconstruct the original two chains.
+    for c in sorted(loser_members):
+        prev = loser["job_url"] if c != loser["job_url"] else None
+        src = "manual" if prev is None else f"manual:{prev}"
+        conn.execute(
+            "UPDATE jobs SET repost_of=?, repost_source=? WHERE job_url=?",
+            (winner["job_url"], src, c),
+        )
+
+    # Propagate the surviving decision across the unified chain (preserving the original dates —
+    # this is the one thing cmd_mark/cmd_reject couldn't do, having run before the link existed).
+    if dec:
+        all_members = winner_members | loser_members
+        qs = ",".join("?" * len(all_members))
+        if dec["app_status"]:
+            conn.execute(
+                f"UPDATE jobs SET app_status=?, status_date=? WHERE job_url IN ({qs})",
+                (dec["app_status"], dec["status_date"], *all_members),
+            )
+        if dec["reject"]:
+            # Stamp only members without an attribution yet — don't clobber a sibling's rule:<name>
+            # (mirrors cmd_reject's propagation guard).
+            conn.execute(
+                f"UPDATE jobs SET filter_source='manual', filter_gate=?, filter_date=?, "
+                f"status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END "
+                f"WHERE job_url IN ({qs}) AND filter_source IS NULL",
+                (dec["filter_gate"], dec["filter_date"], *all_members),
+            )
+    conn.commit()
+    skip_decided_reposts(conn)  # eval-skip any still-'new' member now under a decided canonical
+    print(f"[{label}] linked: {loser['title']} — {loser['company']} → canonical {winner['job_url']}")
+    return True
+
+
+def _dupe_undo(conn, a, label):
+    """Split a manual link apart: detach the manually-linked relisting `a` (and the sub-chain it
+    originally headed) from its current canonical, restoring the two independent chains. Structure
+    only — a decision that propagated across the merge is left as-is (clear it with
+    applied/passed/reject --undo if needed); the note below says so."""
+    src = a["repost_source"]
+    # Identify the loser canonical L: the original head of the merged-in sub-chain. `a` may BE it
+    # ('manual') or be one of its relistings ('manual:<L>').
+    if src == "manual":
+        loser_canon_url = a["job_url"]
+    elif src and src.startswith("manual:"):
+        loser_canon_url = src.split(":", 1)[1]
+    else:
+        print(f"[{label}] '{a['title']} — {a['company']}' is not a manually-linked relisting "
+              f"(repost_source={src!r}); nothing to undo", file=sys.stderr)
+        return False
+
+    # Resolve the canonical row up front and bail BEFORE mutating if it's gone — else the detach
+    # loop would repoint children at a non-existent canonical (orphan) and commit before the final
+    # dereference crashes. Nothing in the pipeline deletes rows, so this only guards manual DB edits.
+    loser_canon = conn.execute(
+        "SELECT title, company FROM jobs WHERE job_url=?", (loser_canon_url,)
+    ).fetchone()
+    if loser_canon is None:
+        print(f"[{label}] encoded original {loser_canon_url!r} no longer exists; cannot undo", file=sys.stderr)
+        return False
+
+    # The sub-chain to detach: the loser canonical plus every row encoded as its former child.
+    rows = conn.execute(
+        "SELECT job_url, repost_source FROM jobs WHERE job_url=? OR repost_source=?",
+        (loser_canon_url, f"manual:{loser_canon_url}"),
+    ).fetchall()
+    for r in rows:
+        restored_parent = None if r["job_url"] == loser_canon_url else loser_canon_url
+        conn.execute(
+            "UPDATE jobs SET repost_of=?, repost_source=NULL WHERE job_url=?",
+            (restored_parent, r["job_url"]),
+        )
+    conn.commit()
+    skip_decided_reposts(conn)  # reverse pass restores any 'repost_decided' member to 'new'
+    print(f"[{label}] unlinked: {loser_canon['title']} — {loser_canon['company']} "
+          f"({len(rows)} row(s) restored to their own chain)")
+    print(f"[{label}] note: any decision propagated by the merge was left as-is — "
+          f"clear it with applied/passed/reject --undo if it shouldn't carry over.")
+    return True
+
+
+def _confirm(prompt):
+    """Yes/no prompt; treats a closed stdin (non-interactive) or Ctrl-C as 'no' to fail safe."""
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()  # finish the prompt line so the caller's abort message isn't appended to it
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
-    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject", "ui"])
+    ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject", "dupe", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
-    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject`")
-    ap.add_argument("--undo", action="store_true", help="clear the status/override instead of setting it")
+    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject` / `dupe`")
+    ap.add_argument("--of", help="`dupe`: job_url (or unique substring) of the other posting this duplicates")
+    ap.add_argument("--yes", action="store_true", help="`dupe`: skip the confirmation prompt")
+    ap.add_argument("--undo", action="store_true", help="clear the status/override/link instead of setting it")
     ap.add_argument("--gate", default="other",
                     help="hard gate a `reject` represents — one of: " + ", ".join(GATE_NAMES + ["other"]))
     ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
@@ -1405,6 +1642,8 @@ def main():
         cmd_mark(conn, args.url, None if args.undo else args.command)
     elif args.command == "reject":
         cmd_reject(conn, args.url, args.gate, args.pattern, args.note, args.undo)
+    elif args.command == "dupe":
+        cmd_dupe(conn, args.url, args.of, args.undo, args.yes)
 
 
 if __name__ == "__main__":

@@ -33,20 +33,17 @@ from pathlib import Path
 
 import yaml
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.yaml"
-PROFILE_PATH = BASE_DIR / "profile.md"
-GUIDE_PATH = BASE_DIR / "evaluation_guide.md"
-
-GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requirement", "work_auth", "employment_type"]
-SCORE_DIMS = ["ai_applied_vs_research", "ai_artifact_depth", "learning_value",
-              "technical_skill_match", "title_trajectory", "years_vs_stated"]
-VERDICTS = ["PASS", "GATE_FAIL", "RECRUITER_ONLY"]
-
-# Repost / content-dedup and decision-chain core lives in chain.py. Re-imported into this
-# module's namespace so existing call sites (and `pipeline.X` references from app.py / tests)
-# keep working unchanged — effective-decision and propagation now have ONE implementation.
+# The foundation (paths, cross-cutting constants, config, the DB open/schema/migration path, the
+# API-key resolver) lives in core.py; the repost/content-dedup + decision-chain core in chain.py.
+# Both are re-imported into this module's namespace so the pipeline-stage code here — and every
+# `pipeline.X` reference from app.py / the tests / the validation scripts — keeps working unchanged.
 import chain  # noqa: E402
+import core   # noqa: E402,F401
+from core import (  # noqa: E402,F401
+    BASE_DIR, CONFIG_PATH, PROFILE_PATH, GUIDE_PATH,
+    GATE_NAMES, SCORE_DIMS, VERDICTS,
+    load_config, get_db, _ensure_api_key,
+)
 from chain import (  # noqa: E402,F401
     _clean, _norm_company, _norm_title, _norm_location, _fingerprint, _NORM_VERSION,
     _find_repost, skip_decided_reposts, _resolve_posting, _chain_targets, _chain_members,
@@ -56,168 +53,7 @@ from chain import (  # noqa: E402,F401
 )
 
 
-# ---------------------------------------------------------------- config / db
-
-def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def get_db(cfg):
-    # timeout (busy-wait on a locked DB) raised above the 5s default so a concurrent open
-    # during the one-time fingerprint recompute waits it out instead of erroring.
-    conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"], timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            job_url      TEXT PRIMARY KEY,
-            title        TEXT,
-            company      TEXT,
-            location     TEXT,
-            search_name  TEXT,
-            tier         TEXT,
-            date_posted  TEXT,
-            first_seen   TEXT,
-            salary_min   REAL,
-            salary_max   REAL,
-            description  TEXT,
-            status       TEXT,   -- new | evaluated | needs_manual | salary_filtered | rule_filtered | repost_decided | error
-            verdict      TEXT,   -- PASS | GATE_FAIL | RECRUITER_ONLY
-            failed_gate  TEXT,
-            fit_score    INTEGER,
-            bucket       INTEGER, -- 1 | 2 | 3 (channel routing; null for gate fails)
-            eval_json    TEXT,
-            norm_company TEXT,    -- normalized company (suffix-stripped) for repost matching
-            norm_title   TEXT,    -- normalized title (abbrevs expanded) for fuzzy matching
-            fingerprint  TEXT,    -- blocking key: norm_company|norm_location
-            repost_of    TEXT,    -- job_url of the canonical original if this is a repost
-            repost_source TEXT,   -- NULL = auto (_find_repost) | 'manual' = user-linked original |
-                                  -- 'manual:<prev_url>' = user-linked relisting (prev parent encoded for undo)
-            app_status   TEXT,    -- NULL (backlog) | applied | passed  (user's decision)
-            status_date  TEXT,    -- date app_status was set
-            filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
-            filter_gate  TEXT,    -- which gate the override represents
-            filter_date  TEXT,    -- date the override was set
-            source       TEXT     -- where the posting came from: 'linkedin' | 'adzuna'
-        )
-    """)
-    _migrate(conn)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
-    # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;
-    # index it so chain resolution is O(chain) not O(table).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_repost_of ON jobs(repost_of)")
-    conn.commit()
-    return conn
-
-
-def _migrate(conn):
-    """Bring an existing DB up to the current schema. Idempotent — safe to run
-    every startup. Added for the v2 guide: the `bucket` column (channel routing).
-    Repost dedup (v3): content fingerprint + application-status tracking columns."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-    if "bucket" not in cols:
-        conn.execute("ALTER TABLE jobs ADD COLUMN bucket INTEGER")
-        print("[migrate] added column jobs.bucket")
-    new_cols = [
-        ("norm_company", "TEXT"),
-        ("norm_title", "TEXT"),
-        ("fingerprint", "TEXT"),
-        ("repost_of", "TEXT"),
-        ("repost_source", "TEXT"),  # NULL=auto | manual | manual:<prev_url>  (manual-link provenance)
-        ("app_status", "TEXT"),   # NULL | applied | passed
-        ("status_date", "TEXT"),
-        ("filter_source", "TEXT"),  # NULL | manual | rule:<name>
-        ("filter_gate", "TEXT"),
-        ("filter_date", "TEXT"),
-        ("source", "TEXT"),  # 'linkedin' | 'adzuna' — multi-source provenance
-    ]
-    added = False
-    for col, decl in new_cols:
-        if col not in cols:
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
-            print(f"[migrate] added column jobs.{col}")
-            added = True
-    if added:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
-    # Every pre-source row was a LinkedIn scrape; backfill so reports/UI can rely on it.
-    if "source" not in cols:
-        conn.execute("UPDATE jobs SET source='linkedin' WHERE source IS NULL")
-        print("[migrate] backfilled jobs.source='linkedin' for existing rows")
-    conn.commit()
-    _migrate_applied_to_status(conn, cols)
-    _backfill_fingerprints(conn)
-    _recompute_fingerprints(conn)
-
-
-def _migrate_applied_to_status(conn, cols):
-    """v3.1: the binary `applied`/`applied_date` columns became the `app_status`
-    lifecycle (NULL | applied | passed). Fold the old flag into the new column, then
-    drop the dead columns. `DROP COLUMN` needs SQLite >= 3.35; if older, the columns
-    are left in place (harmless — nothing reads them)."""
-    if "applied" not in cols:
-        return
-    conn.execute(
-        "UPDATE jobs SET app_status='applied', status_date=applied_date "
-        "WHERE applied=1 AND app_status IS NULL"
-    )
-    conn.commit()
-    print("[migrate] folded jobs.applied into jobs.app_status")
-    for dead in ("applied", "applied_date"):
-        try:
-            conn.execute(f"ALTER TABLE jobs DROP COLUMN {dead}")
-            print(f"[migrate] dropped column jobs.{dead}")
-        except sqlite3.OperationalError:
-            pass  # SQLite < 3.35: leave it, it's unused
-    conn.commit()
-
-
-def _backfill_fingerprints(conn):
-    """Populate norm_company / norm_title / fingerprint for rows that predate the
-    repost-dedup columns, so historical postings participate in repost detection.
-    One-time: only touches rows where fingerprint is still NULL."""
-    rows = conn.execute(
-        "SELECT job_url, company, title, location FROM jobs WHERE fingerprint IS NULL"
-    ).fetchall()
-    if not rows:
-        return
-    for r in rows:
-        conn.execute(
-            "UPDATE jobs SET norm_company=?, norm_title=?, fingerprint=? WHERE job_url=?",
-            (
-                _norm_company(r["company"]),
-                _norm_title(r["title"]),
-                _fingerprint(r["company"], r["location"]),
-                r["job_url"],
-            ),
-        )
-    conn.commit()
-    print(f"[migrate] backfilled fingerprints for {len(rows)} existing rows")
-
-
-def _recompute_fingerprints(conn):
-    """Re-derive the content fingerprint for every row when the normalization scheme
-    changes, so historical rows and new inserts share one key space (else a relisting of
-    an old role under a new-style location label wouldn't match). Gated on PRAGMA
-    user_version, so it runs exactly once per scheme bump. Only the fingerprint is
-    rewritten; existing repost_of links are left as-is — consistent with the original
-    backfill, historical rows are not retroactively cross-linked."""
-    if conn.execute("PRAGMA user_version").fetchone()[0] >= _NORM_VERSION:
-        return
-    rows = conn.execute("SELECT job_url, company, title, location FROM jobs").fetchall()
-    for r in rows:
-        conn.execute(
-            "UPDATE jobs SET norm_company=?, norm_title=?, fingerprint=? WHERE job_url=?",
-            (
-                _norm_company(r["company"]),
-                _norm_title(r["title"]),
-                _fingerprint(r["company"], r["location"]),
-                r["job_url"],
-            ),
-        )
-    conn.execute(f"PRAGMA user_version = {_NORM_VERSION}")
-    conn.commit()
-    if rows:  # stay silent on a fresh/empty DB (mirrors _backfill_fingerprints)
-        print(f"[migrate] recomputed fingerprints for {len(rows)} rows (norm v{_NORM_VERSION})")
+# load_config / get_db + the schema and all migrations moved to core.py (re-imported above).
 
 
 # ---------------------------------------------------------------------- fetch
@@ -672,27 +508,7 @@ def normalize_result(result):
     return result
 
 
-def _ensure_api_key(var="ANTHROPIC_API_KEY", label="eval"):
-    """Return the named API key, self-healing the common Windows case where the
-    key was set with `setx` but the current shell was opened before that and so
-    never inherited it. Falls back to the persistent HKCU user environment.
-    `label` is just the log-prefix for the load notice (e.g. "eval" vs "adzuna")."""
-    key = os.environ.get(var)
-    if key:
-        return key
-    if sys.platform == "win32":
-        try:
-            import winreg
-
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-                val, _ = winreg.QueryValueEx(k, var)
-            if val:
-                os.environ[var] = val
-                print(f"[{label}] loaded {var} from persistent user environment")
-                return val
-        except (OSError, FileNotFoundError):
-            pass
-    return None
+# _ensure_api_key (used by both the Adzuna fetch and the eval) moved to core.py (re-imported above).
 
 
 # (input cache-miss, output) USD per token. DeepSeek V4 rates per the official

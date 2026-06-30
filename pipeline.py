@@ -51,6 +51,7 @@ from chain import (  # noqa: E402,F401
     _clean, _norm_company, _norm_title, _norm_location, _fingerprint, _NORM_VERSION,
     _find_repost, skip_decided_reposts, _resolve_posting, _chain_targets, _chain_members,
     _chain_decision, _decision_sig, _fmt_decision, effective_decision,
+    propagate_app_status, propagate_reject, clear_reject,
     _dupe_resolve, _dupe_commit, _dupe_unlink,
 )
 
@@ -1085,10 +1086,7 @@ def cmd_mark(conn, url, status):
         return False
     today = date.today().isoformat()
     stamp = today if status else None
-    for t in _chain_targets(conn, m):
-        conn.execute(
-            "UPDATE jobs SET app_status=?, status_date=? WHERE job_url=?", (status, stamp, t)
-        )
+    propagate_app_status(conn, _chain_targets(conn, m), status, stamp)
     conn.commit()
     verb = f"marked {status}" if status else "cleared status"
     print(f"[{label}] {verb}: {m['title']} — {m['company']}" + (f" ({today})" if status else ""))
@@ -1109,38 +1107,16 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
         return False
 
     today = date.today().isoformat()
+    targets = _chain_targets(conn, m)
     if undo:
-        for t in _chain_targets(conn, m):
-            # Clear ONLY a manual override (filter_source='manual'); a sibling auto-failed by a
-            # filters.yaml rule keeps its 'rule:<name>' attribution — undoing a manual reject on
-            # one chain member must not wipe a deterministic rule on another. AND, for a row the
-            # reject had lifted out of 'new' before it was ever evaluated (rule_filtered + no
-            # verdict), restore status='new' so it isn't permanently excluded from the eval stage.
-            conn.execute(
-                "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL, "
-                "status=CASE WHEN status='rule_filtered' AND verdict IS NULL THEN 'new' ELSE status END "
-                "WHERE job_url=? AND filter_source='manual'",
-                (t,),
-            )
+        clear_reject(conn, targets)
         conn.commit()
         print(f"[{label}] cleared override: {m['title']} — {m['company']}")
         return True
 
-    for t in _chain_targets(conn, m):
-        # Also lift a still-'new' row out of status='new' so it isn't sent to the paid
-        # evaluator on the next run — you've already overruled it. Already-evaluated rows
-        # keep their status (the report groups them by filter_source either way).
-        # The user's EXPLICITLY named row is always (re)stamped — they're overruling it, and
-        # may be re-attributing a row a filters.yaml rule had auto-failed. But when PROPAGATING
-        # to other chain members, don't clobber a sibling that a rule auto-failed: only stamp
-        # 'manual' where there's no existing rule:<name> attribution to preserve.
-        guard = "" if t == m["job_url"] else " AND (filter_source IS NULL OR filter_source='manual')"
-        conn.execute(
-            "UPDATE jobs SET filter_source='manual', filter_gate=?, filter_date=?, "
-            "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END "
-            f"WHERE job_url=?{guard}",
-            (gate, today, t),
-        )
+    # The explicitly named row is always (re)stamped — you're overruling it, possibly re-attributing
+    # a row a filters.yaml rule auto-failed; siblings are stamped too but never clobber a rule:<name>.
+    propagate_reject(conn, targets, gate, today, force_url=m["job_url"], overwrite_manual=True)
     conn.commit()
     print(f"[{label}] rejected (gate: {gate}): {m['title']} — {m['company']} ({today})")
 

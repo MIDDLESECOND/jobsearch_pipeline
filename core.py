@@ -14,8 +14,7 @@ from pathlib import Path
 
 import yaml
 
-import chain
-from chain import _norm_company, _norm_title, _fingerprint, _NORM_VERSION  # noqa: F401
+from chain import _norm_company, _norm_title, _fingerprint, _NORM_VERSION
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"

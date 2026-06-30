@@ -9,7 +9,7 @@ import json
 from datetime import date
 
 from core import BASE_DIR
-from chain import effective_decision
+from chain import effective_decisions
 
 
 def generate_report(cfg, conn, for_date=None):
@@ -17,6 +17,10 @@ def generate_report(cfg, conn, for_date=None):
     rows = conn.execute(
         "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC", (d,)
     ).fetchall()
+    # Fetch every chain decision ONCE (batched), then pass each row's `dec` into the pure render
+    # helpers below — same "inject the decision, don't fetch it" shape app.row_to_dict uses. Calling
+    # effective_decision per row inside the render loops was an N+1 (one query per posting rendered).
+    decisions = effective_decisions(conn, rows)
 
     # Hard-fail overrides (your rules + manual rejects) are pulled out first so they don't
     # also appear under their model verdict (a manual reject keeps its original PASS verdict).
@@ -30,7 +34,7 @@ def generate_report(cfg, conn, for_date=None):
     repost_skipped = [r for r in rows if r["status"] == "repost_decided"]
 
     reposts = [r for r in rows if r["repost_of"]]
-    repost_status = [_repost_info(conn, r)[1] for r in reposts]
+    repost_status = [decisions[r["job_url"]]["app_status"] for r in reposts]
     applied_reposts = sum(s == "applied" for s in repost_status)
     passed_reposts = sum(s == "passed" for s in repost_status)
 
@@ -59,7 +63,7 @@ def generate_report(cfg, conn, for_date=None):
     if not passes:
         lines.append("*None today.*")
     for r in passes:
-        lines.extend(_render_scored_job(r, conn))
+        lines.extend(_render_scored_job(r, decisions[r["job_url"]]))
 
     if recruiter:
         lines.append("## 🤝 Recruiter-only — route to a human, do NOT cold-apply")
@@ -71,14 +75,14 @@ def generate_report(cfg, conn, for_date=None):
         )
         lines.append("")
         for r in recruiter:
-            lines.extend(_render_scored_job(r, conn))
+            lines.extend(_render_scored_job(r, decisions[r["job_url"]]))
 
     if manual:
         lines.append("## 👀 Needs manual review (no description retrieved)")
         lines.append("")
         for r in manual:
             lines.append(
-                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(conn, r)}{_source_tag(r)} · [link]({r['job_url']})"
+                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(decisions[r['job_url']])}{_source_tag(r)} · [link]({r['job_url']})"
             )
         lines.append("")
 
@@ -89,7 +93,7 @@ def generate_report(cfg, conn, for_date=None):
     for r in fails:
         ev = json.loads(r["eval_json"] or "{}")
         lines.append(
-            f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}{_source_tag(r)}: `{r['failed_gate']}` — "
+            f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']])}{_source_tag(r)}: `{r['failed_gate']}` — "
             f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
         )
     lines.append("")
@@ -109,7 +113,7 @@ def generate_report(cfg, conn, for_date=None):
             # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
             # so a rule can't silently bury a relisting of a role you already applied to.
             lines.append(
-                f"- **{r['title']} — {r['company']}**{_repost_tag(conn, r)}{_source_tag(r)} · {tag} · "
+                f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']])}{_source_tag(r)} · {tag} · "
                 f"gate `{r['filter_gate']}`{note} · [link]({r['job_url']})"
             )
         lines.append("")
@@ -127,13 +131,13 @@ def generate_report(cfg, conn, for_date=None):
     print(f"[report] written: {out_path}")
 
 
-def _repost_info(conn, r):
-    """For a posting, return (banner_lines, effective_status) for the report. Both come from
-    chain.effective_decision — the single source of truth for a chain's decision, shared with the
-    web UI and the dupe guard — so this function only FORMATS them into markdown. `effective_status`
-    is 'applied', 'passed', or None (applied outranks passed across the chain); `banner_lines` are
-    the matching markdown lines (loud for applied, quiet for passed) plus the repost note."""
-    dec = effective_decision(conn, r)
+def _repost_info(dec):
+    """For a posting, return (banner_lines, effective_status) for the report. `dec` is the chain's
+    decision from chain.effective_decision(s) — the single source of truth, shared with the web UI
+    and the dupe guard — so this function only FORMATS it into markdown (it is conn-free: the caller
+    fetches all decisions once, batched, and passes each in). `effective_status` is 'applied',
+    'passed', or None (applied outranks passed across the chain); `banner_lines` are the matching
+    markdown lines (loud for applied, quiet for passed) plus the repost note."""
     status = dec["app_status"]
     lines = []
     if status == "applied":
@@ -146,14 +150,14 @@ def _repost_info(conn, r):
     return lines, status
 
 
-def _repost_tag(conn, r):
+def _repost_tag(dec):
     """Compact inline marker for one-liner sections (gate fails, manual review)."""
-    lines, status = _repost_info(conn, r)
+    _, status = _repost_info(dec)
     if status == "applied":
         return " · 🚫 **ALREADY APPLIED**"
     if status == "passed":
         return " · ↩ passed"
-    return " · ↻ repost" if r["repost_of"] else ""
+    return " · ↻ repost" if dec["is_repost"] else ""
 
 
 def _source_tag(r):
@@ -180,13 +184,14 @@ def score_band(score):
     return "strong" if s >= 14 else ("acceptable" if s >= 10 else "likely pass")
 
 
-def _render_scored_job(r, conn):
-    """Render one gates-passed job (PASS or RECRUITER_ONLY) as report lines."""
+def _render_scored_job(r, dec):
+    """Render one gates-passed job (PASS or RECRUITER_ONLY) as report lines. `dec` is the row's
+    precomputed chain decision (see _repost_info)."""
     ev = json.loads(r["eval_json"] or "{}")
     score = r["fit_score"]
     band = score_band(score)
     out = [f"### {r['title']} — {r['company']}  ·  **{score}/18** ({band})"]
-    out.extend(_repost_info(conn, r)[0])
+    out.extend(_repost_info(dec)[0])
     out.append(f"- {r['location']}  ·  tier: {r['tier']}  ·  search: `{r['search_name']}`{_source_tag(r)}")
     if r["bucket"]:
         out.append("- " + BUCKET_LABELS.get(r["bucket"], "Bucket " + str(r["bucket"])))

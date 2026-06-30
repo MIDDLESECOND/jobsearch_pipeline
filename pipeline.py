@@ -37,7 +37,7 @@ from core import (  # noqa: E402,F401
 from chain import (  # noqa: E402,F401
     _clean, _norm_company, _norm_title, _norm_location, _fingerprint, _NORM_VERSION,
     _find_repost, skip_decided_reposts, _resolve_posting, _chain_targets, _chain_members,
-    _chain_decision, _decision_sig, _fmt_decision, effective_decision,
+    _chain_decision, _decision_sig, _fmt_decision, effective_decision, effective_decisions,
     propagate_app_status, propagate_reject, clear_reject,
     _dupe_resolve, _dupe_commit, _dupe_unlink,
 )

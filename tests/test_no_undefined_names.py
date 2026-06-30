@@ -10,6 +10,10 @@ statically, across every module, in milliseconds.
 We assert ONLY on real-defect message classes (undefined name, etc.) and syntax errors — NOT on
 "imported but unused", which pipeline.py's re-export layer produces ON PURPOSE (it imports names
 solely so `pipeline.X` keeps resolving for app.py / the tests / the validation scripts).
+
+Residual limitation (inherent to pyflakes, not fixable by FATAL): an undefined name used inside a
+`try` whose handler catches `NameError` (or a bare `except`) is suppressed and never reported. We
+don't use that pattern; if you ever add an `except NameError`, this gate stops covering its body.
 """
 
 import io
@@ -20,8 +24,12 @@ from pyflakes import api, messages
 from pyflakes.reporter import Reporter
 
 PROJECT = Path(__file__).resolve().parent.parent
-MODULES = ["core.py", "chain.py", "fetch.py", "filters.py",
-           "evaluation.py", "report.py", "pipeline.py", "app.py"]
+# Auto-discover every .py we maintain (root app modules + the validation scripts + the tests
+# themselves) instead of a hardcoded list — so a NEW module is covered automatically. The gate
+# must not itself have the "forgot to add it to a list" footgun it exists to prevent.
+MODULES = sorted(
+    set(PROJECT.glob("*.py")) | set((PROJECT / "tests").glob("*.py"))
+)
 
 # Message classes that mean a real defect (a crash waiting to happen), as opposed to style noise
 # like UnusedImport — which the re-export layer legitimately and deliberately triggers.
@@ -32,6 +40,14 @@ FATAL = (
     messages.ReturnOutsideFunction,
     messages.YieldOutsideFunction,
     messages.DuplicateArgument,
+    # A star import blinds pyflakes' undefined-name detection for the whole module — an undefined
+    # name becomes ImportStarUsage, not UndefinedName — so a future `from x import *` would
+    # silently neuter this gate. Treat star imports as fatal (the project forbids them anyway), and
+    # catch a loop var that shadows an import (rebinds it -> AttributeError on later use).
+    messages.ImportStarUsed,
+    messages.ImportStarUsage,
+    messages.ImportStarNotPermitted,
+    messages.ImportShadowedByLoopVar,
 )
 
 
@@ -53,8 +69,8 @@ class _Collector(Reporter):
         self.problems.append(f"{filename}: {msg}")
 
 
-@pytest.mark.parametrize("module", MODULES)
+@pytest.mark.parametrize("module", MODULES, ids=[p.name for p in MODULES])
 def test_no_undefined_names(module):
     rep = _Collector()
-    api.checkPath(str(PROJECT / module), rep)
+    api.checkPath(str(module), rep)
     assert not rep.problems, "pyflakes found real defects:\n  " + "\n  ".join(rep.problems)

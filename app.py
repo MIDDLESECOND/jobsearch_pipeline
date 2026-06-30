@@ -106,9 +106,12 @@ def jobs_for_view(conn, view, for_date, cap):
             (for_date,),
         ).fetchall()
 
+    # Batch the chain-decision lookup: one (chunked) query for the whole row set rather than a
+    # per-row effective_decision call (that was O(N) round-trips — seconds on the backlog view).
+    decisions = pipeline.effective_decisions(conn, rows)
     out = []
     for r in rows:
-        dec = pipeline.effective_decision(conn, r)
+        dec = decisions[r["job_url"]]
         # Backlog: drop a relisting whose chain the user already decided (its own app_status is
         # NULL, but the canonical/sibling carries the decision). This replaces the old join's
         # `j.repost_of IS NULL OR canonical-undecided` clause. Note effective_decision spans the

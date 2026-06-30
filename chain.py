@@ -302,6 +302,14 @@ def _fmt_decision(dec):
     return ", ".join(bits) or "undecided"
 
 
+# Columns effective_decision / effective_decisions fetch per chain member: what _decide needs to
+# reduce a decision, PLUS the canonical's first_seen/verdict for the repost note, PLUS repost_of so
+# the batched variant can group members back to their canonical. Both queries share this list so
+# their column shapes can't drift.
+_MEMBER_COLS = ("job_url, repost_of, first_seen, verdict, app_status, status_date, "
+                "filter_source, filter_gate, filter_date")
+
+
 def effective_decision(conn, row):
     """The single source of truth for "what has the user decided about this row's role?",
     spanning the whole repost chain. Used by the report (_repost_info), the web UI
@@ -321,14 +329,21 @@ def effective_decision(conn, row):
     # canonical's first_seen/verdict for the repost note (the canonical is itself a member). Replaces
     # the old three-query path (_chain_members + _chain_decision + a separate canonical SELECT).
     rows = conn.execute(
-        "SELECT job_url, first_seen, verdict, app_status, status_date, "
-        "filter_source, filter_gate, filter_date FROM jobs WHERE job_url=? OR repost_of=?",
+        f"SELECT {_MEMBER_COLS} FROM jobs WHERE job_url=? OR repost_of=?",
         (canonical_url, canonical_url),
     ).fetchall()
-    dec = _decide(rows) or {}
+    return _effective_from_members(row, rows)
+
+
+def _effective_from_members(row, members):
+    """Build effective_decision's return dict for `row` from its already-fetched chain `members`.
+    PURE (no DB). Shared by the single-row effective_decision and the batched effective_decisions
+    so the dict shape and the _decide reduction have exactly one implementation."""
+    canonical_url = row["repost_of"] or row["job_url"]
+    dec = _decide(members) or {}
     # The canonical's own row (None only if repost_of points at a row that doesn't exist — an
     # orphaned manual edit; original_* then stay None, as before).
-    canon = next((r for r in rows if r["job_url"] == canonical_url), None)
+    canon = next((m for m in members if m["job_url"] == canonical_url), None)
     return {
         "app_status": dec.get("app_status"),
         "status_date": dec.get("status_date"),
@@ -338,6 +353,34 @@ def effective_decision(conn, row):
         "is_repost": bool(row["repost_of"]),
         "original_first_seen": canon["first_seen"] if canon else None,
         "original_verdict": canon["verdict"] if canon else None,
+    }
+
+
+def effective_decisions(conn, rows):
+    """Batched effective_decision: returns {job_url: decision-dict} for a whole row set in a couple
+    of queries instead of one query per row. Same dict shape and same _decide reduction as
+    effective_decision (it delegates to the shared _effective_from_members) — still one source of
+    truth, just amortized. The list views (web UI) use this; calling effective_decision per row was
+    O(N) round-trips and made the backlog view take seconds."""
+    rows = list(rows)
+    if not rows:
+        return {}
+    canon_urls = list({r["repost_of"] or r["job_url"] for r in rows})
+    # Fetch every chain member (canonical + its relistings) for all canonicals at once, grouped back
+    # to their canonical url. Chunked to stay under SQLite's bound-variable limit (999 on old builds):
+    # each chunk binds 2*len(part) params (job_url IN ... OR repost_of IN ...), so 400 keeps it <800.
+    members_by_canon = {}
+    CHUNK = 400
+    for i in range(0, len(canon_urls), CHUNK):
+        part = canon_urls[i:i + CHUNK]
+        qs = ",".join("?" * len(part))
+        q = (f"SELECT {_MEMBER_COLS} FROM jobs "
+             f"WHERE job_url IN ({qs}) OR repost_of IN ({qs})")
+        for m in conn.execute(q, tuple(part) + tuple(part)):
+            members_by_canon.setdefault(m["repost_of"] or m["job_url"], []).append(m)
+    return {
+        r["job_url"]: _effective_from_members(r, members_by_canon.get(r["repost_of"] or r["job_url"], []))
+        for r in rows
     }
 
 

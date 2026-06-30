@@ -5,8 +5,10 @@ Local web UI for triaging job postings — a faster alternative to the
 
 Launched via `python pipeline.py ui`. It is a thin Flask layer over the existing
 pipeline functions and the existing `jobs.db`: it reuses `cmd_mark` / `cmd_reject`
-(so repost-chain propagation and the status lift behave exactly like the CLI) and
-makes no schema changes. Single-user, local-only — binds to 127.0.0.1.
+(so repost-chain propagation and the status lift behave exactly like the CLI), and
+the shared `_dupe_resolve` / `_dupe_commit` / `_dupe_unlink` cores for manually
+linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
+changes. Single-user, local-only — binds to 127.0.0.1.
 """
 
 import json
@@ -63,6 +65,9 @@ def row_to_dict(row, cap):
         "filter_source": row["filter_source"],
         "filter_gate": row["filter_gate"],
         "is_repost": bool(row["repost_of"]),
+        # Manually-linked relisting (repost_source set) → the UI offers an "Unlink" control; an
+        # auto-detected repost (repost_source NULL) is not user-unlinkable here.
+        "is_manual_repost": row["repost_source"] is not None,
         # The canonical original's decision, so the UI can derive a relisting's effective status
         # (its own app_status is NULL — only the canonical carries the decision). Mirrors the
         # report's _repost_info; the client recomputes "effective" after a decision (see patchJob).
@@ -162,15 +167,18 @@ def api_clip():
     return jsonify({"text": text, "truncated": len(row["description"]) >= cap})
 
 
+def _origin_ok():
+    # CSRF guard for the state-changing routes. The browser sends an Origin header on any
+    # cross-site POST; refuse it unless it matches our own origin. (Same-origin requests from the
+    # UI either omit Origin or send a matching one.) Requiring real application/json — i.e. dropping
+    # force=True on get_json — also forces a CORS preflight a cross-site page can't satisfy.
+    origin = request.headers.get("Origin")
+    return origin is None or origin == request.host_url.rstrip("/")
+
+
 @app.route("/api/decision", methods=["POST"])
 def api_decision():
-    # CSRF guard: this is the only state-changing route. The browser sends an Origin
-    # header on any cross-site POST; refuse it unless it matches our own origin. (Same-
-    # origin requests from the UI either omit Origin or send a matching one.) Requiring
-    # real application/json — i.e. dropping force=True — also forces a CORS preflight a
-    # cross-site page can't satisfy.
-    origin = request.headers.get("Origin")
-    if origin is not None and origin != request.host_url.rstrip("/"):
+    if not _origin_ok():
         return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
     body = request.get_json(silent=True) or {}
     job_url = body.get("job_url")
@@ -205,6 +213,41 @@ def api_decision():
         "message": "done" if ok else "no matching posting",
         "affected": affected if ok else [],
     })
+
+
+@app.route("/api/dupe", methods=["POST"])
+def api_dupe():
+    """Manually link two postings as the same role (or `undo` a manual link). Thin layer over the
+    shared dupe cores in pipeline — assume_yes is implicit (the browser does its own confirm)."""
+    if not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True) or {}
+    job_url = body.get("job_url")
+    of_url = body.get("of")
+    undo = bool(body.get("undo"))
+    if not job_url or (not undo and not of_url):
+        return jsonify({"ok": False, "message": "bad request"}), 400
+
+    conn = pipeline.get_db(pipeline.load_config())
+    try:
+        if undo:
+            row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+            if row is None:
+                return jsonify({"ok": False, "message": "no matching posting"}), 404
+            ok, message, _ = pipeline._dupe_unlink(conn, row)
+        else:
+            plan, err = pipeline._dupe_resolve(conn, job_url, of_url)
+            if err:
+                ok, message = False, err
+            else:
+                pipeline._dupe_commit(conn, plan)
+                w = plan["winner"]
+                ok, message = True, f"linked under {w['title']} — {w['company']}"
+    finally:
+        conn.close()
+    # The merge changes repost state across both chains; the client just reloads the view rather
+    # than patching repost_of/repost_source/chain fields card-by-card.
+    return jsonify({"ok": bool(ok), "message": message})
 
 
 def serve(host="127.0.0.1", port=5000):

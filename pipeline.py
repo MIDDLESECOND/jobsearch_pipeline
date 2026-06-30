@@ -1239,6 +1239,13 @@ def _resolve_posting(conn, url, label):
         print(f"[{label}] no posting matches '{url}'", file=sys.stderr)
         return None
     if len(matches) > 1:
+        # A full job_url is a substring of any longer one (LinkedIn ids nest: .../view/123 is a
+        # substring of .../view/1234), so an exact url would otherwise read as "ambiguous". When the
+        # input exactly equals one row's job_url, take it — that's the caller naming a specific row
+        # (always true for the web UI, which passes full urls), not a fuzzy substring.
+        exact = [m for m in matches if m["job_url"] == url]
+        if len(exact) == 1:
+            return exact[0]
         print(f"[{label}] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
         for m in matches:
             print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
@@ -1432,32 +1439,26 @@ def _fmt_decision(dec):
     return ", ".join(bits) or "undecided"
 
 
-def cmd_dupe(conn, url, of_url, undo, assume_yes):
-    """Manually link two existing postings as the same role (a duplicate `_find_repost` missed).
-    The earliest-`first_seen` posting becomes the canonical original; the other (and any relistings
-    it owned) is repointed under it via `repost_of`, marked `repost_source='manual'` for provenance.
-    Any existing applied/passed/reject decision propagates across the unified chain; a still-`new`
-    member is then eval-skipped by `skip_decided_reposts`. `--undo` splits the manual link apart."""
-    label = "dupe"
-    a = _resolve_posting(conn, url, label)
+def _dupe_resolve(conn, url, of_url):
+    """Validate a link request and build the merge plan WITHOUT mutating. Returns `(plan, error)`
+    with exactly one non-None: `plan` is a dict (winner, loser, *_members, dec) ready for
+    `_dupe_commit`; `error` is a user-facing string explaining a guard failure. Shared by the CLI
+    (`cmd_dupe`) and the web UI (`app.api_dupe`) so the guard logic lives in one place."""
+    a = _resolve_posting(conn, url, "dupe")
     if a is None:
-        return False
-    if undo:
-        return _dupe_undo(conn, a, label)
+        return None, "no posting matches that URL"
     if not of_url:
-        print(f"[{label}] provide --of (a unique substring of the other posting's job_url)", file=sys.stderr)
-        return False
-    b = _resolve_posting(conn, of_url, label)
+        return None, "provide the other posting (--of <id or unique substring of its job_url>)"
+    b = _resolve_posting(conn, of_url, "dupe")
     if b is None:
-        return False
+        return None, "no posting matches the other URL"
 
     # Resolve each side to its chain's canonical, so we link canonical-to-canonical (never build
     # a 2-level chain the flat _chain_targets can't traverse).
     a_canon_url = a["repost_of"] or a["job_url"]
     b_canon_url = b["repost_of"] or b["job_url"]
     if a_canon_url == b_canon_url:
-        print(f"[{label}] already the same role — nothing to link", file=sys.stderr)
-        return False
+        return None, "already the same role — nothing to link"
     a_canon = conn.execute("SELECT * FROM jobs WHERE job_url=?", (a_canon_url,)).fetchone()
     b_canon = conn.execute("SELECT * FROM jobs WHERE job_url=?", (b_canon_url,)).fetchone()
 
@@ -1479,33 +1480,29 @@ def cmd_dupe(conn, url, of_url, undo, assume_yes):
         tuple(loser_members),
     ).fetchall()
     if nested:
-        print(f"[{label}] the merged-in role still contains manual link(s) — undo those first:", file=sys.stderr)
-        for n in nested:
-            print(f"    {n['title']} — {n['company']}  (dupe --url {n['job_url']} --undo)", file=sys.stderr)
-        return False
+        names = "; ".join(f"{n['title']} — {n['company']} [{n['job_url']}]" for n in nested)
+        return None, f"the merged-in role still contains manual link(s) — undo those first: {names}"
 
     # Conflict guard: never overwrite one side's decision with a different one — abort instead.
     w_dec = _chain_decision(conn, winner_members)
     l_dec = _chain_decision(conn, loser_members)
     if w_dec and l_dec and _decision_sig(w_dec) != _decision_sig(l_dec):
-        print(f"[{label}] CONFLICT — both roles already decided, differently:", file=sys.stderr)
-        print(f"    keep : {winner['title']} — {winner['company']}  [{_fmt_decision(w_dec)}]", file=sys.stderr)
-        print(f"    merge: {loser['title']} — {loser['company']}  [{_fmt_decision(l_dec)}]", file=sys.stderr)
-        print(f"    resolve first (undo one side), then re-run dupe.", file=sys.stderr)
-        return False
-    dec = w_dec or l_dec  # the surviving decision (only one set, or both equal)
+        return None, (f"both roles already decided differently — keep [{_fmt_decision(w_dec)}] "
+                      f"vs merge [{_fmt_decision(l_dec)}]; resolve one first")
+    plan = {
+        "winner": winner, "loser": loser,
+        "winner_members": winner_members, "loser_members": loser_members,
+        "dec": w_dec or l_dec,  # the surviving decision (only one set, or both equal)
+    }
+    return plan, None
 
-    # Preview + confirm: a wrong merge buries a real job under another role's decision.
-    print(f"[{label}] link as the SAME role:")
-    print(f"    canonical (kept) : {winner['title']} — {winner['company']} ({winner['first_seen']})")
-    print(f"    relisting (merge): {loser['title']} — {loser['company']} ({loser['first_seen']})")
-    if len(loser_members) > 1:
-        print(f"    + {len(loser_members) - 1} relisting(s) already under the merged side")
-    if dec:
-        print(f"    decision propagated to the whole chain: {_fmt_decision(dec)}")
-    if not assume_yes and not _confirm(f"[{label}] proceed?"):
-        print(f"[{label}] aborted", file=sys.stderr)
-        return False
+
+def _dupe_commit(conn, plan):
+    """Apply a merge plan from `_dupe_resolve`: repoint the loser chain under the winner canonical,
+    propagate the surviving decision (preserving original dates), eval-skip still-`new` members.
+    Returns the affected job_url list. Caller is responsible for any preview/confirmation."""
+    winner, loser = plan["winner"], plan["loser"]
+    winner_members, loser_members, dec = plan["winner_members"], plan["loser_members"], plan["dec"]
 
     # Repoint the loser canonical AND every relisting it owned onto the winner canonical (the flat
     # model breaks if a child is left pointing at the now-demoted loser). Encode each row's prior
@@ -1518,8 +1515,6 @@ def cmd_dupe(conn, url, of_url, undo, assume_yes):
             (winner["job_url"], src, c),
         )
 
-    # Propagate the surviving decision across the unified chain (preserving the original dates —
-    # this is the one thing cmd_mark/cmd_reject couldn't do, having run before the link existed).
     if dec:
         all_members = winner_members | loser_members
         qs = ",".join("?" * len(all_members))
@@ -1539,15 +1534,14 @@ def cmd_dupe(conn, url, of_url, undo, assume_yes):
             )
     conn.commit()
     skip_decided_reposts(conn)  # eval-skip any still-'new' member now under a decided canonical
-    print(f"[{label}] linked: {loser['title']} — {loser['company']} → canonical {winner['job_url']}")
-    return True
+    return sorted(winner_members | loser_members)
 
 
-def _dupe_undo(conn, a, label):
-    """Split a manual link apart: detach the manually-linked relisting `a` (and the sub-chain it
-    originally headed) from its current canonical, restoring the two independent chains. Structure
-    only — a decision that propagated across the merge is left as-is (clear it with
-    applied/passed/reject --undo if needed); the note below says so."""
+def _dupe_unlink(conn, a):
+    """Core of `dupe --undo`: detach the manually-linked relisting `a` (and the sub-chain it
+    originally headed) from its canonical, restoring the two independent chains. Structure only — a
+    decision that propagated across the merge is left as-is. Returns `(ok, message, affected)`.
+    Shared by the CLI and the web UI."""
     src = a["repost_source"]
     # Identify the loser canonical L: the original head of the merged-in sub-chain. `a` may BE it
     # ('manual') or be one of its relistings ('manual:<L>').
@@ -1556,19 +1550,16 @@ def _dupe_undo(conn, a, label):
     elif src and src.startswith("manual:"):
         loser_canon_url = src.split(":", 1)[1]
     else:
-        print(f"[{label}] '{a['title']} — {a['company']}' is not a manually-linked relisting "
-              f"(repost_source={src!r}); nothing to undo", file=sys.stderr)
-        return False
+        return False, f"'{a['title']} — {a['company']}' is not a manually-linked relisting", []
 
     # Resolve the canonical row up front and bail BEFORE mutating if it's gone — else the detach
     # loop would repoint children at a non-existent canonical (orphan) and commit before the final
-    # dereference crashes. Nothing in the pipeline deletes rows, so this only guards manual DB edits.
+    # dereference. Nothing in the pipeline deletes rows, so this only guards manual DB edits.
     loser_canon = conn.execute(
         "SELECT title, company FROM jobs WHERE job_url=?", (loser_canon_url,)
     ).fetchone()
     if loser_canon is None:
-        print(f"[{label}] encoded original {loser_canon_url!r} no longer exists; cannot undo", file=sys.stderr)
-        return False
+        return False, f"encoded original {loser_canon_url!r} no longer exists; cannot undo", []
 
     # The sub-chain to detach: the loser canonical plus every row encoded as its former child.
     rows = conn.execute(
@@ -1583,10 +1574,46 @@ def _dupe_undo(conn, a, label):
         )
     conn.commit()
     skip_decided_reposts(conn)  # reverse pass restores any 'repost_decided' member to 'new'
-    print(f"[{label}] unlinked: {loser_canon['title']} — {loser_canon['company']} "
-          f"({len(rows)} row(s) restored to their own chain)")
-    print(f"[{label}] note: any decision propagated by the merge was left as-is — "
-          f"clear it with applied/passed/reject --undo if it shouldn't carry over.")
+    msg = (f"unlinked: {loser_canon['title']} — {loser_canon['company']} "
+           f"({len(rows)} row(s) restored to their own chain); any decision propagated by the merge "
+           f"was left as-is — undo it separately (passed/applied/reject) if it shouldn't carry over")
+    return True, msg, [r["job_url"] for r in rows]
+
+
+def cmd_dupe(conn, url, of_url, undo, assume_yes):
+    """CLI wrapper over the shared dupe cores. Manually link two existing postings as the same role
+    (a duplicate `_find_repost` missed): earliest-`first_seen` becomes canonical, the other side is
+    repointed under it, and any existing decision propagates across the unified chain. `--undo`
+    splits a manual link apart. Previews the merge and confirms (skippable with `assume_yes`)."""
+    label = "dupe"
+    if undo:
+        a = _resolve_posting(conn, url, label)
+        if a is None:
+            return False
+        ok, msg, _ = _dupe_unlink(conn, a)
+        print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
+        return ok
+
+    plan, err = _dupe_resolve(conn, url, of_url)
+    if err:
+        print(f"[{label}] {err}", file=sys.stderr)
+        return False
+    winner, loser, dec = plan["winner"], plan["loser"], plan["dec"]
+
+    # Preview + confirm: a wrong merge buries a real job under another role's decision.
+    print(f"[{label}] link as the SAME role:")
+    print(f"    canonical (kept) : {winner['title']} — {winner['company']} ({winner['first_seen']})")
+    print(f"    relisting (merge): {loser['title']} — {loser['company']} ({loser['first_seen']})")
+    if len(plan["loser_members"]) > 1:
+        print(f"    + {len(plan['loser_members']) - 1} relisting(s) already under the merged side")
+    if dec:
+        print(f"    decision propagated to the whole chain: {_fmt_decision(dec)}")
+    if not assume_yes and not _confirm(f"[{label}] proceed?"):
+        print(f"[{label}] aborted", file=sys.stderr)
+        return False
+
+    _dupe_commit(conn, plan)
+    print(f"[{label}] linked: {loser['title']} — {loser['company']} → canonical {winner['job_url']}")
     return True
 
 

@@ -7,6 +7,26 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-06-30 — manual duplicate linking in the web UI
+
+### Why
+`dupe` was CLI-only; the triage UI is where duplicates are actually spotted (two same-role cards in
+Today/Backlog). Surfacing the link there closes the loop without dropping to a terminal.
+
+### What changed
+- **Shared dupe cores (`_dupe_resolve` / `_dupe_commit` / `_dupe_unlink`, `pipeline.py`).** Extracted
+  the validate → preview → commit and the unlink logic out of `cmd_dupe`/`_dupe_undo` so the CLI and
+  the web UI run the *same* guard/conflict/propagation code (no duplicated logic). `cmd_dupe` is now a
+  thin CLI wrapper (preview + confirm); the guards return user-facing strings instead of printing.
+- **`/api/dupe` route + UI controls (`app.py`, `templates/index.html`).** Two-click linking: "⧉
+  duplicate" pins a card as an anchor (a sticky banner that survives tab/date changes, so cross-day
+  duplicates can be matched), then "↩ same role" on the other card links them; "Unlink dup" splits a
+  manual link. `is_manual_repost` is exposed in `/api/jobs` to gate the unlink control. No schema
+  change — the merge writes the same `repost_of`/`repost_source` the CLI does, so report/UI rendering
+  is unchanged.
+
+---
+
 ## 2026-06-30 — manual duplicate linking (`dupe` command)
 
 ### Why

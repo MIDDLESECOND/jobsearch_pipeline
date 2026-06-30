@@ -56,6 +56,16 @@
                   padding: .25rem .6rem; }
   .trunc { font-size: .74rem; color: #b45309; }
   .toast { font-size: .76rem; color: #166534; }
+  /* Lives inside the (already sticky) <header> as a full-width row that wraps below the tabs, so
+     it stays visible while scrolling instead of being painted behind a separate sticky bar. The
+     negative margins cancel the header's padding so the banner spans edge-to-edge. */
+  #linkbar { display: none; width: 100%; margin: .6rem -1rem -.75rem; padding: .5rem 1rem;
+             background: #fff7ed; border-top: 1px solid #fed7aa; color: #9a3412; font-size: .85rem; }
+  #linkbar button { margin-left: .5rem; }
+  button.dupe { background: #fff; color: #6b21a8; border-color: #d8b4fe; font-size: .78rem;
+                padding: .25rem .6rem; }
+  button.dupe-target { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+  .card.anchor { outline: 2px solid #7c3aed; outline-offset: 1px; }
 </style>
 </head>
 <body>
@@ -69,6 +79,7 @@
   </div>
   <input type="date" id="date" value="{{ today }}">
   <span id="count"></span>
+  <div id="linkbar"></div>
 </header>
 <main id="list"></main>
 
@@ -77,6 +88,13 @@ const GATES = {{ gates | tojson }};
 const FEEDBACK_URL = {{ feedback_url | tojson }};
 const TODAY = {{ today | tojson }};
 let view = "today";
+// The posting pinned as the anchor for manual duplicate-linking, or null. Kept in module state
+// (not reset by load()) so it survives tab/date changes — you can pin one card, navigate to a
+// different day or the Backlog, and click the duplicate there. Mirrors `pipeline dupe`.
+let linkAnchor = null;
+// Guards against a second link/unlink POST while one is in flight (the buttons render on every
+// card, so a per-card .busy isn't enough — a fast click on two different targets would double-fire).
+let linkBusy = false;
 
 const tabs = document.querySelectorAll(".tab");
 const dateInput = document.getElementById("date");
@@ -190,6 +208,20 @@ function card(j) {
     }));
     actions.appendChild(sel);
   }
+
+  // Manual duplicate-linking affordances. Sticky across reloads (card() re-reads linkAnchor),
+  // so you can pin one card and click its match in another tab/date.
+  if (linkAnchor && linkAnchor.job_url === j.job_url) {
+    div.classList.add("anchor");
+    actions.appendChild(btn("Cancel link", "undo", cancelLink));
+  } else if (linkAnchor) {
+    actions.appendChild(btn("↩ same role", "dupe-target", () => completeLink(div, j)));
+  } else {
+    actions.appendChild(btn("⧉ duplicate", "dupe", () => startLink(j)));
+  }
+  if (j.is_manual_repost) {
+    actions.appendChild(btn("Unlink dup", "undo", () => unlinkDup(div, j)));
+  }
   return div;
 }
 
@@ -294,6 +326,70 @@ async function decide(div, j, action, gate) {
   } catch (e) {
     alert("error: " + e); div.classList.remove("busy");
   }
+}
+
+function renderLinkbar() {
+  const bar = document.getElementById("linkbar");
+  if (!linkAnchor) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+  bar.style.display = "block";  // explicit — "" would fall back to the stylesheet's display:none
+  bar.innerHTML = `Linking <b>${esc(linkAnchor.title)} — ${esc(linkAnchor.company)}</b> — `
+    + `click <b>↩ same role</b> on its duplicate (switch tabs/dates to find it).`;
+  const cancel = btn("Cancel", "undo", cancelLink);
+  bar.appendChild(cancel);
+}
+
+function startLink(j) {
+  linkAnchor = { job_url: j.job_url, title: j.title, company: j.company };
+  renderLinkbar();
+  load();  // re-render cards so every other card shows the "↩ same role" target button
+}
+
+function cancelLink() {
+  linkAnchor = null;
+  renderLinkbar();
+  load();
+}
+
+async function completeLink(div, target) {
+  if (linkBusy || !linkAnchor || target.job_url === linkAnchor.job_url) return;
+  const ok = confirm(
+    `Link these as the SAME role?\n\n`
+    + `  • ${target.title} — ${target.company}\n`
+    + `  • ${linkAnchor.title} — ${linkAnchor.company}\n\n`
+    + `The earliest posting becomes canonical; any decision propagates across both.`);
+  if (!ok) return;
+  linkBusy = true;
+  div.classList.add("busy");
+  try {
+    const res = await fetch("/api/dupe", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({job_url: target.job_url, of: linkAnchor.job_url}),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
+    linkAnchor = null;
+    renderLinkbar();
+    load();  // repost state changed across both chains — reload to reflect it
+  } catch (e) { alert("error: " + e); div.classList.remove("busy"); }
+  finally { linkBusy = false; }
+}
+
+async function unlinkDup(div, j) {
+  if (linkBusy || !confirm(`Unlink "${j.title} — ${j.company}" from its canonical (split the manual link)?`)) return;
+  linkBusy = true;
+  div.classList.add("busy");
+  try {
+    const res = await fetch("/api/dupe", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({job_url: j.job_url, undo: true}),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
+    load();
+  } catch (e) { alert("error: " + e); div.classList.remove("busy"); }
+  finally { linkBusy = false; }
 }
 
 async function load() {

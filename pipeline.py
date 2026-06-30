@@ -22,6 +22,7 @@ or ANTHROPIC_API_KEY when provider is "anthropic".
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -51,7 +52,9 @@ def load_config():
 
 
 def get_db(cfg):
-    conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"])
+    # timeout (busy-wait on a locked DB) raised above the 5s default so a concurrent open
+    # during the one-time fingerprint recompute waits it out instead of erroring.
+    conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"], timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -86,6 +89,9 @@ def get_db(cfg):
     """)
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
+    # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;
+    # index it so chain resolution is O(chain) not O(table).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_repost_of ON jobs(repost_of)")
     conn.commit()
     return conn
 
@@ -125,6 +131,7 @@ def _migrate(conn):
     conn.commit()
     _migrate_applied_to_status(conn, cols)
     _backfill_fingerprints(conn)
+    _recompute_fingerprints(conn)
 
 
 def _migrate_applied_to_status(conn, cols):
@@ -170,6 +177,32 @@ def _backfill_fingerprints(conn):
         )
     conn.commit()
     print(f"[migrate] backfilled fingerprints for {len(rows)} existing rows")
+
+
+def _recompute_fingerprints(conn):
+    """Re-derive the content fingerprint for every row when the normalization scheme
+    changes, so historical rows and new inserts share one key space (else a relisting of
+    an old role under a new-style location label wouldn't match). Gated on PRAGMA
+    user_version, so it runs exactly once per scheme bump. Only the fingerprint is
+    rewritten; existing repost_of links are left as-is — consistent with the original
+    backfill, historical rows are not retroactively cross-linked."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= _NORM_VERSION:
+        return
+    rows = conn.execute("SELECT job_url, company, title, location FROM jobs").fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE jobs SET norm_company=?, norm_title=?, fingerprint=? WHERE job_url=?",
+            (
+                _norm_company(r["company"]),
+                _norm_title(r["title"]),
+                _fingerprint(r["company"], r["location"]),
+                r["job_url"],
+            ),
+        )
+    conn.execute(f"PRAGMA user_version = {_NORM_VERSION}")
+    conn.commit()
+    if rows:  # stay silent on a fresh/empty DB (mirrors _backfill_fingerprints)
+        print(f"[migrate] recomputed fingerprints for {len(rows)} rows (norm v{_NORM_VERSION})")
 
 
 # ---------------------------------------------------------------------- fetch
@@ -466,12 +499,62 @@ def _norm_title(s):
     return " ".join(expanded).strip()
 
 
+# Bumped whenever the fingerprint normalization changes; gates a one-time recompute of stored
+# fingerprints (see _recompute_fingerprints) so existing rows and new inserts share a key space.
+# Current scheme: comma-aware _norm_location with tail-only metro-cruft + state-abbrev canonicalization.
+_NORM_VERSION = 3
+
+# US state full-name -> 2-letter abbreviation. Applied only to a location's trailing
+# state/region component (see _norm_location), so a city named after a state
+# ("New York, NY") is never rewritten to "ny ny".
+_US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar",
+    "california": "ca", "colorado": "co", "connecticut": "ct", "delaware": "de",
+    "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id",
+    "illinois": "il", "indiana": "in", "iowa": "ia", "kansas": "ks",
+    "kentucky": "ky", "louisiana": "la", "maine": "me", "maryland": "md",
+    "massachusetts": "ma", "michigan": "mi", "minnesota": "mn", "mississippi": "ms",
+    "missouri": "mo", "montana": "mt", "nebraska": "ne", "nevada": "nv",
+    "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+    "north carolina": "nc", "north dakota": "nd", "ohio": "oh", "oklahoma": "ok",
+    "oregon": "or", "pennsylvania": "pa", "rhode island": "ri", "south carolina": "sc",
+    "south dakota": "sd", "tennessee": "tn", "texas": "tx", "utah": "ut",
+    "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
+    "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
+}
+_COUNTRY_TOKENS = {"united states", "usa", "us", "u s", "u s a"}
+# LinkedIn metro labels: "...New York Metropolitan Area", "Greater Boston",
+# "San Francisco Bay Area" — drop the cruft, keep the place name.
+_METRO_CRUFT = re.compile(r"\b(?:greater|metropolitan|metro|area|region)\b")
+
+
 def _norm_location(s):
-    s = _clean(s)
-    # Drop a trailing country qualifier so "Austin, TX, United States" and
-    # "Austin, TX" share a fingerprint.
-    s = re.sub(r"\b(?:united states|usa|us)\b", "", s)
-    return re.sub(r"\s+", " ", s).strip()
+    """Blocking-key form of a location. Parse the raw "City, State, Country" structure
+    BEFORE _clean() flattens the commas: drop the country, then canonicalize the trailing
+    state/region component (metro cruft removed; full state name -> 2-letter abbrev) while
+    leaving the city verbatim. Handling city and state separately is what lets "Rochester,
+    New York Metropolitan Area" and "Rochester, NY" collapse to one key without mangling a
+    city literally named after a state ("New York, NY" stays "new york ny"). Deliberately
+    conservative: a present state is NOT dropped to match a state-absent variant — over-
+    matching (a false "ALREADY APPLIED") is the worse error here (see the title-match note)."""
+    if not isinstance(s, str):
+        return ""
+    parts = [_clean(p) for p in s.split(",")]
+    parts = [p for p in parts if p and p not in _COUNTRY_TOKENS]
+    if not parts:
+        return ""
+    # Strip metro cruft from the TRAILING (state/region) component only, then map a full state
+    # name to its abbrev when a city precedes it. Kept to the tail on purpose: 'area'/'region'
+    # are ordinary words inside real city names ("Capital Region", "Bay Area"), so stripping
+    # them from city components over-collapses distinct places — a false "ALREADY APPLIED" is
+    # the worse error. This handles the documented "Rochester, New York Metropolitan Area" vs
+    # "Rochester, NY" case (cruft sits in the tail) while leaving the city verbatim. Metro cruft
+    # that LinkedIn puts in the city slot ("Greater Boston") is left as a known under-match.
+    tail = re.sub(r"\s+", " ", _METRO_CRUFT.sub(" ", parts[-1])).strip()
+    if len(parts) > 1:
+        tail = _US_STATES.get(tail, tail)
+    parts[-1] = tail
+    return " ".join(p for p in parts if p).strip()
 
 
 def _fingerprint(company, location):
@@ -608,13 +691,24 @@ def skip_decided_reposts(conn):
     to that canonical (see _chain_targets), so the canonical's decision state is authoritative for
     the whole chain. Matched rows get status='repost_decided' (skipped by evaluate_new_jobs).
     Mirrors apply_salary_filter / apply_hard_filters — a deterministic pre-eval pass."""
+    # Reconciles in BOTH directions from current decision state, so it self-corrects: a 'new'
+    # relisting of a decided chain is skipped, and a previously-skipped relisting whose chain
+    # decision was since undone returns to 'new' to be (re-)evaluated. Without the reverse pass
+    # an undo would strand the sibling at 'repost_decided' forever (never re-evaluated).
+    decided = ("(SELECT job_url FROM jobs WHERE app_status IS NOT NULL "
+               "OR filter_source IS NOT NULL)")
     cur = conn.execute(
-        "UPDATE jobs SET status='repost_decided' WHERE status='new' AND repost_of IN "
-        "(SELECT job_url FROM jobs WHERE app_status IS NOT NULL OR filter_source IS NOT NULL)"
+        f"UPDATE jobs SET status='repost_decided' WHERE status='new' AND repost_of IN {decided}"
+    )
+    # repost_of / job_url are never NULL here, so NOT IN is safe (no NULL-row short-circuit).
+    rev = conn.execute(
+        f"UPDATE jobs SET status='new' WHERE status='repost_decided' AND repost_of NOT IN {decided}"
     )
     conn.commit()
     if cur.rowcount:
         print(f"[repost-skip] {cur.rowcount} relistings of already-decided roles (eval skipped, cost saved)")
+    if rev.rowcount:
+        print(f"[repost-skip] {rev.rowcount} relistings restored to 'new' (chain decision undone)")
 
 
 # ----------------------------------------------------------------- evaluation
@@ -697,12 +791,19 @@ def normalize_result(result):
 
     if verdict in ("PASS", "RECRUITER_ONLY"):
         bd = result.get("score_breakdown") or {}
-        if bd.get("ai_artifact_depth") == 0:
+        depth = bd.get("ai_artifact_depth")
+        # The 50/0 cap is load-bearing and must not depend on the model emitting a
+        # literal 0: the output spec allows a null/partial score_breakdown, so any depth
+        # that isn't a finite number (None, missing, string, NaN/Infinity — json.loads
+        # parses bare NaN/Infinity tokens) must fail closed, not slip through to bucket 2.
+        valid = (isinstance(depth, (int, float)) and not isinstance(depth, bool)
+                 and math.isfinite(depth))
+        if not valid or depth == 0:
             verdict = "RECRUITER_ONLY"
             result["bucket"] = 1
         if not result.get("bucket"):
             # depth 3 -> clean low-code delivery (3); otherwise acceptable-tier (2)
-            result["bucket"] = 3 if bd.get("ai_artifact_depth") == 3 else 2
+            result["bucket"] = 3 if (valid and depth == 3) else 2
     else:  # GATE_FAIL
         result["bucket"] = None
         result["fit_score"] = None
@@ -1142,10 +1243,16 @@ def _resolve_posting(conn, url, label):
     return matches[0]
 
 
-def _chain_targets(m):
-    """The set of job_urls a per-posting decision should apply to: this posting plus the
-    canonical original of its repost chain, so a decision follows the role across relistings."""
-    return {m["job_url"], m["repost_of"]} - {None}
+def _chain_targets(conn, m):
+    """The set of job_urls a per-posting decision should apply to: the entire repost chain —
+    the canonical original PLUS every relisting that points at it — so a decision follows the
+    role across all relistings, not just the one named and its canonical. (Resolving only the
+    named row and its repost_of would leave sibling relistings with stale verdicts/overrides.)"""
+    canonical = m["repost_of"] or m["job_url"]
+    rows = conn.execute(
+        "SELECT job_url FROM jobs WHERE job_url=? OR repost_of=?", (canonical, canonical)
+    ).fetchall()
+    return {r["job_url"] for r in rows}
 
 
 def cmd_mark(conn, url, status):
@@ -1158,7 +1265,7 @@ def cmd_mark(conn, url, status):
         return False
     today = date.today().isoformat()
     stamp = today if status else None
-    for t in _chain_targets(m):
+    for t in _chain_targets(conn, m):
         conn.execute(
             "UPDATE jobs SET app_status=?, status_date=? WHERE job_url=?", (status, stamp, t)
         )
@@ -1183,22 +1290,35 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
 
     today = date.today().isoformat()
     if undo:
-        for t in _chain_targets(m):
+        for t in _chain_targets(conn, m):
+            # Clear ONLY a manual override (filter_source='manual'); a sibling auto-failed by a
+            # filters.yaml rule keeps its 'rule:<name>' attribution — undoing a manual reject on
+            # one chain member must not wipe a deterministic rule on another. AND, for a row the
+            # reject had lifted out of 'new' before it was ever evaluated (rule_filtered + no
+            # verdict), restore status='new' so it isn't permanently excluded from the eval stage.
             conn.execute(
-                "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL WHERE job_url=?",
+                "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL, "
+                "status=CASE WHEN status='rule_filtered' AND verdict IS NULL THEN 'new' ELSE status END "
+                "WHERE job_url=? AND filter_source='manual'",
                 (t,),
             )
         conn.commit()
         print(f"[{label}] cleared override: {m['title']} — {m['company']}")
         return True
 
-    for t in _chain_targets(m):
+    for t in _chain_targets(conn, m):
         # Also lift a still-'new' row out of status='new' so it isn't sent to the paid
         # evaluator on the next run — you've already overruled it. Already-evaluated rows
         # keep their status (the report groups them by filter_source either way).
+        # The user's EXPLICITLY named row is always (re)stamped — they're overruling it, and
+        # may be re-attributing a row a filters.yaml rule had auto-failed. But when PROPAGATING
+        # to other chain members, don't clobber a sibling that a rule auto-failed: only stamp
+        # 'manual' where there's no existing rule:<name> attribution to preserve.
+        guard = "" if t == m["job_url"] else " AND (filter_source IS NULL OR filter_source='manual')"
         conn.execute(
             "UPDATE jobs SET filter_source='manual', filter_gate=?, filter_date=?, "
-            "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END WHERE job_url=?",
+            "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END "
+            f"WHERE job_url=?{guard}",
             (gate, today, t),
         )
     conn.commit()

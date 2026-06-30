@@ -164,7 +164,15 @@ def api_clip():
 
 @app.route("/api/decision", methods=["POST"])
 def api_decision():
-    body = request.get_json(force=True) or {}
+    # CSRF guard: this is the only state-changing route. The browser sends an Origin
+    # header on any cross-site POST; refuse it unless it matches our own origin. (Same-
+    # origin requests from the UI either omit Origin or send a matching one.) Requiring
+    # real application/json — i.e. dropping force=True — also forces a CORS preflight a
+    # cross-site page can't satisfy.
+    origin = request.headers.get("Origin")
+    if origin is not None and origin != request.host_url.rstrip("/"):
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True) or {}
     job_url = body.get("job_url")
     action = body.get("action")
     gate = body.get("gate") or "other"
@@ -179,7 +187,7 @@ def api_decision():
         row = conn.execute(
             "SELECT job_url, repost_of FROM jobs WHERE job_url=?", (job_url,)
         ).fetchone()
-        affected = sorted(pipeline._chain_targets(row)) if row else []
+        affected = sorted(pipeline._chain_targets(conn, row)) if row else []
         # job_url is unique, so passing it as the CLI's "unique substring" resolves to one row
         # and reuses the exact same propagation / status logic as the command line.
         if action in ("applied", "passed"):

@@ -16,6 +16,20 @@ import yaml
 
 from chain import _norm_company, _norm_title, _fingerprint, _NORM_VERSION
 
+# Windows consoles (and redirected log files) default to the locale code page — here `gbk` —
+# which can't encode characters that show up in scraped LinkedIn text: em-dashes in our own
+# format strings, and non-breaking spaces (\xa0) inside job titles/companies. A single such
+# character used to crash the whole run with UnicodeEncodeError mid-print. Force UTF-8 with
+# errors="replace" so output degrades a stray glyph instead of aborting. Runs on import, so
+# it covers every entry point (pipeline.py, app.py, the validation scripts) that pulls in core.
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 PROFILE_PATH = BASE_DIR / "profile.md"

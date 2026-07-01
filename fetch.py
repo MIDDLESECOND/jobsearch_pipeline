@@ -106,6 +106,18 @@ def _num(v):
         return None
 
 
+def _redact(msg, *secrets):
+    """Scrub secret values (the Adzuna app_id/app_key) from a string before it is printed,
+    so a credential that travels in the Adzuna request URL can never reach a log line — even
+    if a future exception type embeds the full URL. Only non-empty secrets are replaced
+    (guards against blanking the whole string on an empty/missing key)."""
+    out = msg
+    for s in secrets:
+        if s:
+            out = out.replace(s, "***")
+    return out
+
+
 # ---------------------------------------------------------------- Adzuna fetch
 #
 # Adzuna is a sanctioned REST API (free tier) used as a SECOND source alongside the
@@ -145,6 +157,10 @@ def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
         v = query.get(k)
         if v:
             params[k] = v
+    # Adzuna authenticates via query-string params (app_id/app_key), not a header — that is the
+    # API's requirement, not a choice. The key therefore lives in this URL string, so it must
+    # never be logged; the caller's error path runs the exception message through _redact() as a
+    # safety net in case a future exception type embeds the URL.
     url = ADZUNA_SEARCH_URL.format(country=country) + "?" + urllib.parse.urlencode(params)
     with urllib.request.urlopen(url, timeout=30) as resp:
         return json.load(resp).get("results", [])
@@ -190,7 +206,10 @@ def fetch_adzuna(cfg, conn):
             try:
                 results = _adzuna_search(country, app_id, app_key, query, where, rpp, max_days)
             except Exception as e:
-                print(f"[adzuna] {name} ({label}) FAILED: {e}", file=sys.stderr)
+                # Redact the credentials in case the exception message carries the request URL
+                # (Adzuna auth is in the query string — see _adzuna_search).
+                print(f"[adzuna] {name} ({label}) FAILED: {_redact(str(e), app_id, app_key)}",
+                      file=sys.stderr)
                 time.sleep(delay)
                 continue
 

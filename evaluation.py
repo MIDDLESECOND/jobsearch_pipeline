@@ -13,6 +13,7 @@ import math
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core import PROFILE_PATH, GUIDE_PATH, GATE_NAMES, VERDICTS, _ensure_api_key
 
@@ -184,9 +185,48 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
             u.get("completion_tokens", 0), cache_read, 0)
 
 
+def _evaluate_one(row, provider, model, system_prompt, client, api_key):
+    """Pure worker (no DB access): build the message, call the provider with the same
+    3-attempt backoff, parse. Returns (job_url, result_or_None, in, out, cache_read,
+    cache_write) with token counts summed across attempts — identical to the serial
+    tally, but off the main thread so calls overlap. All DB writes stay in
+    evaluate_new_jobs on the main thread (a sqlite3 conn isn't safe across threads)."""
+    user_msg = (
+        f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
+        f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
+        f"POSTED SALARY: {row['salary_min']}–{row['salary_max']}\n\n"
+        f"JOB DESCRIPTION:\n{row['description']}"
+    )
+    tin = tout = cr = cw = 0
+    result = None
+    for attempt in range(3):
+        try:
+            if provider == "anthropic":
+                text, a_in, a_out, a_cr, a_cw = _call_anthropic(client, model, system_prompt, user_msg)
+            else:
+                text, a_in, a_out, a_cr, a_cw = _call_deepseek(api_key, model, system_prompt, user_msg)
+            tin += a_in
+            cr += a_cr
+            cw += a_cw
+            tout += a_out
+            result = parse_eval_json(text)
+            break
+        except Exception as e:
+            wait = 5 * (attempt + 1)
+            print(f"[eval] attempt {attempt+1} failed ({e}); retry in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    return row["job_url"], result, tin, tout, cr, cw
+
+
 def evaluate_new_jobs(cfg, conn):
     provider = cfg["settings"].get("provider", "anthropic")
     model = cfg["settings"]["model"]
+    try:
+        concurrency = max(1, int(cfg["settings"].get("eval_concurrency", 6)))
+    except (TypeError, ValueError):
+        print(f"[eval] invalid eval_concurrency "
+              f"{cfg['settings'].get('eval_concurrency')!r}; using 6", file=sys.stderr)
+        concurrency = 6
 
     client = api_key = None
     if provider == "anthropic":
@@ -217,43 +257,23 @@ def evaluate_new_jobs(cfg, conn):
     price_in, price_out = MODEL_PRICES.get(model, (0.0, 0.0))
 
     rows = conn.execute("SELECT * FROM jobs WHERE status='new'").fetchall()
-    print(f"[eval] {len(rows)} postings to evaluate via {provider}:{model}")
+    print(f"[eval] {len(rows)} postings to evaluate via {provider}:{model} "
+          f"(concurrency={concurrency})")
 
     usage_in = usage_cache_write = usage_cache_read = usage_out = 0
 
+    # Empty-description rows never hit the API — mark and skip on the main thread.
+    todo = []
     for r in rows:
         if not (r["description"] or "").strip():
             conn.execute("UPDATE jobs SET status='needs_manual' WHERE job_url=?", (r["job_url"],))
             conn.commit()
-            continue
+        else:
+            todo.append(r)
 
-        user_msg = (
-            f"TITLE: {r['title']}\nCOMPANY: {r['company']}\nLOCATION: {r['location']}\n"
-            f"SOURCE SEARCH: {r['search_name']} (tier: {r['tier']})\n"
-            f"POSTED SALARY: {r['salary_min']}–{r['salary_max']}\n\n"
-            f"JOB DESCRIPTION:\n{r['description']}"
-        )
-
-        result = None
-        for attempt in range(3):
-            try:
-                if provider == "anthropic":
-                    text, tin, tout, cr, cw = _call_anthropic(client, model, system_prompt, user_msg)
-                else:
-                    text, tin, tout, cr, cw = _call_deepseek(api_key, model, system_prompt, user_msg)
-                usage_in += tin
-                usage_cache_read += cr
-                usage_cache_write += cw
-                usage_out += tout
-                result = parse_eval_json(text)
-                break
-            except Exception as e:
-                wait = 5 * (attempt + 1)
-                print(f"[eval] attempt {attempt+1} failed ({e}); retry in {wait}s", file=sys.stderr)
-                time.sleep(wait)
-
+    def _write_result(job_url, result):
         if result is None:
-            conn.execute("UPDATE jobs SET status='error' WHERE job_url=?", (r["job_url"],))
+            conn.execute("UPDATE jobs SET status='error' WHERE job_url=?", (job_url,))
         else:
             normalize_result(result)
             verdict = result["verdict"]
@@ -269,11 +289,55 @@ def evaluate_new_jobs(cfg, conn):
                     result.get("fit_score"),
                     result.get("bucket"),
                     json.dumps(result, ensure_ascii=False),
-                    r["job_url"],
+                    job_url,
                 ),
             )
         conn.commit()
-        time.sleep(1)
+
+    # Each call is blocking network I/O (the GIL is released while waiting on the
+    # provider), so a bounded pool overlaps them. Workers are pure — every DB write
+    # happens here on the main thread as each future lands (as_completed), so the sqlite
+    # conn is never touched off-thread and each commit is durable: a kill mid-run leaves
+    # finished rows 'evaluated' and the <=concurrency in-flight rows 'new' for next run.
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futures = {
+            ex.submit(_evaluate_one, r, provider, model, system_prompt, client, api_key): r["job_url"]
+            for r in todo
+        }
+        try:
+            for fut in as_completed(futures):
+                job_url = futures[fut]
+                try:
+                    _, result, tin, tout, cr, cw = fut.result()
+                except Exception as e:
+                    # Workers catch their own call errors, but guard anyway so one unexpected
+                    # crash maps to 'error' instead of aborting the whole batch.
+                    print(f"[eval] worker crashed for {job_url} ({e}); marking error", file=sys.stderr)
+                    result, tin, tout, cr, cw = None, 0, 0, 0, 0
+                usage_in += tin
+                usage_cache_read += cr
+                usage_cache_write += cw
+                usage_out += tout
+                try:
+                    _write_result(job_url, result)
+                except Exception as e:
+                    # A write failure (e.g. sqlite 'database is locked' from a concurrent
+                    # run) must not abort the batch. Roll back so the failed row's staged
+                    # UPDATE isn't later flushed by the next row's commit — it genuinely
+                    # stays 'new' for a clean retry next run (matching the log below).
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    print(f"[eval] DB write failed for {job_url} ({e}); left 'new'", file=sys.stderr)
+        except KeyboardInterrupt:
+            # Default pool exit calls shutdown(wait=True), which would drain the ENTIRE
+            # remaining queue (hours of paid calls) before Ctrl-C takes effect. Cancel the
+            # not-yet-started futures so an interrupt stops after the in-flight calls;
+            # committed rows stay 'evaluated', the rest stay 'new' for the next run.
+            print("[eval] interrupted — cancelling pending evaluations", file=sys.stderr)
+            ex.shutdown(cancel_futures=True)
+            raise
 
     cost = (
         (usage_in + usage_cache_read * 0.1 + usage_cache_write * 1.25) * price_in

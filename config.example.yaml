@@ -18,6 +18,10 @@ settings:
   #   anthropic -> claude-sonnet-4-6  (highest quality; pricier; needs ANTHROPIC_API_KEY)
   provider: "deepseek"
   model: "deepseek-v4-flash"
+  # Postings evaluated in parallel. Each is a blocking API call, so the pool overlaps
+  # the wait (no quality change — same model/prompt/routing). 6 is a safe default;
+  # raise cautiously (higher risks provider rate-limits / 429s). 1 = fully serial.
+  eval_concurrency: 6
   max_description_chars: 12000
   db_path: "jobs.db"
   reports_dir: "reports"

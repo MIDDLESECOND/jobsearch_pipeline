@@ -32,7 +32,7 @@ from datetime import date
 from core import (  # noqa: E402,F401
     BASE_DIR, CONFIG_PATH, PROFILE_PATH, GUIDE_PATH,
     GATE_NAMES, SCORE_DIMS, VERDICTS,
-    load_config, get_db, _ensure_api_key,
+    load_config, get_db, _ensure_api_key, run_log,
 )
 from chain import (  # noqa: E402,F401
     _clean, _norm_company, _norm_title, _norm_location, _fingerprint, _NORM_VERSION,
@@ -286,13 +286,16 @@ def main():
         #   skip_decided_reposts           'new' relisting of a decided role -> 'repost_decided'
         #   evaluate_new_jobs              remaining 'new'        -> 'evaluated' | 'needs_manual' | 'error'
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
-        fetch_new_jobs(cfg, conn)
-        fetch_adzuna(cfg, conn)
-        apply_salary_filter(cfg, conn)
-        apply_hard_filters(cfg, conn)
-        skip_decided_reposts(conn)
-        evaluate_new_jobs(cfg, conn)
-        generate_report(cfg, conn, args.date)
+        # run_log tees this whole cycle into logs/pipeline.log so a manual terminal run is captured
+        # like a scheduled one (the .bat no longer redirects — that would double-log).
+        with run_log("run"):
+            fetch_new_jobs(cfg, conn)
+            fetch_adzuna(cfg, conn)
+            apply_salary_filter(cfg, conn)
+            apply_hard_filters(cfg, conn)
+            skip_decided_reposts(conn)
+            evaluate_new_jobs(cfg, conn)
+            generate_report(cfg, conn, args.date)
     elif args.command == "report":
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":

@@ -7,9 +7,13 @@ used by the one-time backfill/recompute) and the stdlib. fetch.py, evaluation.py
 report.py, and pipeline.py all import FROM here; nothing here imports them (so there are no cycles).
 """
 
+import contextlib
 import os
 import sqlite3
 import sys
+import threading
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -39,6 +43,155 @@ GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requi
 SCORE_DIMS = ["ai_applied_vs_research", "ai_artifact_depth", "learning_value",
               "technical_skill_match", "title_trajectory", "years_vs_stated"]
 VERDICTS = ["PASS", "GATE_FAIL", "RECRUITER_ONLY"]
+
+
+# ------------------------------------------------------------------- run log
+#
+# Capture is app-level, not shell-level: a `run` tees stdout+stderr into
+# logs/pipeline.log itself, so a manual terminal run is recorded identically to a
+# scheduled one — the scheduler .bat no longer redirects (that would double-log).
+# The tee is an object-level swap of sys.stdout/stderr; it works for library logging
+# too because jobspy is imported lazily inside the run (after this swap), so its
+# StreamHandler binds the tee, not the original console stream.
+LOGS_DIR = BASE_DIR / "logs"
+LOG_PATH = LOGS_DIR / "pipeline.log"
+_LOG_ROTATED = LOGS_DIR / "pipeline.log.1"
+# Roll the log at this size (single generation) so it can't grow unbounded across runs.
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+class _Tee:
+    """Mirror a text stream to a second sink (the log file). Three design choices matter:
+
+    - Both writes are best-effort: neither an unreliable stdout/stderr (a detached/invalid
+      handle when the scheduler runs us without a console) nor a failing sink (the disk
+      fills mid-run) may drop into an innocent print() and crash the pipeline. The sink is
+      written first — it's the destination we try hardest to keep — but a failure in either
+      is swallowed, so logging can degrade but never blocks the work.
+    - Per-thread line buffering keeps concurrent output from garbling. print() emits a
+      message and its newline as TWO write() calls, so without buffering another thread's
+      write lands between them and the two lines merge ("[eval] attempt 1[eval] attempt
+      2 …") — this bites exactly during an eval-retry storm, when the pool has several
+      workers printing at once. Each thread accumulates its own partial line (thread-local)
+      and only complete lines are emitted, as one locked write, so lines never interleave.
+      flush() emits any partial so interactive/no-newline output still appears.
+    - A shared lock (the same object across the stdout and stderr tees, which share one
+      sink) serializes those emits across both streams.
+
+    Other attributes (isatty, encoding, fileno, …) delegate to the real stream so
+    libraries that introspect the console still see it."""
+
+    def __init__(self, stream, sink, lock):
+        self._stream = stream
+        self._sink = sink
+        self._lock = lock
+        self._local = threading.local()  # per-thread partial-line buffer
+
+    def _emit(self, s):
+        # Caller holds the lock. Both writes are best-effort: a logging I/O failure
+        # (e.g. the disk fills mid-run) must never crash the pipeline from inside an
+        # innocent print() — same "logging never blocks the work" rule that guards the
+        # initial open(). Sink first so the log is the destination we try hardest to keep.
+        for dest in (self._sink, self._stream):
+            try:
+                dest.write(s)
+            except Exception:
+                pass
+
+    def write(self, s):
+        pending = getattr(self._local, "buf", "") + s
+        if "\n" in pending:
+            head, _, tail = pending.rpartition("\n")
+            self._local.buf = tail          # keep the trailing incomplete line, if any
+            with self._lock:
+                self._emit(head + "\n")     # emit all complete lines as one atomic write
+        else:
+            self._local.buf = pending
+        return len(s)
+
+    def flush(self):
+        with self._lock:
+            partial = getattr(self._local, "buf", "")
+            if partial:                     # surface a not-yet-newlined line (e.g. a prompt)
+                self._local.buf = ""
+                self._emit(partial)
+            for dest in (self._sink, self._stream):
+                try:
+                    dest.flush()
+                except Exception:
+                    pass
+
+    def __getattr__(self, name):
+        # Delegate unknown attributes to the wrapped stream, but never for the private
+        # names set in __init__: if one is accessed before __init__ runs (copy/pickle),
+        # `getattr(self._stream, …)` would re-enter __getattr__ on the same name forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def run_log(label="run"):
+    """Tee stdout+stderr for one CLI invocation into logs/pipeline.log, bracketed by the
+    same session markers the scheduler used to write. UTF-8/errors='replace' (matching the
+    stream reconfigure above) so a stray glyph degrades instead of crashing.
+
+    On an uncaught exception the full traceback is written to the log before the streams
+    are restored — the interpreter prints it only after this context exits, to the
+    by-then-restored original stderr, which the scheduler discards; without this the log
+    would record only the exception's class name. The end marker is always written and the
+    streams always restored; the exception then propagates unchanged."""
+    LOGS_DIR.mkdir(exist_ok=True)
+    # Single-generation rotation before we start appending.
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+            LOG_PATH.replace(_LOG_ROTATED)
+    except OSError:
+        pass
+
+    # Logging must never block the actual work: if the file can't be opened (e.g. locked by
+    # an overlapping run on Windows), run WITHOUT file capture instead of aborting the run.
+    try:
+        sink = open(LOG_PATH, "a", encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"[run_log] could not open {LOG_PATH} ({e}); running without file capture",
+              file=sys.stderr)
+        yield
+        return
+
+    lock = threading.Lock()
+    saved_out, saved_err = sys.stdout, sys.stderr
+    status = "ok"
+    try:
+        sink.write(f"\n===== {label} started {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
+        sink.flush()
+        sys.stdout = _Tee(saved_out, sink, lock)
+        sys.stderr = _Tee(saved_err, sink, lock)
+        yield
+    except BaseException as e:  # KeyboardInterrupt/SystemExit included — capture + stamp
+        status = type(e).__name__
+        # Write straight to the sink (not via the tee) so it lands in the file without
+        # also double-printing to the console the interpreter will print to anyway.
+        try:
+            sink.write(traceback.format_exc())
+        except Exception:
+            pass
+        raise
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+        # Everything here must be swallowed: an exception raised in this finally (from the
+        # end-marker write/flush OR from close(), which re-flushes buffered data and can
+        # itself fail on a full disk) would REPLACE the real pipeline exception propagating
+        # out of the run. Guard close() too, not just the write.
+        try:
+            sink.write(f"===== {label} ended   {datetime.now():%Y-%m-%d %H:%M:%S} ({status}) =====\n")
+            sink.flush()
+        except Exception:
+            pass
+        try:
+            sink.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- config / db

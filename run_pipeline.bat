@@ -1,8 +1,6 @@
 @echo off
+rem The app itself tees stdout+stderr into logs\pipeline.log (core.run_log) with the
+rem session markers, so this no longer redirects — doing both would double-log every run.
 cd /d %~dp0
-if not exist logs mkdir logs
-echo ===== run started %DATE% %TIME% ===== >> logs\pipeline.log
-".venv\Scripts\python.exe" pipeline.py run >> logs\pipeline.log 2>&1
-set rc=%errorlevel%
-echo ===== run ended   %DATE% %TIME% (exit %rc%) ===== >> logs\pipeline.log
-exit /b %rc%
+".venv\Scripts\python.exe" pipeline.py run
+exit /b %errorlevel%

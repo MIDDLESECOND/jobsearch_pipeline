@@ -41,6 +41,39 @@ settings:
     max_days_old: 1          # lookback in days; tune to how often you run the pipeline
     delay_between_calls: 2   # seconds between API calls; be polite to the free tier
 
+  # Optional third source: company ATS boards (Greenhouse / Lever / Ashby public JSON APIs).
+  # No API keys needed. Off until `companies:` is non-empty. Unlike LinkedIn/Adzuna these are
+  # per-company, not per-query: each run re-fetches every listed board in full (the APIs have
+  # no date filter) and inserts only postings matching the shared filters below; dedup makes
+  # the re-fetch idempotent, but the FIRST run after adding a company evals its whole matching
+  # backlog once — add companies gradually. Descriptions are FULL text (unlike Adzuna's
+  # 500-char snippet); salaries are stored as unstated (boards rarely state comp uniformly).
+  # Find a company's board slug from its careers-page URL, or via Google:
+  #   site:boards.greenhouse.io "<role>"  /  site:jobs.lever.co  /  site:jobs.ashbyhq.com
+  ats:
+    # Required: a posting's title must match AT LEAST ONE of these to enter the DB — so a
+    # big board never floods the paid eval. Patterns use the same dialect as filters.yaml:
+    # case-insensitive substring, or a `re:`-prefixed regex. QUOTE `re:` patterns — an
+    # unquoted block-style `- re: foo` is YAML for a mapping, not a string.
+    title_any: ["solutions architect", "solutions engineer", "business analyst"]
+    # Optional: keep only postings whose location matches one of these (same dialect).
+    # The exact term "remote" additionally accepts remote-FLAGGED postings wherever their
+    # location says; a qualified pattern like "remote - us" is only a location substring.
+    # Omit the key to accept all locations.
+    location_any: ["remote", "new york", "united states"]
+    delay_between_calls: 2   # seconds between board fetches; be polite
+    # The companies list IS the on/off switch (there are no API keys to gate on), so the
+    # template ships it empty — uncomment and fill in real slugs to enable:
+    companies: []
+    # companies:
+    #   - slug: examplecorp        # board slug from the careers URL
+    #     board: greenhouse        # greenhouse | lever | ashby
+    #     name: Example Corp       # optional display name (Lever/Ashby payloads lack it;
+    #                              # defaults to the title-cased slug)
+    #     tier: primary            # optional; default primary
+    #   - slug: another-co
+    #     board: lever
+
 # Optional: deterministic hard-requirement filters (auto-fail postings missing a hard
 # requirement before the paid eval) live in a separate `filters.yaml` — see filters.example.yaml.
 

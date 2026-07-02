@@ -7,6 +7,52 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-02 — third source: company ATS boards (Greenhouse / Lever / Ashby)
+
+### Why
+Aggregators lag or miss postings that only live on a company's own ATS board, and the two existing
+sources can't see them: LinkedIn shows what's cross-posted, Adzuna what it happens to index.
+Greenhouse, Lever, and Ashby all expose **public, no-auth JSON APIs** per company board — an
+official API like Adzuna, but with **full** job descriptions instead of a 500-char snippet, so the
+eval judges the whole JD.
+
+### What changed
+- **New `fetch_ats()` (`fetch.py`).** Third fetcher in the `run` order, after `fetch_adzuna`.
+  ATS boards are per-company (no search query), so config is a curated company list
+  (`settings.ats.companies`: slug + board type) plus shared filters: a **required** `title_any`
+  (a board returns every open role — the filter is what keeps it from flooding the paid eval) and
+  an optional `location_any` (the exact term "remote" opts into remote-flagged postings, but a
+  matching city always wins, so hybrid roles aren't lost). Both filters speak the filters.yaml
+  pattern dialect (`filters._pattern_matches`: case-insensitive substring or `re:` regex); a
+  scalar YAML value is normalized to a list-of-one, and malformed patterns (non-strings, blanks,
+  non-compiling regexes, and empty-body `re:` that would match everything) are dropped with a
+  stderr notice rather than crashing or silently matching everything/nothing. If a configured
+  `location_any` empties out that way it refuses the run (like an empty `title_any`) rather than
+  falling through to accept-all. Location matching covers every posted location (Lever
+  `allLocations`, Ashby `secondaryLocations`), not just the primary string. Each board is one
+  failure unit: a bad payload or row logs FAILED and rolls back that board's partial inserts,
+  never aborting the run.
+- **Shared pattern validator (`filters.validate_pattern`).** The `re:`-compile / non-empty check
+  the ATS sanitizer needs now lives once next to `_pattern_matches`, and `reject --pattern`
+  (`pipeline.py`) calls it too — so a broken or empty regex is refused at write time on both
+  config surfaces instead of being persisted to `filters.yaml` and failing silently forever. Inserts `status='new'` rows through
+  `_insert_posting` — the normalize/fingerprint/repost/INSERT tail now shared by all three
+  fetchers, so the jobs column list exists once and the sources can't drift. Salaries are stored NULL ("unstated",
+  kept by the salary filter — the same convention as Adzuna's predicted salaries). No posting-age
+  filter on purpose: boards list only open roles, and `INSERT OR IGNORE` makes whole-board
+  re-fetches idempotent.
+- **No schema change.** `source` gains three values (`greenhouse`/`lever`/`ashby`) used for the
+  report's 🏢 provenance tag and the UI's source line. The cross-source dedup caveat extends to
+  ATS: the same role seen via LinkedIn and via its ATS board usually differs in location text, so
+  it appears once per source — `dupe` remains the manual escape hatch.
+- **Config shape (`config.example.yaml`).** New `settings.ats:` block; absent/empty → the source
+  is off and `run` behaves exactly as before.
+- **Tests (`tests/test_fetch_ats.py`).** The pure core (HTML→text, per-board extractors, filters)
+  plus `fetch_ats` end-to-end against payload fixtures mirroring the live APIs, with the network
+  layer monkeypatched.
+
+---
+
 ## 2026-06-30 — manual duplicate linking in the web UI
 
 ### Why

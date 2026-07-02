@@ -3,10 +3,13 @@
 hard-requirement rules (filters.yaml). Both run BEFORE the paid LLM eval and set a non-'new'
 status so evaluate_new_jobs short-circuits the obvious rejects. Imports only core; the `reject`
 command's rule-writing helper (_add_filter_rule) lives with the CLI in pipeline.py but reuses
-load_filters/save_filters/_pattern_matches from here.
+load_filters/save_filters/_pattern_matches from here, and fetch.py's ATS title/location
+filters also match via _pattern_matches — a semantics change here changes which ATS postings
+enter the DB and the paid eval, not just which rules fire.
 """
 
 import re
+import sys
 from datetime import date
 
 import yaml
@@ -51,12 +54,25 @@ def apply_salary_filter(cfg, conn):
 # spot misses. Mirrors apply_salary_filter — a deterministic pre-eval hard rule.
 
 def load_filters():
-    """Read filters.yaml → list of rule dicts. Returns [] if the file is absent or empty."""
+    """Read filters.yaml → list of rule dicts. Returns [] if the file is absent or empty.
+    Warns (does NOT drop — the file is hand-editable and the user may be mid-edit) on any
+    pattern that would fail silently at match time, so a broken hand-edited `re:` doesn't
+    quietly disable its rule. This is the "or loaded" half of validate_pattern's contract;
+    `reject --pattern` is the "written" half."""
     if not FILTERS_PATH.exists():
         return []
     with open(FILTERS_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    return data.get("hard_filters") or []
+    rules = data.get("hard_filters") or []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        for pat in rule.get("any") or []:
+            reason = validate_pattern(pat)
+            if reason:
+                print(f"[filters] rule {rule.get('name') or rule.get('gate')!r}: pattern "
+                      f"{pat!r} is unusable — {reason} (it will never match)", file=sys.stderr)
+    return rules
 
 
 def save_filters(rules):
@@ -78,6 +94,30 @@ def _pattern_matches(pattern, text):
         except re.error:
             return False
     return pattern.lower() in text.lower()
+
+
+def validate_pattern(pattern):
+    """Return None if `pattern` is a usable filter pattern, else a short human reason. The one
+    place the `re:` dialect is checked — shared by fetch._ats_clean_patterns (settings.ats),
+    `reject --pattern` (writing filters.yaml), and load_filters (warning on a hand-edited
+    filters.yaml). _pattern_matches silently fails a broken regex to False at match time, so a
+    bad pattern that slips through matches nothing forever (a hard-filter rule that never fires;
+    an ATS filter that empties out) — hence catching it at write/load time. An empty `re:` body
+    is rejected specifically: `re.compile("")` succeeds but then matches everything (the
+    opposite failure). It does NOT try to detect other always-match regexes (`re:.*`, `re:^`,
+    `re:|`) — that's undecidable in general — so a deliberately broad regex is still the
+    caller's call, not a validation error."""
+    if not isinstance(pattern, str) or not pattern.strip():
+        return "must be a non-empty string"
+    if pattern.startswith("re:"):
+        body = pattern[3:]
+        if not body.strip():
+            return "empty regex — would match everything"
+        try:
+            re.compile(body)
+        except re.error as e:
+            return f"invalid regex ({e})"
+    return None
 
 
 def _rule_hit(rule, text):

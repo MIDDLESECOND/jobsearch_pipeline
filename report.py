@@ -161,12 +161,17 @@ def _repost_tag(dec):
 
 
 def _source_tag(r):
-    """Flag postings from a thin-data source so the verdict's context is visible. Adzuna only
-    gives a 500-char snippet, so its evals are made on far less text than a LinkedIn JD."""
+    """Source-provenance tag. Adzuna's carries a thin-text warning — it only gives a 500-char
+    snippet, so its evals are made on far less text than a LinkedIn JD. ATS-board sources get a
+    plain provenance tag: their descriptions are full text, so there is no caveat to flag."""
     # Tolerate rows from a SELECT that omits `source` (this file mixes Row and dict rows).
     source = r["source"] if "source" in r.keys() else None
     if source == "adzuna":
         return " · 📋 adzuna (500-char snippet — verdict on thin text)"
+    # Same rule as the UI's meta line (index.html): any non-LinkedIn source gets a plain
+    # provenance tag, so a future board added in fetch.py can't drift out of the report.
+    if source and source != "linkedin":
+        return f" · 🏢 {source}"
     return ""
 
 

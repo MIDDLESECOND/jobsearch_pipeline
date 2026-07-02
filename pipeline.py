@@ -46,9 +46,10 @@ from chain import (  # noqa: E402,F401
 # load_config / get_db + the schema and all migrations moved to core.py (re-imported above).
 
 
-# The two sources (fetch_new_jobs = LinkedIn scrape, fetch_adzuna = Adzuna API) moved to
-# fetch.py; the two entry points are re-imported below for `run`.
-from fetch import fetch_new_jobs, fetch_adzuna  # noqa: E402,F401
+# The three sources (fetch_new_jobs = LinkedIn scrape, fetch_adzuna = Adzuna API, fetch_ats =
+# Greenhouse/Lever/Ashby ATS boards) live in fetch.py; the entry points are re-imported below
+# for `run`.
+from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats  # noqa: E402,F401
 
 
 # Repost / content dedup (normalization, fingerprint, _find_repost) moved to chain.py;
@@ -60,7 +61,7 @@ from fetch import fetch_new_jobs, fetch_adzuna  # noqa: E402,F401
 # moved to filters.py; re-imported below (the `reject` rule-writer below still reuses them).
 from filters import (  # noqa: E402,F401
     apply_salary_filter, apply_hard_filters,
-    load_filters, save_filters, _pattern_matches, _rule_hit, FILTERS_PATH,
+    load_filters, save_filters, _pattern_matches, _rule_hit, validate_pattern, FILTERS_PATH,
 )
 
 
@@ -164,6 +165,13 @@ def _add_filter_rule(conn, gate, pattern, note, posting):
     """Promote a pattern into filters.yaml under the rule named for `gate`. Shows the matching
     sentence from this posting and how many existing postings the pattern would also catch
     (false-positive preview) before saving. De-dupes identical patterns."""
+    # Validate before persisting: a broken/empty `re:` written to filters.yaml would fail
+    # silently in _pattern_matches forever (matching nothing, or everything) — the same check
+    # the ATS config sanitizer applies, so the one dialect can't drift between the two writers.
+    reason = validate_pattern(pattern)
+    if reason:
+        print(f"[reject] refusing to add pattern {pattern!r} — {reason}", file=sys.stderr)
+        return
     # False-positive preview: how many existing postings would this pattern also match?
     rows = conn.execute("SELECT title, description FROM jobs").fetchall()
     hits = sum(1 for r in rows if _pattern_matches(pattern, f"{r['title'] or ''}\n{r['description'] or ''}"))
@@ -280,7 +288,7 @@ def main():
         # The `status` column is a state machine and THIS ORDER IS LOAD-BEARING: each stage gates
         # on status and only the deterministic, zero-cost filters run before the *paid* eval, so an
         # obvious reject never reaches the LLM. The transitions:
-        #   fetch_new_jobs / fetch_adzuna  insert rows as            'new'
+        #   fetch_new_jobs / fetch_adzuna / fetch_ats  insert rows as 'new'
         #   apply_salary_filter            'new' below floor      -> 'salary_filtered'
         #   apply_hard_filters             'new' hits a rule      -> 'rule_filtered'
         #   skip_decided_reposts           'new' relisting of a decided role -> 'repost_decided'
@@ -291,6 +299,7 @@ def main():
         with run_log("run"):
             fetch_new_jobs(cfg, conn)
             fetch_adzuna(cfg, conn)
+            fetch_ats(cfg, conn)
             apply_salary_filter(cfg, conn)
             apply_hard_filters(cfg, conn)
             skip_decided_reposts(conn)

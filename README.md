@@ -1,14 +1,21 @@
 # Job Search Pipeline — Setup (Windows)
 
 Fetches your configured searches from LinkedIn (logged-out guest endpoints) and, optionally, the
-Adzuna API, dedupes against a local SQLite database, runs each new posting through a gate-check
-evaluation framework (Claude **or** DeepSeek), and writes one markdown report per day in `reports/`.
+Adzuna API and company ATS boards (Greenhouse/Lever/Ashby), dedupes against a local SQLite
+database, runs each new posting through a gate-check evaluation framework (Claude **or**
+DeepSeek), and writes one markdown report per day in `reports/`.
 
 LinkedIn is the one *scrape* source that still works — Indeed, Glassdoor, ZipRecruiter, and Google
 Jobs are all blocked by anti-bot walls. Adzuna is an official **API** (free), so it's a reliable
 second source. It's optional and off until you add credentials + an `adzuna:` block to a search
-(see step 5 and `config.example.yaml`). Adzuna postings come with only a 500-char description
+(see step 6 and `config.example.yaml`). Adzuna postings come with only a 500-char description
 snippet and are flagged as such in the report and UI.
+
+The third (also optional) source family is **company ATS boards**: Greenhouse, Lever, and Ashby
+expose public, no-auth JSON APIs per company. Unlike the other two there's no search query — you
+list the companies you care about in `config.yaml` (`settings.ats`), and shared title/location
+filters decide which of their postings enter the pipeline. These postings carry **full** job
+descriptions, so the evaluator sees the whole JD. See step 7 below.
 
 Dedup is two-layer: exact job URL, **plus** a content fingerprint (company + title + location)
 that catches the same role relisted under a fresh URL — so a repost doesn't read as new, and
@@ -52,7 +59,15 @@ you create the real files from them in setup below. Nothing personal is committe
    setx ADZUNA_APP_ID "..."
    setx ADZUNA_APP_KEY "..."
    ```
-   Without these, the pipeline simply runs LinkedIn-only.
+   Without these, the Adzuna source is simply skipped.
+7. *(Optional)* Enable the ATS-board source: add an `ats:` block under `settings:` in
+   `config.yaml` with the companies you want to track (see `config.example.yaml`). No API keys —
+   the Greenhouse/Lever/Ashby board APIs are public. Find a company's board slug from its
+   careers-page URL (`boards.greenhouse.io/<slug>`, `jobs.lever.co/<slug>`,
+   `jobs.ashbyhq.com/<slug>`), or discover boards with a Google search like
+   `site:boards.greenhouse.io "data analyst"`. The `title_any` filter is required — it's what
+   keeps a 500-job board from flooding the paid eval — and the first run after adding a company
+   evaluates its whole matching backlog once, so add companies gradually.
 
 ## 2. Test run
 

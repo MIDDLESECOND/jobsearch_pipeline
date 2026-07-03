@@ -1,32 +1,78 @@
-# Job Search Pipeline — Setup (Windows)
+# jobsearch_pipeline
 
-Fetches your configured searches from LinkedIn (logged-out guest endpoints) and, optionally, the
-Adzuna API and company ATS boards (Greenhouse/Lever/Ashby), dedupes against a local SQLite
-database, runs each new posting through a gate-check evaluation framework (Claude **or**
-DeepSeek), and writes one markdown report per day in `reports/`.
+**LLM-gated job-posting triage.** Fetches postings from LinkedIn (guest endpoints), the
+Adzuna API, and company ATS boards (Greenhouse/Lever/Ashby); dedupes them; runs each
+genuinely new posting through an LLM evaluation gate scored against your own profile and
+evaluation rules; and writes you one ranked markdown report a day — plus a local web UI
+for one-click triage. You open one screen, not fifty tabs.
 
-LinkedIn is the one *scrape* source that still works — Indeed, Glassdoor, ZipRecruiter, and Google
-Jobs are all blocked by anti-bot walls. Adzuna is an official **API** (free), so it's a reliable
-second source. It's optional and off until you add credentials + an `adzuna:` block to a search
-(see step 6 and `config.example.yaml`). Adzuna postings come with only a 500-char description
-snippet and are flagged as such in the report and UI.
+**It never touches your LinkedIn account. Do not add login cookies to it.** All personal
+files (profile, evaluation rules, database, reports) are gitignored; the repo ships
+`*.example.*` templates.
 
-The third (also optional) source family is **company ATS boards**: Greenhouse, Lever, and Ashby
-expose public, no-auth JSON APIs per company. Unlike the other two there's no search query — you
-list the companies you care about in `config.yaml` (`settings.ats`), and shared title/location
-filters decide which of their postings enter the pipeline. These postings carry **full** job
-descriptions, so the evaluator sees the whole JD. See step 7 below.
+<!-- TODO: docs/triage_ui.png — add the triage-UI screenshot: ![Triage UI](docs/triage_ui.png) -->
 
-Dedup is two-layer: exact job URL, **plus** a content fingerprint (company + title + location)
-that catches the same role relisted under a fresh URL — so a repost doesn't read as new, and
-you don't accidentally apply twice. You can mark postings `applied` or `passed` (see Commands),
-and those decisions follow a role across its reposts.
+## Why it exists
 
-**It never touches your LinkedIn account. Do not add login cookies to it.**
+Job boards optimize for volume; a search optimizes for judgment. Deterministic pre-filters
+(a salary floor, your `filters.yaml` rules) kill obvious no's before a single token is
+spent, and the LLM evaluation checks six hard gates (years floor, role substance, work
+authorization, …) before it scores fit — so the paid judgment goes only to real maybes.
+The rules live in two plain-markdown files you write — `profile.md` and
+`evaluation_guide.md` — so the gate reads like you would, not like a keyword filter.
 
-Your personal files — `config.yaml`, `profile.md`, `evaluation_guide.md`, the `jobs.db`
-database, `reports/`, and `logs/` — are gitignored. The repo ships `*.example.*` templates;
-you create the real files from them in setup below. Nothing personal is committed.
+The design decision that matters most: **verdicts route, they don't just rank.** Some
+roles never convert from a cold portal application and only move through a recruiter or
+referral — so instead of a yes/no, every passing posting is routed cold-apply vs.
+route-to-a-human, based on rules in your evaluation guide. Matching effort to channel
+is worth more than another point of scoring precision.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["LinkedIn guest search"] --> D["Fingerprint dedup<br/>URL + company/title/location"]
+    B["Adzuna API"] --> D
+    C["ATS boards<br/>Greenhouse / Lever / Ashby"] --> D
+    D --> E["Deterministic pre-filters<br/>salary floor, filters.yaml rules"]
+    E --> F["LLM evaluation gate<br/>DeepSeek or Claude<br/>6 hard gates → fit score → bucket"]
+    F --> G["Daily markdown report"]
+    F --> H["Local Flask triage UI<br/>applied / passed / reject"]
+    H --> I[("SQLite jobs.db<br/>decisions follow reposts")]
+    G --> I
+```
+
+Two-layer dedup catches the same role relisted under a fresh URL, and an applied/passed
+decision follows the role across every future repost — the double-apply guard.
+
+Source notes: LinkedIn is the one *scrape* source that still works (Indeed, Glassdoor,
+ZipRecruiter, and Google Jobs are all behind anti-bot walls), and it is read through
+logged-out guest endpoints only. Adzuna is an official free **API**; its postings carry
+only a 500-char description snippet, flagged as such in the report and UI. The ATS
+boards are public no-auth JSON APIs with no search query — you list companies in
+`config.yaml`, and shared title/location filters decide what enters the pipeline — and
+their postings carry **full** job descriptions, so the evaluator sees the whole JD.
+Adzuna and the ATS boards are optional and off until configured (setup steps 6–7).
+
+## By the numbers
+
+Running since June 19, 2026, 2 scheduled runs/day: 13,268 postings fetched and deduped,
+13,205 evaluated, 1,907 reposts caught by fingerprint dedup. The default evaluator
+(`deepseek-v4-flash`) costs ~$0.07/run at typical volume; a Claude Sonnet option trades
+~50× cost for better judgment on edge cases.
+
+## Honest limits
+
+- The cheap default evaluator deliberately under-filters; §8's reject/pattern flow
+  exists because it misses hard fails a human catches in seconds.
+- LinkedIn's guest endpoint breaks occasionally; the pipeline is a convenience layer
+  over a moving target (see Troubleshooting).
+- PASS means "worth your read," not "apply." The tool compresses triage; it doesn't
+  replace judgment.
+
+---
+
+# Setup & usage (Windows)
 
 ## 1. One-time setup
 
@@ -88,10 +134,10 @@ Command Prompt) opened in the project folder. The commands:
 | `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. The only one that hits the network/API (costs money). |
 | `report` | Rebuild a report from the database — **free**, no fetching, no API calls. Defaults to today; `--date YYYY-MM-DD` for a past day. |
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
-| `ui` | Launch a **local web UI** for triaging postings by clicking instead of typing (see §6.1). |
+| `ui` | Launch a **local web UI** for triaging postings by clicking instead of typing (see §4). |
 | `applied --url X` | Mark a posting as **applied-to**. |
 | `passed --url X` | Mark a posting as **reviewed & decided no**. |
-| `reject --url X` | Override the model: mark a posting as a **hard-fail it let through**; `--pattern` also writes a reusable rule (see §7). |
+| `reject --url X` | Override the model: mark a posting as a **hard-fail it let through**; `--pattern` also writes a reusable rule (see §8). |
 
 **`--url` takes a unique substring**, not the whole URL — the LinkedIn job id is easiest. If
 the substring matches more than one posting, the command refuses and lists them so you can be
@@ -114,7 +160,7 @@ stays flagged (see Reading the report). Jobs you never mark stay in the backlog 
 showing — nothing is hidden without your say-so. Marking is also how reposts avoid a
 double-apply: an `applied` decision follows the role across every future relisting.
 
-### 6.1 The triage UI (click instead of type)
+## 4. The triage UI (click instead of type)
 
 If marking postings one `--url` at a time is slow, run a small local web app instead:
 
@@ -150,7 +196,7 @@ full "About the job" text, this never re-scrapes LinkedIn. The rare posting long
 included in the copied text so you can open the original. This uses your claude.ai project (and
 its files/instructions) directly, so it's covered by your Claude plan — no API key or extra cost.
 
-## 4. Schedule (Task Scheduler)
+## 5. Schedule (Task Scheduler)
 
 1. Open **Task Scheduler** → **Create Task** (not "Basic Task").
 2. General tab: name it `Job Pipeline`; select "Run whether user is logged on or not"
@@ -165,7 +211,7 @@ its files/instructions) directly, so it's covered by your Claude plan — no API
 The times don't need to be exact — `hours_old: 13` in config.yaml gives each run overlap
 with the previous one, and the database dedupes anything seen twice.
 
-## 5. Editing searches
+## 6. Editing searches
 
 Everything lives in `config.yaml` — add/remove searches, change Boolean terms, adjust the
 salary floor. Analyst-tier searches carry `min_salary: 80000`: postings with a **known**
@@ -180,7 +226,7 @@ the next run picks it up automatically.
 Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
 [`CHANGELOG.md`](CHANGELOG.md).
 
-## 6. Reading the report
+## 7. Reading the report
 
 **Verdict sections** (how the evaluator triaged each posting):
 
@@ -190,12 +236,12 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
   evaluator was unsure. Strong-band (14–18) postings deserve a full manual gate check
   before you tailor anything. Each carries a **bucket**: 2 (acceptable-tier BI/BA) or
   3 (clean low-code / Power Platform AI delivery — where cold conversion is realistic).
-- **Recruiter-only** = passed every gate and scored well, *but* the role's **required**
-  AI depth is a generation ahead of the shipped artifact (`ai_artifact_depth` = 0, bucket 1).
-  These die in an ATS but convert through a recruiter or referral who can carry the ramp
-  narrative — so route them to a human, don't cold-apply. This is the "50/0" fix: the
-  evaluation guide's split AI score (applied-vs-research **and** artifact-evidences-depth)
-  plus a hard verdict cap stops a high total from masking an unwinnable cold screen.
+- **Recruiter-only** = passed every gate and scored well, *but* matched the
+  recruiter-routing rules defined in your `evaluation_guide.md` (`ai_artifact_depth` = 0,
+  bucket 1). Cold portal applications convert near zero for some role shapes, while a
+  recruiter or referral can carry a narrative an ATS can't — so route these to a human,
+  don't cold-apply. This is the "50/0" fix: a hard verdict cap enforced in code stops a
+  high total score from masking an unwinnable cold screen.
 - **Needs manual review** = the guest endpoint returned no description. Open the link
   and eyeball it; takes seconds.
 - **Gate fails** = one-liners for audit. Skim occasionally to confirm the evaluator
@@ -214,9 +260,9 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
   [`CHANGELOG.md`](CHANGELOG.md).
 
 There's also a **🚫 Hard-fail filters** section for postings you (or a rule) flagged as a hard
-requirement you can't meet — see §7.
+requirement you can't meet — see §8.
 
-## 7. Hard-fail filters (catching the cheap model's misses)
+## 8. Hard-fail filters (catching the cheap model's misses)
 
 The default DeepSeek evaluator is cheap and deliberately **under-filters** — it occasionally
 lets through a posting you actually can't apply to (security clearance, US citizenship, a 10+

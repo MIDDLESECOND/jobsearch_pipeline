@@ -82,7 +82,11 @@ via Windows Task Scheduler.
   filter must set a non-`new` status, mirroring the existing salary/hard-filter passes. All three
   fetchers (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`, then `fetch_ats`) run first and only
   insert `status='new'` rows, so everything downstream is source-agnostic — the `source` column is
-  for provenance/flagging only.
+  for provenance/flagging only. Each fetcher is wrapped by `_run_fetch_stage` (the untrusted-input
+  boundary): one source's crash is logged, rolled back, and skipped so the run still reaches the
+  filters/eval/report for the sources that succeeded. The deterministic stages after the fetchers
+  are deliberately **not** guarded — they must fail loud, since limping past a crashed filter would
+  let un-filtered rows reach the paid eval.
 
 - **SQLite (`jobs.db`) is the single source of truth; reports are disposable derivations.** Never
   reconstruct state from `reports/` (per-day and lossy). The schema and all migrations live inline

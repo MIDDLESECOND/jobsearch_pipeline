@@ -23,6 +23,7 @@ or ANTHROPIC_API_KEY when provider is "anthropic".
 import argparse
 import re
 import sys
+import traceback
 from datetime import date
 
 # The foundation (paths, cross-cutting constants, config, the DB open/schema/migration path, the
@@ -257,6 +258,34 @@ def _confirm(prompt):
         return False
 
 
+def _run_fetch_stage(fn, cfg, conn, label):
+    """Run one fetcher (fetch_new_jobs / fetch_adzuna / fetch_ats) as an independent failure
+    unit: an unexpected crash is logged with its traceback and the fetcher's uncommitted
+    partial work rolled back, then the run continues. So a single source's outage — a LinkedIn
+    guest-endpoint change, an Adzuna/board envelope shift — doesn't abort the run before the
+    filters, eval, and report get to work on the sources that DID succeed.
+
+    Each fetcher commits its own rows internally (per search / query / board), so this rollback
+    only discards the in-flight fetcher's uncommitted tail; earlier sources' committed rows
+    persist (the connection is in deferred-transaction mode, not autocommit). Note rollback()
+    discards the ENTIRE open transaction, so this per-source independence RELIES on each fetcher
+    committing its own work before it returns — a future fetcher that defers its commit across
+    sources would have that uncommitted work silently discarded by a later source's crash.
+    Catches Exception, NOT BaseException, so Ctrl-C / SystemExit still abort the run. run_log
+    tees stderr into logs/pipeline.log, so the message and traceback are captured there.
+
+    This resilience wraps the FETCHERS only — the untrusted-input boundary. The deterministic
+    downstream stages (salary/hard filters, eval, report) stay bare: they must fail loud, since
+    limping past a crashed filter would let un-filtered rows reach the *paid* eval."""
+    try:
+        return fn(cfg, conn)
+    except Exception:
+        conn.rollback()
+        print(f"[run] {label} fetch FAILED — skipping this source for this run:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed", "reject", "dupe", "ui"])
@@ -296,10 +325,15 @@ def main():
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
         # run_log tees this whole cycle into logs/pipeline.log so a manual terminal run is captured
         # like a scheduled one (the .bat no longer redirects — that would double-log).
+        #
+        # Each fetcher is guarded independently (_run_fetch_stage): one source's crash is logged
+        # and rolled back, and the run still reaches the filters/eval/report for the sources that
+        # succeeded. The deterministic stages below stay UNGUARDED on purpose — they must fail
+        # loud, since continuing past a crashed filter would let un-filtered rows hit the paid eval.
         with run_log("run"):
-            fetch_new_jobs(cfg, conn)
-            fetch_adzuna(cfg, conn)
-            fetch_ats(cfg, conn)
+            _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin")
+            _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
+            _run_fetch_stage(fetch_ats, cfg, conn, "ats")
             apply_salary_filter(cfg, conn)
             apply_hard_filters(cfg, conn)
             skip_decided_reposts(conn)

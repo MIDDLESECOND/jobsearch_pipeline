@@ -180,21 +180,24 @@ It reads and writes the same `jobs.db`, makes no judgement of its own, and is lo
 `--pattern` rule-writing flow stays on the CLI (`reject --pattern`), since it shows a
 false-positive preview before saving. Stop the server with Ctrl-C.
 
-**Send to Claude.** Each card has a **Send to Claude** button that copies the posting (a short
-header plus the stored description) to your clipboard and opens your claude.ai project in a tab,
+**Send to Claude / ChatGPT.** Each card has a send button that copies the posting (a short
+header plus the stored description) to your clipboard and opens your assistant project in a tab,
 so you just paste (Ctrl+V) and run — no opening LinkedIn and copying by hand. Set your project
-URL once in `config.yaml`:
+URL once in `config.yaml` — a claude.ai project, a ChatGPT project, or any chat page works, and
+the button labels itself after whichever you configured:
 
 ```yaml
 settings:
   feedback_project_url: "https://claude.ai/project/XXXXXXXX"
+  # or e.g. "https://chatgpt.com/g/g-p-XXXXXXXX/project"
 ```
 
 Leave it blank to just copy the JD without opening a tab. Because the pipeline already stores the
 full "About the job" text, this never re-scrapes LinkedIn. The rare posting longer than
 `max_description_chars` (~2%) is marked **⚠ JD may be truncated** and the posting URL is always
-included in the copied text so you can open the original. This uses your claude.ai project (and
-its files/instructions) directly, so it's covered by your Claude plan — no API key or extra cost.
+included in the copied text so you can open the original. This uses your chat project (and its
+files/instructions) directly, so it's covered by your chat subscription — no API key or extra
+cost.
 
 ## 5. Schedule (Task Scheduler)
 

@@ -13,6 +13,7 @@ Thumbs.db
 
 # ---- Local Claude Code config (machine-specific) ----
 .claude/settings.local.json
+.claude/launch.json
 
 # ---- Secrets ----
 .env

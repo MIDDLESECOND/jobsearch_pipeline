@@ -52,8 +52,8 @@
   a { color: #2563eb; }
   .empty { text-align: center; color: #889; padding: 3rem 1rem; }
   .links { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
-  button.claude { background: #d97706; color: #fff; border-color: #d97706; font-size: .78rem;
-                  padding: .25rem .6rem; }
+  button.send { background: #d97706; color: #fff; border-color: #d97706; font-size: .78rem;
+                padding: .25rem .6rem; }
   .trunc { font-size: .74rem; color: #b45309; }
   .toast { font-size: .76rem; color: #166534; }
   /* Lives inside the (already sticky) <header> as a full-width row that wraps below the tabs, so
@@ -85,7 +85,33 @@
 
 <script>
 const GATES = {{ gates | tojson }};
-const FEEDBACK_URL = {{ feedback_url | tojson }};
+const FEEDBACK_URL = (() => {
+  let u = String({{ feedback_url | tojson }});
+  if (!u) return "";
+  // Forgive a pasted URL missing its scheme ("claude.ai/project/x", "localhost:3000") — without
+  // one, window.open would treat it as a path on this Flask server and open a 404 tab, and the
+  // label below couldn't identify the assistant. host:port values parse as scheme:path rather
+  // than throwing, so an empty hostname needs the https:// retry too.
+  let host = "";
+  try { host = new URL(u).hostname; } catch (e) {}
+  if (!host) {
+    try { new URL("https://" + u); u = "https://" + u; } catch (e2) {}
+  }
+  return u;
+})();
+// The send button copies the JD and opens feedback_project_url — the mechanism works with any
+// chat assistant (a claude.ai project, a ChatGPT project, …), so label it by what the
+// configured URL actually points at instead of hardcoding one product.
+const ASSISTANT = (() => {
+  if (!FEEDBACK_URL) return null;
+  let host = "";
+  try { host = new URL(FEEDBACK_URL).hostname; } catch (e) {}
+  if (host.includes("claude")) return "Claude";
+  if (host.includes("chatgpt") || host.includes("openai")) return "ChatGPT";
+  if (host.includes("gemini")) return "Gemini";
+  return "assistant";
+})();
+const SEND_LABEL = ASSISTANT ? "Send to " + ASSISTANT : "Copy JD";
 const TODAY = {{ today | tojson }};
 let view = "today";
 // The posting pinned as the anchor for manual duplicate-linking, or null. Kept in module state
@@ -176,7 +202,7 @@ function card(j) {
     ${flags}
     <div class="meta links">
       <a href="${esc(j.job_url)}" target="_blank" rel="noopener">Posting ↗</a>
-      ${j.has_description ? `<button class="claude" type="button">Send to Claude</button>` : ""}
+      ${j.has_description ? `<button class="send" type="button">${esc(SEND_LABEL)}</button>` : ""}
       ${j.truncated ? `<span class="trunc">⚠ JD may be truncated</span>` : ""}
       <span class="toast"></span>
     </div>
@@ -184,8 +210,8 @@ function card(j) {
   `;
   const actions = div.querySelector(".actions");
 
-  const claudeBtn = div.querySelector(".claude");
-  if (claudeBtn) claudeBtn.addEventListener("click", () => sendToClaude(div, j.job_url));
+  const sendBtn = div.querySelector(".send");
+  if (sendBtn) sendBtn.addEventListener("click", () => sendToAssistant(div, j.job_url));
 
   // A chain-decided relisting (decision inherited from its canonical) is read-only here — undo it
   // on the original, which lives in the Applied/Passed view.
@@ -249,7 +275,7 @@ async function copyText(text) {
   }
 }
 
-async function sendToClaude(div, job_url) {
+async function sendToAssistant(div, job_url) {
   const toast = div.querySelector(".toast");
   toast.textContent = "Fetching JD…";
   try {
@@ -260,10 +286,10 @@ async function sendToClaude(div, job_url) {
     // write on an unfocused document fails ("Document is not focused") — so copy while this
     // page still has focus, then open the tab.
     const copied = await copyText(data.text);
-    if (FEEDBACK_URL) window.open(FEEDBACK_URL, "claude_project");
+    if (FEEDBACK_URL) window.open(FEEDBACK_URL, "feedback_project");
     if (!copied) { toast.textContent = "Copy failed — select & copy manually"; return; }
     toast.textContent = FEEDBACK_URL
-      ? "Copied — paste into your Claude project (Ctrl+V)"
+      ? `Copied — paste into your ${ASSISTANT} project (Ctrl+V)`
       : "JD copied — set settings.feedback_project_url to auto-open your project";
   } catch (e) {
     toast.textContent = "Error: " + e;

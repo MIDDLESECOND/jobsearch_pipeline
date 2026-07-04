@@ -75,7 +75,7 @@ def row_to_dict(row, cap, dec):
         "chain_app_status": dec["app_status"],
         "chain_filter_source": "manual" if dec["reject"] else None,
         "chain_status_date": dec["status_date"],
-        # Cheap booleans for the "Send to Claude" button — not the description text itself,
+        # Cheap booleans for the send-to-assistant button — not the description text itself,
         # so the list payload stays small.
         "has_description": bool(row["description"]),
         "truncated": bool(row["description"] and len(row["description"]) >= cap),
@@ -150,8 +150,8 @@ def api_jobs():
 
 @app.route("/api/clip")
 def api_clip():
-    """Assemble the clipboard text for one posting (header + JD) to paste into the claude.ai
-    project. Kept off the list payload so /api/jobs stays small."""
+    """Assemble the clipboard text for one posting (header + JD) to paste into the configured
+    assistant project (feedback_project_url). Kept off the list payload so /api/jobs stays small."""
     job_url = request.args.get("job_url")
     if not job_url:
         return jsonify({"text": "", "truncated": False}), 400

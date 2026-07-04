@@ -25,9 +25,11 @@ settings:
   max_description_chars: 12000
   db_path: "jobs.db"
   reports_dir: "reports"
-  # Optional: your claude.ai project for JD feedback. The triage UI's "Send to Claude" button
-  # copies a posting's description to your clipboard and opens this URL in a tab so you can paste
-  # (Ctrl+V) and run. Leave blank to just copy without opening a tab. Free under Claude Max.
+  # Optional: your assistant project for JD feedback — a claude.ai project URL, a ChatGPT
+  # project URL, or any chat page you like. The triage UI's send button copies a posting's
+  # description to your clipboard and opens this URL in a tab so you can paste (Ctrl+V) and run;
+  # the button labels itself after the URL ("Send to Claude" / "Send to ChatGPT" / …). Leave
+  # blank to just copy without opening a tab. Uses your chat subscription, not an API key.
   feedback_project_url: ""
   # Optional second source: the Adzuna API. Active only for searches that define an `adzuna:`
   # block (see below), and only if ADZUNA_APP_ID / ADZUNA_APP_KEY are set (register free at

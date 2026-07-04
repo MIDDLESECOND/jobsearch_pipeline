@@ -10,7 +10,7 @@ for one-click triage. You open one screen, not fifty tabs.
 files (profile, evaluation rules, database, reports) are gitignored; the repo ships
 `*.example.*` templates.
 
-<!-- TODO: docs/triage_ui.png — add the triage-UI screenshot: ![Triage UI](docs/triage_ui.png) -->
+![Triage UI — one card from the local web UI: verdict, score breakdown, bucket, repost badge, and one-click decisions](docs/triage_ui.png)
 
 ## Why it exists
 

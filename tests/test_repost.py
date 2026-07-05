@@ -1,14 +1,14 @@
 """_find_repost — the fetch-time content dedup (company+location AND exact title)."""
 
-import pipeline
+import chain
 from conftest import make_job
 
 
 def _find(conn, company, location, title, exclude_url=None):
-    return pipeline._find_repost(
+    return chain._find_repost(
         conn,
-        pipeline._fingerprint(company, location),
-        pipeline._norm_title(title),
+        chain._fingerprint(company, location),
+        chain._norm_title(title),
         exclude_url=exclude_url,
     )
 
@@ -46,5 +46,5 @@ def test_exclude_url_skips_self(conn):
 
 def test_empty_fingerprint_or_title_returns_none(conn):
     make_job(conn, job_url="u1")
-    assert pipeline._find_repost(conn, "", "data analyst") is None
-    assert pipeline._find_repost(conn, "acme|new york ny", "") is None
+    assert chain._find_repost(conn, "", "data analyst") is None
+    assert chain._find_repost(conn, "acme|new york ny", "") is None

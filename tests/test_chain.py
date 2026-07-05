@@ -4,6 +4,7 @@ the codebase (report / UI / dupe each touch it) — these tests pin its behavior
 planned chain.py extraction is safe.
 """
 
+import chain
 import pipeline
 from conftest import make_job
 
@@ -16,8 +17,8 @@ def test_chain_targets_covers_canonical_and_all_relistings(conn):
     make_job(conn, job_url="r2", repost_of="c")
     # Resolving from a relisting still returns the whole chain.
     relisting = conn.execute("SELECT * FROM jobs WHERE job_url='r1'").fetchone()
-    assert pipeline._chain_targets(conn, relisting) == {"c", "r1", "r2"}
-    assert pipeline._chain_targets(conn, canon) == {"c", "r1", "r2"}
+    assert chain._chain_targets(conn, relisting) == {"c", "r1", "r2"}
+    assert chain._chain_targets(conn, canon) == {"c", "r1", "r2"}
 
 
 # ----- _chain_decision / _decision_sig ----------------------------------------
@@ -26,21 +27,21 @@ def test_chain_decision_applied_outranks_passed(conn):
     make_job(conn, job_url="c", app_status="passed", status_date="2026-06-02")
     make_job(conn, job_url="r1", repost_of="c", app_status="applied",
              status_date="2026-06-03")
-    dec = pipeline._chain_decision(conn, {"c", "r1"})
+    dec = chain._chain_decision(conn, {"c", "r1"})
     assert dec["app_status"] == "applied"
 
 
 def test_chain_decision_none_when_undecided(conn):
     make_job(conn, job_url="c")
-    assert pipeline._chain_decision(conn, {"c"}) is None
+    assert chain._chain_decision(conn, {"c"}) is None
 
 
 def test_decision_sig_distinguishes_applied_from_passed(conn):
     make_job(conn, job_url="a", app_status="applied", status_date="2026-06-01")
     make_job(conn, job_url="b", app_status="passed", status_date="2026-06-01")
-    da = pipeline._chain_decision(conn, {"a"})
-    db = pipeline._chain_decision(conn, {"b"})
-    assert pipeline._decision_sig(da) != pipeline._decision_sig(db)
+    da = chain._chain_decision(conn, {"a"})
+    db = chain._chain_decision(conn, {"b"})
+    assert chain._decision_sig(da) != chain._decision_sig(db)
 
 
 # ----- decision propagation across a chain (cmd_mark) --------------------------
@@ -94,7 +95,7 @@ def test_cmd_reject_lifts_new_row_and_undo_restores_it(conn):
 def test_skip_decided_reposts_skips_new_relisting_of_decided_role(conn):
     make_job(conn, job_url="c", app_status="applied", status_date="2026-06-01")
     make_job(conn, job_url="r1", repost_of="c", status="new", verdict=None)
-    pipeline.skip_decided_reposts(conn)
+    chain.skip_decided_reposts(conn)
     r1 = conn.execute("SELECT status FROM jobs WHERE job_url='r1'").fetchone()
     assert r1["status"] == "repost_decided"
 
@@ -104,7 +105,7 @@ def test_skip_decided_reposts_reverses_when_decision_undone(conn):
     # it must return to 'new' so it isn't stranded, never re-evaluated.
     make_job(conn, job_url="c", app_status=None)
     make_job(conn, job_url="r1", repost_of="c", status="repost_decided", verdict=None)
-    pipeline.skip_decided_reposts(conn)
+    chain.skip_decided_reposts(conn)
     r1 = conn.execute("SELECT status FROM jobs WHERE job_url='r1'").fetchone()
     assert r1["status"] == "new"
 
@@ -116,7 +117,7 @@ def test_effective_decision_surfaces_canonical_for_fresh_relisting(conn):
     # but effective_decision must report the chain-wide 'applied' so report+UI show the banner.
     make_job(conn, job_url="c", app_status="applied", status_date="2026-06-01")
     relist = make_job(conn, job_url="r1", repost_of="c", app_status=None)
-    dec = pipeline.effective_decision(conn, relist)
+    dec = chain.effective_decision(conn, relist)
     assert dec["app_status"] == "applied"
     assert dec["status_date"] == "2026-06-01"
     assert dec["is_repost"] is True
@@ -125,7 +126,7 @@ def test_effective_decision_surfaces_canonical_for_fresh_relisting(conn):
 
 def test_effective_decision_undecided_chain(conn):
     canon = make_job(conn, job_url="c", app_status=None)
-    dec = pipeline.effective_decision(conn, canon)
+    dec = chain.effective_decision(conn, canon)
     assert dec["app_status"] is None
     assert dec["reject"] is False
     assert dec["is_repost"] is False
@@ -135,7 +136,7 @@ def test_effective_decision_reports_chain_reject(conn):
     make_job(conn, job_url="c", filter_source="manual", filter_gate="work_auth",
              filter_date="2026-06-01")
     relist = make_job(conn, job_url="r1", repost_of="c")
-    dec = pipeline.effective_decision(conn, relist)
+    dec = chain.effective_decision(conn, relist)
     assert dec["reject"] is True
     assert dec["filter_gate"] == "work_auth"
 
@@ -145,7 +146,7 @@ def test_effective_decision_reports_chain_reject(conn):
 def test_dupe_resolve_picks_earliest_first_seen_as_canonical(conn):
     make_job(conn, job_url="late", first_seen="2026-06-05T00:00:00")
     make_job(conn, job_url="early", first_seen="2026-06-01T00:00:00")
-    plan, err = pipeline._dupe_resolve(conn, "late", "early")
+    plan, err = chain.dupe_resolve(conn, "late", "early")
     assert err is None
     assert plan["winner"]["job_url"] == "early"
     assert plan["loser"]["job_url"] == "late"
@@ -154,7 +155,7 @@ def test_dupe_resolve_picks_earliest_first_seen_as_canonical(conn):
 def test_dupe_resolve_rejects_same_role(conn):
     make_job(conn, job_url="c")
     make_job(conn, job_url="r1", repost_of="c")
-    plan, err = pipeline._dupe_resolve(conn, "c", "r1")
+    plan, err = chain.dupe_resolve(conn, "c", "r1")
     assert plan is None
     assert "already the same role" in err
 
@@ -162,7 +163,7 @@ def test_dupe_resolve_rejects_same_role(conn):
 def test_dupe_resolve_blocks_conflicting_decisions(conn):
     make_job(conn, job_url="a", app_status="applied", status_date="2026-06-01")
     make_job(conn, job_url="b", app_status="passed", status_date="2026-06-02")
-    plan, err = pipeline._dupe_resolve(conn, "a", "b")
+    plan, err = chain.dupe_resolve(conn, "a", "b")
     assert plan is None
     assert "decided differently" in err
 
@@ -174,9 +175,9 @@ def test_dupe_commit_links_and_propagates_then_unlink_restores(conn):
              app_status="applied", status_date="2026-06-01")
     make_job(conn, job_url="late", first_seen="2026-06-05T00:00:00", app_status=None)
 
-    plan, err = pipeline._dupe_resolve(conn, "late", "early")
+    plan, err = chain.dupe_resolve(conn, "late", "early")
     assert err is None
-    pipeline._dupe_commit(conn, plan)
+    chain.dupe_commit(conn, plan)
 
     late = conn.execute("SELECT * FROM jobs WHERE job_url='late'").fetchone()
     assert late["repost_of"] == "early"
@@ -185,7 +186,7 @@ def test_dupe_commit_links_and_propagates_then_unlink_restores(conn):
     assert late["app_status"] == "applied"
 
     # Undo splits them back into independent chains.
-    ok, msg, _ = pipeline._dupe_unlink(conn, late)
+    ok, msg, _ = chain.dupe_unlink(conn, late)
     assert ok
     late = conn.execute("SELECT * FROM jobs WHERE job_url='late'").fetchone()
     assert late["repost_of"] is None
@@ -201,9 +202,9 @@ def test_dupe_merge_propagates_reject_without_clobbering_rule(conn):
     make_job(conn, job_url="late_rule", repost_of="late", filter_source="rule:clearance",
              filter_gate="work_auth")
 
-    plan, err = pipeline._dupe_resolve(conn, "late", "early")
+    plan, err = chain.dupe_resolve(conn, "late", "early")
     assert err is None
-    pipeline._dupe_commit(conn, plan)
+    chain.dupe_commit(conn, plan)
 
     rows = {r["job_url"]: r["filter_source"]
             for r in conn.execute("SELECT job_url, filter_source FROM jobs")}

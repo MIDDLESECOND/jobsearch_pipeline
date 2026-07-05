@@ -16,7 +16,8 @@ try:
 except Exception:
     pass
 
-import pipeline  # reuse build_system_prompt / parse_eval_json / _ensure_api_key
+import core
+import evaluation  # build_system_prompt / parse_eval_json / normalize_result
 
 SAMPLE_N = 25
 MODELS = [
@@ -34,11 +35,11 @@ PRICES = {
     "deepseek-v4-pro":   (0.28 / 1e6, 1.10 / 1e6),
 }
 
-pipeline._ensure_api_key()
+core._ensure_api_key()
 import anthropic
 aclient = anthropic.Anthropic()
 DS_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-SYSTEM = pipeline.build_system_prompt()
+SYSTEM = evaluation.build_system_prompt()
 
 
 def call_anthropic(model, user_msg):
@@ -81,7 +82,7 @@ def evaluate(provider, model, user_msg):
         text, tin, tout = fn(model, user_msg)
         # normalize_result applies the same hard routing the pipeline enforces
         # (the depth-0 -> RECRUITER_ONLY cap), so verdicts compared here match prod.
-        parsed = pipeline.normalize_result(pipeline.parse_eval_json(text))
+        parsed = evaluation.normalize_result(evaluation.parse_eval_json(text))
         return {
             "ok": True, "verdict": parsed.get("verdict"),
             "failed_gate": parsed.get("failed_gate"),

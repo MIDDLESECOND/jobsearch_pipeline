@@ -7,9 +7,9 @@ they don't exercise (fetch's network calls, the eval providers' error/retry bran
 exactly how an `import sys` got dropped from evaluation.py and shipped. pyflakes flags that class
 statically, across every module, in milliseconds.
 
-We assert ONLY on real-defect message classes (undefined name, etc.) and syntax errors — NOT on
-"imported but unused", which pipeline.py's re-export layer produces ON PURPOSE (it imports names
-solely so `pipeline.X` keeps resolving for app.py / the tests / the validation scripts).
+We assert on real-defect message classes (undefined name, etc.), syntax errors, AND unused
+imports: since the pipeline.py re-export layer was removed, every module imports only what it
+uses, so an unused import is always dead code (usually a leftover from moving a function).
 
 Residual limitation (inherent to pyflakes, not fixable by FATAL): an undefined name used inside a
 `try` whose handler catches `NameError` (or a bare `except`) is suppressed and never reported. We
@@ -31,9 +31,9 @@ MODULES = sorted(
     set(PROJECT.glob("*.py")) | set((PROJECT / "tests").glob("*.py"))
 )
 
-# Message classes that mean a real defect (a crash waiting to happen), as opposed to style noise
-# like UnusedImport — which the re-export layer legitimately and deliberately triggers.
+# Message classes that mean a real defect (a crash waiting to happen) or dead code.
 FATAL = (
+    messages.UnusedImport,
     messages.UndefinedName,
     messages.UndefinedLocal,
     messages.UndefinedExport,

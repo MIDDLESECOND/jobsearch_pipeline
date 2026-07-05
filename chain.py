@@ -7,18 +7,20 @@ This module owns everything about treating multiple postings as one role:
   * fetch-time repost linking (_find_repost),
   * the repost *chain* abstraction — members, the user's effective decision across a
     chain, and propagation/reconcile (skip_decided_reposts),
-  * the manual dupe-link cores (_dupe_resolve / _dupe_commit / _dupe_unlink).
+  * the manual dupe-link cores (dupe_resolve / dupe_commit / dupe_unlink).
 
 It was extracted from pipeline.py so the "what is this chain's decision?" question has
 ONE implementation. The report, the web UI, and the dupe conflict-guard all call
 `effective_decision` / `_chain_decision` here instead of each re-deriving it.
 
-No imports from pipeline (keeps the dependency one-way); pipeline re-imports these names
-so existing call sites and `pipeline.X` references keep working.
+No imports from pipeline (keeps the dependency one-way). Imports only states (the enum leaf)
+and the stdlib.
 """
 
 import re
-import sys
+from datetime import date
+
+from states import GATE_NAMES, STATUS_NEW, STATUS_RULE_FILTERED, STATUS_REPOST_DECIDED
 
 
 # ------------------------------------------------------- normalization / fingerprint
@@ -82,7 +84,7 @@ def _norm_title(s):
 
 
 # Bumped whenever the fingerprint normalization changes; gates a one-time recompute of stored
-# fingerprints (see pipeline._recompute_fingerprints) so existing rows and new inserts share a
+# fingerprints (see core._recompute_fingerprints) so existing rows and new inserts share a
 # key space. Current scheme: comma-aware _norm_location with tail-only metro-cruft + state-abbrev.
 _NORM_VERSION = 3
 
@@ -184,11 +186,13 @@ def skip_decided_reposts(conn):
     decided = ("(SELECT job_url FROM jobs WHERE app_status IS NOT NULL "
                "OR filter_source IS NOT NULL)")
     cur = conn.execute(
-        f"UPDATE jobs SET status='repost_decided' WHERE status='new' AND repost_of IN {decided}"
+        f"UPDATE jobs SET status='{STATUS_REPOST_DECIDED}' WHERE status='{STATUS_NEW}' "
+        f"AND repost_of IN {decided}"
     )
     # repost_of / job_url are never NULL here, so NOT IN is safe (no NULL-row short-circuit).
     rev = conn.execute(
-        f"UPDATE jobs SET status='new' WHERE status='repost_decided' AND repost_of NOT IN {decided}"
+        f"UPDATE jobs SET status='{STATUS_NEW}' WHERE status='{STATUS_REPOST_DECIDED}' "
+        f"AND repost_of NOT IN {decided}"
     )
     conn.commit()
     if cur.rowcount:
@@ -199,13 +203,13 @@ def skip_decided_reposts(conn):
 
 # ------------------------------------------------------ url resolution / chain reads
 
-def _resolve_posting(conn, url, label):
-    """Resolve a --url (full or unique substring) to a single jobs row, or None. Prints a
-    helpful message on no-match / ambiguity. Shared by the `applied`/`passed`/`reject`
-    commands so they behave identically."""
+def resolve_posting(conn, url):
+    """Resolve a url (full or unique substring) to a single jobs row. Returns `(row, error)`
+    with exactly one non-None — the same shape as `dupe_resolve`, so both front-ends (CLI
+    prints the error, web UI returns it as JSON) share one resolution behavior. No printing
+    here: this is service code, not a command."""
     if not url:
-        print(f"[{label}] provide --url (full or unique substring of the job_url)", file=sys.stderr)
-        return None
+        return None, "provide a url (full or unique substring of the job_url)"
     # Escape LIKE metacharacters so a substring containing % or _ matches literally
     # (the resolved row drives a destructive UPDATE, so a mis-match must not happen).
     safe = url.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -213,8 +217,7 @@ def _resolve_posting(conn, url, label):
         "SELECT * FROM jobs WHERE job_url LIKE ? ESCAPE '\\'", (f"%{safe}%",)
     ).fetchall()
     if not matches:
-        print(f"[{label}] no posting matches '{url}'", file=sys.stderr)
-        return None
+        return None, f"no posting matches '{url}'"
     if len(matches) > 1:
         # A full job_url is a substring of any longer one (LinkedIn ids nest: .../view/123 is a
         # substring of .../view/1234), so an exact url would otherwise read as "ambiguous". When the
@@ -222,12 +225,10 @@ def _resolve_posting(conn, url, label):
         # (always true for the web UI, which passes full urls), not a fuzzy substring.
         exact = [m for m in matches if m["job_url"] == url]
         if len(exact) == 1:
-            return exact[0]
-        print(f"[{label}] '{url}' is ambiguous ({len(matches)} matches):", file=sys.stderr)
-        for m in matches:
-            print(f"    {m['title']} — {m['company']}  {m['job_url']}", file=sys.stderr)
-        return None
-    return matches[0]
+            return exact[0], None
+        listing = "\n".join(f"    {m['title']} — {m['company']}  {m['job_url']}" for m in matches)
+        return None, f"'{url}' is ambiguous ({len(matches)} matches):\n{listing}"
+    return matches[0], None
 
 
 def _chain_members(conn, canonical_url):
@@ -388,7 +389,7 @@ def effective_decisions(conn, rows):
 #
 # A per-posting decision applies to the whole repost chain, not just the named row. These three
 # functions own those writes so the SET clauses — and the load-bearing status='new' -> 'rule_filtered'
-# lift on a reject — live in ONE place. cmd_mark, cmd_reject, and _dupe_commit all route through
+# lift on a reject — live in ONE place. cmd_mark, cmd_reject, and dupe_commit all route through
 # them, so the write paths can't drift the way they did when each had its own inline UPDATE.
 # (The read counterpart is effective_decision; callers commit.)
 
@@ -396,7 +397,8 @@ def effective_decisions(conn, rows):
 # row to 'rule_filtered' so the next run's paid eval skips it (an already-evaluated row keeps its
 # status — the report groups by filter_source either way). Two placeholders: (gate, date).
 _REJECT_SET = ("filter_source='manual', filter_gate=?, filter_date=?, "
-               "status=CASE WHEN status='new' THEN 'rule_filtered' ELSE status END")
+               f"status=CASE WHEN status='{STATUS_NEW}' THEN '{STATUS_RULE_FILTERED}' "
+               "ELSE status END")
 
 
 def propagate_app_status(conn, member_urls, status, status_date):
@@ -445,10 +447,50 @@ def clear_reject(conn, member_urls):
     qs = ",".join("?" * len(members))
     conn.execute(
         "UPDATE jobs SET filter_source=NULL, filter_gate=NULL, filter_date=NULL, "
-        "status=CASE WHEN status='rule_filtered' AND verdict IS NULL THEN 'new' ELSE status END "
+        f"status=CASE WHEN status='{STATUS_RULE_FILTERED}' AND verdict IS NULL "
+        f"THEN '{STATUS_NEW}' ELSE status END "
         f"WHERE job_url IN ({qs}) AND filter_source='manual'",
         tuple(members),
     )
+
+
+# ----------------------------------------------------- decision services
+#
+# The one implementation of "apply this user decision to a resolved posting", shared by the
+# CLI (cmd_mark / cmd_reject print the message) and the web UI (api_decision returns it as
+# JSON) — the same single-core-two-front-ends shape as the dupe trio below. Both return
+# (ok, message, affected_urls); `affected` is the whole repost chain, which the UI uses to
+# update sibling cards. Callers resolve the row first (resolve_posting) so the CLI can keep
+# it for the filters.yaml rule promotion.
+
+def mark_posting(conn, row, status):
+    """Set (status='applied'|'passed') or clear (status=None) the user's decision across
+    `row`'s whole repost chain. Returns (ok, message, affected_urls)."""
+    targets = _chain_targets(conn, row)
+    stamp = date.today().isoformat() if status else None
+    propagate_app_status(conn, targets, status, stamp)
+    conn.commit()
+    verb = f"marked {status}" if status else "cleared status"
+    msg = f"{verb}: {row['title']} — {row['company']}" + (f" ({stamp})" if status else "")
+    return True, msg, sorted(targets)
+
+
+def reject_posting(conn, row, gate, undo=False):
+    """Apply (or with undo=True clear) the manual hard-fail override across `row`'s chain.
+    Returns (ok, message, affected_urls). The named row is always (re)stamped — the user is
+    overruling it, possibly re-attributing a filters.yaml auto-fail; siblings are stamped too
+    but never clobber a rule:<name> attribution (see propagate_reject)."""
+    targets = _chain_targets(conn, row)
+    if undo:
+        clear_reject(conn, targets)
+        conn.commit()
+        return True, f"cleared override: {row['title']} — {row['company']}", sorted(targets)
+    if gate not in GATE_NAMES + ["other"]:
+        return False, f"gate must be one of {GATE_NAMES + ['other']}", []
+    today = date.today().isoformat()
+    propagate_reject(conn, targets, gate, today, force_url=row["job_url"], overwrite_manual=True)
+    conn.commit()
+    return True, f"rejected (gate: {gate}): {row['title']} — {row['company']} ({today})", sorted(targets)
 
 
 # ------------------------------------------------------- manual repost linking
@@ -461,19 +503,19 @@ def clear_reject(conn, member_urls):
 # (repost_of + _chain_targets + skip_decided_reposts). It adds NO fuzzy matching —
 # the user asserts the duplicate; the code just records and propagates it safely.
 
-def _dupe_resolve(conn, url, of_url):
+def dupe_resolve(conn, url, of_url):
     """Validate a link request and build the merge plan WITHOUT mutating. Returns `(plan, error)`
     with exactly one non-None: `plan` is a dict (winner, loser, *_members, dec) ready for
-    `_dupe_commit`; `error` is a user-facing string explaining a guard failure. Shared by the CLI
+    `dupe_commit`; `error` is a user-facing string explaining a guard failure. Shared by the CLI
     (`cmd_dupe`) and the web UI (`app.api_dupe`) so the guard logic lives in one place."""
-    a = _resolve_posting(conn, url, "dupe")
-    if a is None:
-        return None, "no posting matches that URL"
+    a, err = resolve_posting(conn, url)
+    if err:
+        return None, err
     if not of_url:
         return None, "provide the other posting (--of <id or unique substring of its job_url>)"
-    b = _resolve_posting(conn, of_url, "dupe")
-    if b is None:
-        return None, "no posting matches the other URL"
+    b, err = resolve_posting(conn, of_url)
+    if err:
+        return None, err
 
     # Resolve each side to its chain's canonical, so we link canonical-to-canonical (never build
     # a 2-level chain the flat _chain_targets can't traverse).
@@ -519,8 +561,8 @@ def _dupe_resolve(conn, url, of_url):
     return plan, None
 
 
-def _dupe_commit(conn, plan):
-    """Apply a merge plan from `_dupe_resolve`: repoint the loser chain under the winner canonical,
+def dupe_commit(conn, plan):
+    """Apply a merge plan from `dupe_resolve`: repoint the loser chain under the winner canonical,
     propagate the surviving decision (preserving original dates), eval-skip still-`new` members.
     Returns the affected job_url list. Caller is responsible for any preview/confirmation."""
     winner, loser = plan["winner"], plan["loser"]
@@ -551,7 +593,7 @@ def _dupe_commit(conn, plan):
     return sorted(winner_members | loser_members)
 
 
-def _dupe_unlink(conn, a):
+def dupe_unlink(conn, a):
     """Core of `dupe --undo`: detach the manually-linked relisting `a` (and the sub-chain it
     originally headed) from its canonical, restoring the two independent chains. Structure only — a
     decision that propagated across the merge is left as-is. Returns `(ok, message, affected)`.

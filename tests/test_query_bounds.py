@@ -13,7 +13,7 @@ real jobs.db)."""
 import math
 from contextlib import contextmanager
 
-import pipeline
+import chain
 import report
 from conftest import make_job
 
@@ -61,7 +61,7 @@ def test_effective_decisions_query_count_is_bounded(conn):
     assert len(rows) == n_canon * (1 + per)  # sanity: 320 rows
 
     with count_queries(conn) as nq:
-        decisions = pipeline.effective_decisions(conn, rows)
+        decisions = chain.effective_decisions(conn, rows)
     # All canonicals fit in one CHUNK (400), so the batch is a single SELECT. Allow chunk math + 1.
     bound = math.ceil(n_canon / 400) + 1
     assert nq[0] <= bound, f"effective_decisions issued {nq[0]} queries for {len(rows)} rows (bound {bound})"
@@ -70,7 +70,7 @@ def test_effective_decisions_query_count_is_bounded(conn):
     # Contrast: the per-row path this replaced fires ~one query per row — documents what we guard against.
     with count_queries(conn) as nq_perrow:
         for r in rows:
-            pipeline.effective_decision(conn, r)
+            chain.effective_decision(conn, r)
     assert nq_perrow[0] >= len(rows), "per-row path should be O(N) — if not, this guard is mis-measuring"
 
 

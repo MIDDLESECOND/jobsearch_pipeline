@@ -15,6 +15,9 @@ from datetime import date, datetime, time
 
 from core import BASE_DIR, PARSE_MIN, PARSE_MAX, parse_iso
 from chain import effective_decisions
+from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY,
+                    STATUS_NEEDS_MANUAL, STATUS_ERROR, STATUS_SALARY_FILTERED,
+                    STATUS_REPOST_DECIDED)
 
 
 def generate_report(cfg, conn, for_date=None):
@@ -46,13 +49,13 @@ def generate_report(cfg, conn, for_date=None):
     # Hard-fail overrides (your rules + manual rejects) are pulled out first so they don't
     # also appear under their model verdict (a manual reject keeps its original PASS verdict).
     hard_filtered = [r for r in rows if r["filter_source"]]
-    passes = [r for r in rows if r["verdict"] == "PASS" and not r["filter_source"]]
-    recruiter = [r for r in rows if r["verdict"] == "RECRUITER_ONLY" and not r["filter_source"]]
-    fails = [r for r in rows if r["verdict"] == "GATE_FAIL" and not r["filter_source"]]
-    manual = [r for r in rows if r["status"] == "needs_manual" and not r["filter_source"]]
-    errors = [r for r in rows if r["status"] == "error"]
-    salary_filtered = [r for r in rows if r["status"] == "salary_filtered"]
-    repost_skipped = [r for r in rows if r["status"] == "repost_decided"]
+    passes = [r for r in rows if r["verdict"] == VERDICT_PASS and not r["filter_source"]]
+    recruiter = [r for r in rows if r["verdict"] == VERDICT_RECRUITER_ONLY and not r["filter_source"]]
+    fails = [r for r in rows if r["verdict"] == VERDICT_GATE_FAIL and not r["filter_source"]]
+    manual = [r for r in rows if r["status"] == STATUS_NEEDS_MANUAL and not r["filter_source"]]
+    errors = [r for r in rows if r["status"] == STATUS_ERROR]
+    salary_filtered = [r for r in rows if r["status"] == STATUS_SALARY_FILTERED]
+    repost_skipped = [r for r in rows if r["status"] == STATUS_REPOST_DECIDED]
 
     reposts = [r for r in rows if r["repost_of"]]
     repost_status = [decisions[r["job_url"]]["app_status"] for r in reposts]
@@ -130,7 +133,7 @@ def generate_report(cfg, conn, for_date=None):
         for r in hard_filtered:
             src = r["filter_source"] or ""
             tag = f"`rule: {src[5:]}`" if src.startswith("rule:") else "`manual`"
-            note = " (model under-filtered)" if (src == "manual" and r["verdict"] in ("PASS", "RECRUITER_ONLY")) else ""
+            note = " (model under-filtered)" if (src == "manual" and r["verdict"] in (VERDICT_PASS, VERDICT_RECRUITER_ONLY)) else ""
             # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
             # so a rule can't silently bury a relisting of a role you already applied to.
             lines.append(

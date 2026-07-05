@@ -19,6 +19,7 @@ from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
 from chain import _norm_company, _norm_title, _fingerprint, _find_repost
 from filters import _pattern_matches, validate_pattern  # one pattern dialect + validator
 # for filters.yaml AND settings.ats
+from states import STATUS_NEW
 
 
 # ---------------------------------------------------------------------- fetch
@@ -141,10 +142,10 @@ def _insert_posting(conn, *, url, title, company, location, search_name, tier,
            (job_url, title, company, location, search_name, tier, date_posted,
             first_seen, salary_min, salary_max, description, status,
             norm_company, norm_title, fingerprint, repost_of, source)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (url, title, company, location, search_name, tier, date_posted, first_seen,
-         salary_min, salary_max, description, norm_company, norm_title, fingerprint,
-         repost_of, source),
+         salary_min, salary_max, description, STATUS_NEW, norm_company, norm_title,
+         fingerprint, repost_of, source),
     )
     return cur.rowcount, repost_of
 

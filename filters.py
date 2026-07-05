@@ -15,6 +15,7 @@ from datetime import date
 import yaml
 
 from core import BASE_DIR
+from states import STATUS_NEW, STATUS_SALARY_FILTERED, STATUS_RULE_FILTERED, VERDICT_GATE_FAIL
 
 FILTERS_PATH = BASE_DIR / "filters.yaml"
 
@@ -30,14 +31,15 @@ def apply_salary_filter(cfg, conn):
         if not floor:
             continue
         rows = conn.execute(
-            "SELECT job_url, salary_min, salary_max FROM jobs WHERE search_name=? AND status='new'",
-            (search["name"],),
+            "SELECT job_url, salary_min, salary_max FROM jobs WHERE search_name=? AND status=?",
+            (search["name"], STATUS_NEW),
         ).fetchall()
         for r in rows:
             known = r["salary_max"] or r["salary_min"]
             if known is not None and known < floor:
                 conn.execute(
-                    "UPDATE jobs SET status='salary_filtered' WHERE job_url=?", (r["job_url"],)
+                    "UPDATE jobs SET status=? WHERE job_url=?",
+                    (STATUS_SALARY_FILTERED, r["job_url"]),
                 )
                 filtered += 1
     conn.commit()
@@ -135,7 +137,7 @@ def apply_hard_filters(cfg, conn):
     if not rules:
         return
     rows = conn.execute(
-        "SELECT job_url, title, description FROM jobs WHERE status='new'"
+        "SELECT job_url, title, description FROM jobs WHERE status=?", (STATUS_NEW,)
     ).fetchall()
     today = date.today().isoformat()
     filtered = 0
@@ -146,9 +148,10 @@ def apply_hard_filters(cfg, conn):
         for rule in rules:
             if _rule_hit(rule, text):
                 conn.execute(
-                    "UPDATE jobs SET status='rule_filtered', verdict='GATE_FAIL', "
+                    "UPDATE jobs SET status=?, verdict=?, "
                     "failed_gate=?, filter_source=?, filter_gate=?, filter_date=? WHERE job_url=?",
-                    (rule.get("gate", "other"), "rule:" + rule.get("name", "?"),
+                    (STATUS_RULE_FILTERED, VERDICT_GATE_FAIL,
+                     rule.get("gate", "other"), "rule:" + rule.get("name", "?"),
                      rule.get("gate", "other"), today, r["job_url"]),
                 )
                 filtered += 1

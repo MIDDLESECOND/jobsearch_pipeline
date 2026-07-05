@@ -41,7 +41,7 @@ from filters import (
     apply_salary_filter, apply_hard_filters,
     load_filters, save_filters, _pattern_matches, validate_pattern, FILTERS_PATH,
 )
-from evaluation import evaluate_new_jobs
+from evaluation import evaluate_new_jobs, requeue_error_rows
 from report import generate_report
 
 
@@ -309,6 +309,9 @@ def main():
         # on status and only the deterministic, zero-cost filters run before the *paid* eval, so an
         # obvious reject never reaches the LLM. The transitions:
         #   fetch_new_jobs / fetch_adzuna / fetch_ats  insert rows as 'new'
+        #   requeue_error_rows             last run's 'error'     -> 'new'  (retry — BEFORE the
+        #                                  filters, so a requeued row re-faces the current rules
+        #                                  and any chain decision made while it sat in 'error')
         #   apply_salary_filter            'new' below floor      -> 'salary_filtered'
         #   apply_hard_filters             'new' hits a rule      -> 'rule_filtered'
         #   skip_decided_reposts           'new' relisting of a decided role -> 'repost_decided'
@@ -333,6 +336,7 @@ def main():
             _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin")
             _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
             _run_fetch_stage(fetch_ats, cfg, conn, "ats")
+            requeue_error_rows(conn)
             apply_salary_filter(cfg, conn)
             apply_hard_filters(cfg, conn)
             skip_decided_reposts(conn)

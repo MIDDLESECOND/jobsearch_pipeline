@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic, zero-cost pre-eval filters: the salary floor and the user-maintained
 hard-requirement rules (filters.yaml). Both run BEFORE the paid LLM eval and set a non-'new'
-status so evaluate_new_jobs short-circuits the obvious rejects. Imports only core; the `reject`
-command's rule-writing helper (_add_filter_rule) lives with the CLI in pipeline.py but reuses
+status so evaluate_new_jobs short-circuits the obvious rejects. Imports only core and states;
+the `reject` command's rule-writing helper (_add_filter_rule) lives with the CLI in pipeline.py but reuses
 load_filters/save_filters/_pattern_matches from here, and fetch.py's ATS title/location
 filters also match via _pattern_matches — a semantics change here changes which ATS postings
 enter the DB and the paid eval, not just which rules fire.

@@ -46,9 +46,9 @@ def client(db_path, monkeypatch):
                         "feedback_project_url": ""}}
 
     def fresh_conn(_cfg=None):
-        c = sqlite3.connect(db_path)
-        c.row_factory = sqlite3.Row
-        return c
+        # The REAL production opener (row factory, busy timeout), so the endpoint tests
+        # exercise the same connection configuration the app ships.
+        return core.connect_db(cfg)
 
     monkeypatch.setattr(webapp, "load_config", lambda: cfg)
     monkeypatch.setattr(webapp, "connect_db", fresh_conn)

@@ -18,10 +18,12 @@ fetch stage. Separately, `jobs.db` grew without bound (rejected postings keep th
 descriptions forever).
 
 ### What changed
-- **Error rows are requeued.** `evaluate_new_jobs` now flips `status='error'` → `'new'` at the
-  start of each eval pass (`evaluation.requeue_error_rows`), so provider-outage casualties are
-  retried automatically on the next run instead of stranding. Runs only when an eval will
-  actually happen (after the provider/key checks).
+- **Error rows are requeued.** A new `run` stage (`evaluation.requeue_error_rows`) flips
+  `status='error'` → `'new'` right after the fetchers, so provider-outage casualties are
+  retried automatically on the next run instead of stranding. It runs BEFORE the deterministic
+  filters on purpose: a requeued row re-faces the salary filter, the current hard rules, and
+  `skip_decided_reposts`, so a rule added (or a chain decision made) while the row sat in
+  'error' still catches it before the paid eval.
 - **Retryable vs. fatal eval errors.** Only 408/429/5xx/non-HTTP failures are retried; any
   other 4xx fails the row immediately (our request is wrong — retrying triples the cost for
   the same failure), and a 401/403 aborts the whole batch (`EvalAuthError`) leaving unevaluated
@@ -31,7 +33,10 @@ descriptions forever).
   all die at startup with one collected message, before any fetch/eval spend.
 - **Status/verdict vocabulary centralized in `states.py`**, and fresh databases get
   `CHECK (status IN (...))` / `CHECK (verdict IN (...))` constraints (existing DBs are not
-  rebuilt — the code-side constants are the enforcement that covers both).
+  rebuilt — the code-side constants are the enforcement that covers both). To keep those
+  CHECKs fail-loud, the fetchers' `INSERT OR IGNORE` became `INSERT ... ON CONFLICT(job_url)
+  DO NOTHING` (needs SQLite ≥ 3.24): only the PK duplicate is skipped; any other constraint
+  violation now raises instead of silently dropping the row.
 - **New `prune` command** (`pipeline.py prune [--days N] [--vacuum]`): clears descriptions of
   GATE_FAIL / salary-filtered rows older than N days (default 90). Never touches gates-passed
   rows (backtest_v2 re-evaluates those from stored text), repost-skipped rows, or undoable

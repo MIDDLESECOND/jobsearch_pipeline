@@ -5,6 +5,7 @@ ai_artifact_depth is 0 (or unparseable) is capped to RECRUITER_ONLY / bucket 1,
 even at a perfect score. Enforced in code so it can't depend on the model complying.
 """
 
+import chain
 import evaluation
 from conftest import make_job
 
@@ -133,3 +134,17 @@ def test_requeue_error_rows(conn):
     statuses = {r["job_url"]: r["status"]
                 for r in conn.execute("SELECT job_url, status FROM jobs")}
     assert statuses == {"e1": "new", "done": "evaluated", "fresh": "new"}
+
+
+def test_requeued_error_row_refaces_the_filters(conn):
+    """The stage-order contract: requeue runs BEFORE the deterministic filters (see `run`),
+    so a chain decision made while a relisting sat in 'error' repost-skips it instead of
+    letting it slip straight into the paid eval."""
+    make_job(conn, job_url="canon", company="Chain Co", app_status="applied",
+             status_date="2026-07-01")
+    make_job(conn, job_url="err", company="Chain Co", repost_of="canon",
+             status="error", verdict=None, fit_score=None, bucket=None)
+    evaluation.requeue_error_rows(conn)   # error -> new (the run stage after the fetchers)
+    chain.skip_decided_reposts(conn)      # then the pre-eval passes run over 'new'
+    status = conn.execute("SELECT status FROM jobs WHERE job_url='err'").fetchone()[0]
+    assert status == "repost_decided"     # eval never sees it

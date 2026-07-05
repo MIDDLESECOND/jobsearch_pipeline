@@ -2,9 +2,10 @@
 """Shared foundation for the pipeline: paths, the cross-cutting constants, config loading,
 the SQLite open/schema/migration path, and the API-key resolver.
 
-This is the base of the module DAG — it imports only chain.py (for the fingerprint normalization
-used by the one-time backfill/recompute) and the stdlib. fetch.py, evaluation.py, filters.py,
-report.py, and pipeline.py all import FROM here; nothing here imports them (so there are no cycles).
+Near the base of the module DAG — it imports only chain.py (for the fingerprint normalization
+used by the one-time backfill/recompute), states.py (the status/verdict enums for the schema
+CHECKs), and the stdlib. fetch.py, evaluation.py, filters.py, report.py, and pipeline.py all
+import FROM here; nothing here imports them (so there are no cycles).
 """
 
 import contextlib

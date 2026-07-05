@@ -9,9 +9,14 @@ propagation and the status lift behave exactly like the CLI wrappers in pipeline
 and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
 linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
 changes. Single-user, local-only — binds to 127.0.0.1.
+
+Launch through serve() (what `pipeline.py ui` / `python app.py` do) — it runs the one-time
+schema/migration pass the routes rely on. A serve-less launch (`flask run`, a WSGI import)
+is unsupported: routes open plain connect_db connections and would fail on a fresh DB.
 """
 
 import json
+import sys
 import webbrowser
 from datetime import date
 
@@ -30,7 +35,10 @@ GATE_OPTIONS = GATE_NAMES + ["other"]
 # Hostnames this app may be addressed as. The Origin check below is defeated by DNS
 # rebinding on its own (the browser would send the attacker's domain as BOTH Host and
 # Origin, which then "match"), so every request first has its Host pinned to loopback
-# names. serve() extends the set when run on a non-default host/port.
+# names. serve() extends the set when run on a non-default host/port. Kept hand-rolled
+# rather than Flask 3's TRUSTED_HOSTS config, deliberately: this returns the JSON shape
+# the UI's fetch() error paths read (TRUSTED_HOSTS emits an HTML 400), and the set is
+# extended at serve() time with the actual port.
 ALLOWED_HOSTS = {"127.0.0.1:5000", "localhost:5000"}
 
 
@@ -284,8 +292,18 @@ def api_dupe():
 def serve(host="127.0.0.1", port=5000):
     ALLOWED_HOSTS.update({f"{host}:{port}", f"127.0.0.1:{port}", f"localhost:{port}"})
     # One-time schema/migration pass; every request after this opens a plain connect_db
-    # connection instead of re-running the idempotent DDL per request.
-    get_db(load_config()).close()
+    # connection instead of re-running the idempotent DDL per request. The config load is
+    # guarded like the CLI path in pipeline.main(): validate_config raises on a broken
+    # config.yaml, and the UI must die with the collected problem list, not a traceback.
+    try:
+        get_db(load_config()).close()
+    except FileNotFoundError:
+        print("[config] config.yaml not found — copy config.example.yaml to config.yaml "
+              "and edit it for your search", file=sys.stderr)
+        sys.exit(2)
+    except ValueError as e:
+        print(f"[config] {e}", file=sys.stderr)
+        sys.exit(2)
     url = f"http://{host}:{port}"
     print(f"[ui] triage UI at {url}  (Ctrl-C to stop)")
     try:

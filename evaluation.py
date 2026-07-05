@@ -5,7 +5,7 @@ deterministically in code (the 50/0 cap in normalize_result) so they can't depen
 complying. The 'brain' is the external markdown read at runtime — to change how postings are
 judged, edit profile.md / evaluation_guide.md, not this file.
 
-Imports only core (paths, constants, the API-key resolver).
+Imports only core (paths, the API-key resolver) and states (the verdict/status/gate enums).
 """
 
 import json
@@ -216,12 +216,14 @@ def _retryable(e):
 
 
 def requeue_error_rows(conn):
-    """Return status='error' rows to 'new' so the eval pass about to run retries them.
-    Without this an 'error' row (provider outage, rate-limit storm) is stranded forever —
-    no stage reads 'error'. Called only when an eval will actually happen (after the
-    provider/key checks), so a skipped eval doesn't churn statuses. A permanently failing
-    row re-errors each run — visible in the report's errors section, costing only its own
-    retries. Returns the requeued count."""
+    """Return status='error' rows to 'new' so this run retries them. Without this an
+    'error' row (provider outage, rate-limit storm) is stranded forever — no stage reads
+    'error'. Runs as its OWN stage in `run`, after the fetchers and BEFORE the deterministic
+    filters — deliberately not inside evaluate_new_jobs: a requeued row must re-face the
+    salary filter, the CURRENT hard rules, and skip_decided_reposts, so a rule added (or a
+    chain decision made) while the row sat in 'error' still catches it before the paid eval.
+    A permanently failing row re-errors each run — visible in the report's errors section,
+    costing only its own retries. Returns the requeued count."""
     n = conn.execute("UPDATE jobs SET status=? WHERE status=?",
                      (STATUS_NEW, STATUS_ERROR)).rowcount
     conn.commit()
@@ -301,7 +303,6 @@ def evaluate_new_jobs(cfg, conn):
     system_prompt = build_system_prompt()
     price_in, price_out = MODEL_PRICES.get(model, (0.0, 0.0))
 
-    requeue_error_rows(conn)
     rows = conn.execute("SELECT * FROM jobs WHERE status=?", (STATUS_NEW,)).fetchall()
     print(f"[eval] {len(rows)} postings to evaluate via {provider}:{model} "
           f"(concurrency={concurrency})")

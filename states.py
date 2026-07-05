@@ -11,12 +11,13 @@ The `status` state machine (who sets what — the `run` stage order in pipeline.
 authoritative sequence):
 
     fetchers (fetch.py)        insert rows as         NEW
+    requeue_error_rows         last run's ERROR    -> NEW  (retry; runs BEFORE the filters so a
+                               requeued row re-faces the current rules and chain decisions)
     apply_salary_filter        NEW below floor     -> SALARY_FILTERED
     apply_hard_filters         NEW hits a rule     -> RULE_FILTERED   (+ verdict=GATE_FAIL)
     skip_decided_reposts       NEW relisting of a
                                decided chain       -> REPOST_DECIDED  (reversed on undo)
     evaluate_new_jobs          remaining NEW       -> EVALUATED | NEEDS_MANUAL | ERROR
-                               (ERROR rows are requeued to NEW at the next eval pass)
     reject (manual override)   a still-NEW row     -> RULE_FILTERED   (undone if never evaluated)
 
 A new pre-eval filter must mirror the existing ones: set a non-NEW status so the paid eval
@@ -44,5 +45,6 @@ VERDICTS = [VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY]
 
 GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requirement",
               "work_auth", "employment_type"]
-SCORE_DIMS = ["ai_applied_vs_research", "ai_artifact_depth", "learning_value",
-              "technical_skill_match", "title_trajectory", "years_vs_stated"]
+# (No SCORE_DIMS constant: the score dimensions live in the eval prompt's output spec and
+# the stored eval_json; the report/UI render whatever keys exist, so a code-side list would
+# only drift.)

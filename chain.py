@@ -26,7 +26,7 @@ from states import GATE_NAMES, STATUS_NEW, STATUS_RULE_FILTERED, STATUS_REPOST_D
 # ------------------------------------------------------- normalization / fingerprint
 #
 # LinkedIn mints a fresh job_url every time a role is reposted, so URL-level dedup (the
-# INSERT OR IGNORE on the PRIMARY KEY) misses relistings. The content fingerprint adds a
+# PRIMARY-KEY conflict skip in fetch._insert_posting) misses relistings. The content fingerprint adds a
 # second layer: postings with the same normalized company+location AND the same
 # normalized title are treated as the same role across URL churn — guarding a double-apply.
 #

@@ -3,9 +3,9 @@
 Adzuna REST API, and the per-company ATS board APIs (Greenhouse/Lever/Ashby — public, no auth).
 All insert unseen postings as status='new' and are otherwise source-agnostic from then on — the
 `source` column is provenance only. Imports core (the API-key resolver), chain (the
-fingerprint/repost helpers), and filters (_pattern_matches, so the ATS title/location filters
-speak the same pattern dialect as filters.yaml); nothing depends back on this module except
-pipeline's `run`.
+fingerprint/repost helpers), states (STATUS_NEW), and filters (_pattern_matches, so the ATS
+title/location filters speak the same pattern dialect as filters.yaml); nothing depends back
+on this module except pipeline's `run`.
 """
 
 import html
@@ -130,19 +130,24 @@ def _insert_posting(conn, *, url, title, company, location, search_name, tier,
                     date_posted, first_seen, salary_min, salary_max, description, source):
     """The shared normalize → fingerprint → repost-link → INSERT tail of every fetcher, so
     the jobs column list exists exactly once and the sources can't drift (same reasoning as
-    chain.effective_decision having a single implementation). INSERT OR IGNORE on the
-    job_url primary key is dedup layer one; _find_repost is layer two. Returns
-    (inserted, repost_of) — inserted is 0 or 1."""
+    chain.effective_decision having a single implementation). The job_url-conflict skip is
+    dedup layer one; _find_repost is layer two. ON CONFLICT(job_url) DO NOTHING rather than
+    INSERT OR IGNORE on purpose: OR IGNORE swallows EVERY constraint violation, which would
+    turn a CHECK(status/verdict) violation on a fresh DB (see core.get_db) into a silent
+    row drop — this form ignores only the PK duplicate and stays loud for real defects.
+    (Upsert syntax needs SQLite >= 3.24, 2018.) Returns (inserted, repost_of) — inserted
+    is 0 or 1."""
     norm_company = _norm_company(company)
     norm_title = _norm_title(title)
     fingerprint = _fingerprint(company, location)
     repost_of = _find_repost(conn, fingerprint, norm_title, exclude_url=url)
     cur = conn.execute(
-        """INSERT OR IGNORE INTO jobs
+        """INSERT INTO jobs
            (job_url, title, company, location, search_name, tier, date_posted,
             first_seen, salary_min, salary_max, description, status,
             norm_company, norm_title, fingerprint, repost_of, source)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(job_url) DO NOTHING""",
         (url, title, company, location, search_name, tier, date_posted, first_seen,
          salary_min, salary_max, description, STATUS_NEW, norm_company, norm_title,
          fingerprint, repost_of, source),
@@ -293,8 +298,8 @@ def fetch_adzuna(cfg, conn):
 # ATS rows also sit outside the per-search min_salary floors structurally: apply_salary_filter
 # keys on search_name matching a `searches:` entry, and these rows use 'ats:<slug>' names.
 # No posting-age filter on purpose: a board lists only currently-open roles, so an old
-# first_published is still an applyable job, and INSERT OR IGNORE makes re-fetching the whole
-# board every run idempotent.
+# first_published is still an applyable job, and the job_url-conflict skip in _insert_posting
+# makes re-fetching the whole board every run idempotent.
 
 # Block-closing tags become newlines so paragraph/bullet structure survives for the eval.
 _TAG_BREAK = re.compile(r"</(?:p|li|div|ul|ol|h[1-6])\s*>|<br\s*/?>", re.IGNORECASE)

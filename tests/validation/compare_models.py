@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
@@ -15,6 +16,9 @@ try:
     sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 except Exception:
     pass
+
+# Lives in tests/validation/ but imports the pipeline modules at the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import core
 import evaluation  # build_system_prompt / parse_eval_json / normalize_result

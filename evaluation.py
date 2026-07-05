@@ -15,7 +15,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from core import PROFILE_PATH, GUIDE_PATH, GATE_NAMES, VERDICTS, _ensure_api_key
+from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
+from states import (GATE_NAMES, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
+                    VERDICT_RECRUITER_ONLY, STATUS_NEW, STATUS_EVALUATED,
+                    STATUS_NEEDS_MANUAL, STATUS_ERROR)
 
 
 SYSTEM_TEMPLATE = """You are a strict job-posting evaluator for one specific candidate. \
@@ -90,11 +93,11 @@ def normalize_result(result):
     is enforced in code, not left to the model: any role that passes the gates but
     scores ai_artifact_depth == 0 is RECRUITER_ONLY / bucket 1, even at 18/18.
     Mutates and returns `result`."""
-    verdict = result.get("verdict", "GATE_FAIL")
+    verdict = result.get("verdict", VERDICT_GATE_FAIL)
     if verdict not in VERDICTS:
-        verdict = "GATE_FAIL"
+        verdict = VERDICT_GATE_FAIL
 
-    if verdict in ("PASS", "RECRUITER_ONLY"):
+    if verdict in (VERDICT_PASS, VERDICT_RECRUITER_ONLY):
         # Guard the CONTAINER type, not just the depth value: the model can emit
         # score_breakdown as a non-dict (list/string/number), and bd.get() would then
         # AttributeError. This runs OUTSIDE the eval retry try/except, so an unguarded
@@ -109,7 +112,7 @@ def normalize_result(result):
         valid = (isinstance(depth, (int, float)) and not isinstance(depth, bool)
                  and math.isfinite(depth))
         if not valid or depth == 0:
-            verdict = "RECRUITER_ONLY"
+            verdict = VERDICT_RECRUITER_ONLY
             result["bucket"] = 1
         if not result.get("bucket"):
             # depth 3 -> clean low-code delivery (3); otherwise acceptable-tier (2)
@@ -185,6 +188,48 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
             u.get("completion_tokens", 0), cache_read, 0)
 
 
+class EvalAuthError(Exception):
+    """The provider rejected our credentials (401/403). The same failure would hit every row,
+    so the whole batch aborts instead of burning 3 retries x N rows on a dead key; unevaluated
+    rows stay 'new' for the next run."""
+
+
+def _http_status(e):
+    """Best-effort HTTP status from a provider exception: anthropic's APIStatusError carries
+    .status_code, httpx.HTTPStatusError carries .response.status_code. None = not an HTTP-status
+    failure (network drop, timeout, JSON parse)."""
+    status = getattr(e, "status_code", None)
+    if status is None:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _retryable(e):
+    """Retry only what can plausibly heal on its own: rate limits (429), timeouts (408),
+    server errors (5xx), and non-HTTP failures (network drops; a malformed model response —
+    it can re-emit). Any other 4xx is OUR request being wrong (bad model id, oversized
+    payload) — retrying triples the latency for the same failure."""
+    status = _http_status(e)
+    if status is None:
+        return True
+    return status in (408, 429) or status >= 500
+
+
+def requeue_error_rows(conn):
+    """Return status='error' rows to 'new' so the eval pass about to run retries them.
+    Without this an 'error' row (provider outage, rate-limit storm) is stranded forever —
+    no stage reads 'error'. Called only when an eval will actually happen (after the
+    provider/key checks), so a skipped eval doesn't churn statuses. A permanently failing
+    row re-errors each run — visible in the report's errors section, costing only its own
+    retries. Returns the requeued count."""
+    n = conn.execute("UPDATE jobs SET status=? WHERE status=?",
+                     (STATUS_NEW, STATUS_ERROR)).rowcount
+    conn.commit()
+    if n:
+        print(f"[eval] requeued {n} previously-errored posting(s) for retry")
+    return n
+
+
 def _evaluate_one(row, provider, model, system_prompt, client, api_key):
     """Pure worker (no DB access): build the message, call the provider with the same
     3-attempt backoff, parse. Returns (job_url, result_or_None, in, out, cache_read,
@@ -212,6 +257,13 @@ def _evaluate_one(row, provider, model, system_prompt, client, api_key):
             result = parse_eval_json(text)
             break
         except Exception as e:
+            status = _http_status(e)
+            if status in (401, 403):
+                # Wrong credentials fail every row identically — abort the whole batch.
+                raise EvalAuthError(f"{provider} rejected the API key ({status}): {e}") from e
+            if not _retryable(e):
+                print(f"[eval] non-retryable error ({e}); marking error", file=sys.stderr)
+                break
             wait = 5 * (attempt + 1)
             print(f"[eval] attempt {attempt+1} failed ({e}); retry in {wait}s", file=sys.stderr)
             time.sleep(wait)
@@ -244,19 +296,13 @@ def evaluate_new_jobs(cfg, conn):
         print(f"[eval] unknown provider '{provider}' — skipping evaluation", file=sys.stderr)
         return
 
-    # Catch the documented config footgun (provider/model out of sync) BEFORE spending: a
-    # deepseek provider with a claude-* model — or vice versa — would otherwise send every
-    # posting to the wrong endpoint and fail all N rows through their retries into 'error'.
-    expected = {"anthropic": "claude", "deepseek": "deepseek"}.get(provider)
-    if expected and not model.startswith(expected):
-        print(f"[eval] provider '{provider}' expects a '{expected}-*' model but config.yaml "
-              f"has model '{model}' — fix the mismatch; skipping evaluation", file=sys.stderr)
-        return
-
+    # (The provider/model consistency check lives in core.validate_config — it runs at
+    # config load, before any fetch/eval money is spent.)
     system_prompt = build_system_prompt()
     price_in, price_out = MODEL_PRICES.get(model, (0.0, 0.0))
 
-    rows = conn.execute("SELECT * FROM jobs WHERE status='new'").fetchall()
+    requeue_error_rows(conn)
+    rows = conn.execute("SELECT * FROM jobs WHERE status=?", (STATUS_NEW,)).fetchall()
     print(f"[eval] {len(rows)} postings to evaluate via {provider}:{model} "
           f"(concurrency={concurrency})")
 
@@ -266,14 +312,15 @@ def evaluate_new_jobs(cfg, conn):
     todo = []
     for r in rows:
         if not (r["description"] or "").strip():
-            conn.execute("UPDATE jobs SET status='needs_manual' WHERE job_url=?", (r["job_url"],))
+            conn.execute("UPDATE jobs SET status=? WHERE job_url=?",
+                         (STATUS_NEEDS_MANUAL, r["job_url"]))
             conn.commit()
         else:
             todo.append(r)
 
     def _write_result(job_url, result):
         if result is None:
-            conn.execute("UPDATE jobs SET status='error' WHERE job_url=?", (job_url,))
+            conn.execute("UPDATE jobs SET status=? WHERE job_url=?", (STATUS_ERROR, job_url))
         else:
             normalize_result(result)
             verdict = result["verdict"]
@@ -281,9 +328,10 @@ def evaluate_new_jobs(cfg, conn):
             if failed_gate and failed_gate not in GATE_NAMES:
                 failed_gate = "other"
             conn.execute(
-                """UPDATE jobs SET status='evaluated', verdict=?, failed_gate=?,
+                """UPDATE jobs SET status=?, verdict=?, failed_gate=?,
                    fit_score=?, bucket=?, eval_json=? WHERE job_url=?""",
                 (
+                    STATUS_EVALUATED,
                     verdict,
                     failed_gate,
                     result.get("fit_score"),
@@ -309,6 +357,14 @@ def evaluate_new_jobs(cfg, conn):
                 job_url = futures[fut]
                 try:
                     _, result, tin, tout, cr, cw = fut.result()
+                except EvalAuthError as e:
+                    # A dead key fails every remaining row the same way — stop paying for
+                    # retries. Nothing is written for the aborted rows: they stay 'new' and
+                    # a run with a fixed key picks them up untouched.
+                    print(f"[eval] {e} — aborting this batch; unevaluated rows stay 'new'",
+                          file=sys.stderr)
+                    ex.shutdown(cancel_futures=True)
+                    break
                 except Exception as e:
                     # Workers catch their own call errors, but guard anyway so one unexpected
                     # crash maps to 'error' instead of aborting the whole batch.

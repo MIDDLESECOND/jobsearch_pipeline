@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 from chain import _norm_company, _norm_title, _fingerprint, _NORM_VERSION
+from states import STATUSES, VERDICTS
 
 # Windows consoles (and redirected log files) default to the locale code page — here `gbk` —
 # which can't encode characters that show up in scraped LinkedIn text: em-dashes in our own
@@ -39,10 +40,8 @@ CONFIG_PATH = BASE_DIR / "config.yaml"
 PROFILE_PATH = BASE_DIR / "profile.md"
 GUIDE_PATH = BASE_DIR / "evaluation_guide.md"
 
-GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requirement", "work_auth", "employment_type"]
-SCORE_DIMS = ["ai_applied_vs_research", "ai_artifact_depth", "learning_value",
-              "technical_skill_match", "title_trajectory", "years_vs_stated"]
-VERDICTS = ["PASS", "GATE_FAIL", "RECRUITER_ONLY"]
+# The status/verdict/gate vocabulary lives in states.py (the leaf module) so chain.py can
+# use it too without a cycle; import enums from there, not from here.
 
 
 # ------------------------------------------------------------ posting-date parsing
@@ -255,17 +254,96 @@ def run_log(label="run"):
 
 # ---------------------------------------------------------------- config / db
 
+# settings key -> required type. Only the keys every run dereferences unconditionally —
+# the optional blocks (adzuna:, ats:) keep their own tolerant per-key guards in fetch.py,
+# because absent/partial is a VALID state for them, not an error.
+_REQUIRED_SETTINGS = {
+    "location": str,
+    "hours_old": (int, float),
+    "results_per_search": (int, float),
+    "delay_between_searches": (int, float),
+    "provider": str,
+    "model": str,
+    "max_description_chars": (int, float),
+    "db_path": str,
+    "reports_dir": str,
+}
+_PROVIDER_MODEL_PREFIX = {"anthropic": "claude", "deepseek": "deepseek"}
+
+
+def validate_config(cfg):
+    """Collect every shape problem and raise ONE ValueError listing them all — so a config
+    typo dies at startup with a usable message instead of a KeyError deep inside a fetch
+    stage (or after eval money was spent). Checks presence/type/consistency only; unknown
+    keys are fine (forward-compatible). Returns cfg unchanged when valid."""
+    errors = []
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("settings"), dict):
+        raise ValueError("config.yaml must be a mapping with a `settings:` section "
+                         "(copy config.example.yaml to config.yaml and edit)")
+    s = cfg["settings"]
+    for key, typ in _REQUIRED_SETTINGS.items():
+        if s.get(key) is None:
+            errors.append(f"settings.{key} is missing")
+        elif isinstance(s[key], bool) or not isinstance(s[key], typ):
+            want = typ.__name__ if isinstance(typ, type) else "a number"
+            errors.append(f"settings.{key} should be {want}, got {s[key]!r}")
+    provider, model = s.get("provider"), s.get("model")
+    prefix = _PROVIDER_MODEL_PREFIX.get(provider)
+    if isinstance(provider, str) and prefix is None:
+        errors.append(f"settings.provider must be one of "
+                      f"{sorted(_PROVIDER_MODEL_PREFIX)}, got {provider!r}")
+    # The documented footgun: provider/model out of sync would send every posting to the
+    # wrong endpoint and fail the whole batch through its retries. Caught here, pre-spend.
+    if prefix and isinstance(model, str) and not model.startswith(prefix):
+        errors.append(f"settings.provider '{provider}' expects a '{prefix}-*' model, "
+                      f"got '{model}'")
+    searches = cfg.get("searches")
+    if not isinstance(searches, list):
+        errors.append("`searches:` must be a list (it may be empty for an ATS-only setup)")
+    else:
+        for i, search in enumerate(searches):
+            label = f"searches[{i}]"
+            if not isinstance(search, dict):
+                errors.append(f"{label} should be a mapping with name/term")
+                continue
+            for req in ("name", "term"):
+                v = search.get(req)
+                if not isinstance(v, str) or not v.strip():
+                    errors.append(f"{label}.{req} is missing or empty")
+            ms = search.get("min_salary")
+            if ms is not None and (isinstance(ms, bool) or not isinstance(ms, (int, float))):
+                errors.append(f"{label}.min_salary should be a number, got {ms!r}")
+    if errors:
+        raise ValueError("config.yaml problems:\n  - " + "\n  - ".join(errors))
+    return cfg
+
+
 def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return validate_config(yaml.safe_load(f))
+
+
+def connect_db(cfg):
+    """A plain connection (row factory + busy timeout), with NO schema/migration work — for
+    callers that open a connection per request (the web UI), where re-running the idempotent
+    DDL/migration pass on every request is pure waste. Run get_db once at process start to
+    ensure the schema, then connect_db afterwards.
+
+    The timeout (busy-wait on a locked DB) is raised above the 5s default so a concurrent
+    open during the one-time fingerprint recompute waits it out instead of erroring."""
+    conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"], timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def get_db(cfg):
-    # timeout (busy-wait on a locked DB) raised above the 5s default so a concurrent open
-    # during the one-time fingerprint recompute waits it out instead of erroring.
-    conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"], timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
+    conn = connect_db(cfg)
+    # The status/verdict CHECKs guard FRESH databases only — SQLite can't add a constraint to
+    # an existing table without a full rebuild, which isn't worth the migration risk on a live
+    # DB. Code-side, the states.py constants are the enforcement that covers both.
+    _status_ck = ", ".join(f"'{s}'" for s in STATUSES)
+    _verdict_ck = ", ".join(f"'{v}'" for v in VERDICTS)
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS jobs (
             job_url      TEXT PRIMARY KEY,
             title        TEXT,
@@ -278,8 +356,8 @@ def get_db(cfg):
             salary_min   REAL,
             salary_max   REAL,
             description  TEXT,
-            status       TEXT,   -- new | evaluated | needs_manual | salary_filtered | rule_filtered | repost_decided | error
-            verdict      TEXT,   -- PASS | GATE_FAIL | RECRUITER_ONLY
+            status       TEXT CHECK (status IN ({_status_ck})),   -- see states.py
+            verdict      TEXT CHECK (verdict IN ({_verdict_ck})), -- PASS | GATE_FAIL | RECRUITER_ONLY
             failed_gate  TEXT,
             fit_score    INTEGER,
             bucket       INTEGER, -- 1 | 2 | 3 (channel routing; null for gate fails)

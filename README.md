@@ -152,6 +152,7 @@ python pipeline.py passed  --url 4431386393 --undo   # oops, undo it
 python pipeline.py report                      # refresh the report after marking
 python pipeline.py report --date 2026-06-10    # rebuild a past day's report
 python pipeline.py stats                        # counts
+python pipeline.py prune --days 90 --vacuum     # (occasional) clear old rejected postings' text, shrink jobs.db
 ```
 
 **Typical daily loop:** `run` in the morning → read the report and click through to jobs you

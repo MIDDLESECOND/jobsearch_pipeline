@@ -10,25 +10,31 @@ python-jobspy logged-out guest endpoints — **never** add login cookies), from 
 APIs), dedupes into SQLite, runs each new posting through an LLM "gate-check" evaluation, and
 writes one markdown report per day. Single-user CLI tool, not a service.
 
-**Module layout** (a one-way DAG; `pipeline.py` re-imports the public names from each into its own
-namespace, so every `pipeline.X` reference from `app.py` / the tests / the validation scripts keeps
-resolving):
+**Module layout** (a one-way DAG; every consumer — `app.py`, the tests, the validation scripts —
+imports the module that owns a name directly; `pipeline.py` is the CLI orchestrator only, NOT a
+re-export hub):
+- `states.py` — the status/verdict/gate vocabulary and the `status` state-machine doc. The leaf;
+  imports nothing.
 - `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
-  `effective_decision`, propagation). Imports stdlib only.
-- `core.py` — paths, the cross-cutting constants, `load_config`, the SQLite open/schema/**migrations**,
+  `effective_decision`, propagation), plus the decision service cores both front-ends share:
+  `resolve_posting`, `mark_posting`, `reject_posting`, and `dupe_resolve`/`dupe_commit`/
+  `dupe_unlink`. Imports only `states` + stdlib.
+- `core.py` — paths, `load_config` (+ shape validation), the SQLite open/schema/**migrations**,
   `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
   normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
-  shape's producer and consumers can't drift). The foundation; imports only `chain`.
+  shape's producer and consumers can't drift). The foundation; imports only `chain` and `states`.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
-  only `core`.
+  only `core` and `states`.
 - `fetch.py` — the three sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API,
-  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards). Imports `core`, `chain`, and `filters`
-  (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
+  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards). Imports `core`, `chain`, `states`, and
+  `filters` (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
 - `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
-- `pipeline.py` — the CLI/orchestrator (`run` stage order + the `cmd_*` decision commands + `main`).
-- `app.py` (Flask) + `templates/index.html` — the local triage UI.
+- `pipeline.py` — the CLI/orchestrator: the `run` stage order, thin `cmd_*` wrappers over the
+  chain service cores, and `main`.
+- `app.py` (Flask) + `templates/index.html` — the local triage UI (also a thin layer over the
+  chain service cores).
 
 Unit tests are in `tests/` (`python -m pytest`) — synthetic fixtures, never the real `jobs.db`.
 Other top-level files are config/data.
@@ -64,6 +70,10 @@ python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
 # e.g. LinkedIn<->Adzuna or LinkedIn<->an ATS board).
 # Earliest-first_seen posting becomes canonical; any decision propagates across the merged chain:
 python pipeline.py dupe    --url <id> --of <other-id> [--yes] [--undo]
+
+# Occasional maintenance: clear descriptions of old rejected rows (GATE_FAIL / salary-filtered
+# only — never gates-passed rows, which backtest_v2 re-evaluates from their stored text):
+python pipeline.py prune [--days 90] [--vacuum]
 ```
 
 Tests: `python -m pytest` runs the unit suite in `tests/` — synthetic in-memory fixtures over the
@@ -108,7 +118,7 @@ via Windows Task Scheduler.
   one role by hand — earliest `first_seen` becomes canonical, the link is recorded in `repost_source`
   (`manual` / `manual:<prev_url>`) so undo can reconstruct the split — without any fuzzy matching (the
   user asserts the duplicate; code only records and propagates it). CLI and UI share one core
-  (`_dupe_resolve` / `_dupe_commit` / `_dupe_unlink`) in `chain.py`; the guard/conflict logic lives
+  (`dupe_resolve` / `dupe_commit` / `dupe_unlink`) in `chain.py`; the guard/conflict logic lives
   there, not in either front-end. **The "what has the user decided about this role's chain?" question
   has exactly one implementation — `chain.effective_decision` — used by the report (`_repost_info`),
   the web UI (`row_to_dict`), and the dupe conflict guard, so the three can't drift.**

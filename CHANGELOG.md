@@ -7,6 +7,43 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-05 — status-machine hardening: error retry, fail-fast auth, schema CHECKs, prune
+
+### Why
+Three failure paths were rougher than the rest of the pipeline: `status='error'` rows were
+dead-ends (nothing ever re-read them — a transient DeepSeek outage stranded its batch forever),
+the eval retry loop treated a dead API key like a rate limit (3 retries × N rows × backoff
+sleeps for the same 401), and a `config.yaml` typo surfaced as a bare `KeyError` deep inside a
+fetch stage. Separately, `jobs.db` grew without bound (rejected postings keep their 12KB
+descriptions forever).
+
+### What changed
+- **Error rows are requeued.** `evaluate_new_jobs` now flips `status='error'` → `'new'` at the
+  start of each eval pass (`evaluation.requeue_error_rows`), so provider-outage casualties are
+  retried automatically on the next run instead of stranding. Runs only when an eval will
+  actually happen (after the provider/key checks).
+- **Retryable vs. fatal eval errors.** Only 408/429/5xx/non-HTTP failures are retried; any
+  other 4xx fails the row immediately (our request is wrong — retrying triples the cost for
+  the same failure), and a 401/403 aborts the whole batch (`EvalAuthError`) leaving unevaluated
+  rows `'new'` for a run with a fixed key.
+- **Config shape is validated at load** (`core.validate_config`): required settings keys,
+  searches-list shape, and the provider/model consistency check (moved out of the eval stage)
+  all die at startup with one collected message, before any fetch/eval spend.
+- **Status/verdict vocabulary centralized in `states.py`**, and fresh databases get
+  `CHECK (status IN (...))` / `CHECK (verdict IN (...))` constraints (existing DBs are not
+  rebuilt — the code-side constants are the enforcement that covers both).
+- **New `prune` command** (`pipeline.py prune [--days N] [--vacuum]`): clears descriptions of
+  GATE_FAIL / salary-filtered rows older than N days (default 90). Never touches gates-passed
+  rows (backtest_v2 re-evaluates those from stored text), repost-skipped rows, or undoable
+  manual rejects; `eval_json` is kept everywhere.
+
+(Same day, no judgment change: the `pipeline.py` re-export facade was removed — consumers
+import the owning modules directly; the CLI and web UI now share `chain.mark_posting` /
+`reject_posting` service cores; the web UI opens plain per-request connections after a
+one-time schema pass and pins the `Host` header against DNS rebinding.)
+
+---
+
 ## 2026-07-04 — posting recency as a triage signal + every-3h runs
 
 ### Why

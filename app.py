@@ -3,10 +3,10 @@
 Local web UI for triaging job postings — a faster alternative to the
 `applied` / `passed` / `reject` CLI commands.
 
-Launched via `python pipeline.py ui`. It is a thin Flask layer over the existing
-pipeline functions and the existing `jobs.db`: it reuses `cmd_mark` / `cmd_reject`
-(so repost-chain propagation and the status lift behave exactly like the CLI), and
-the shared `_dupe_resolve` / `_dupe_commit` / `_dupe_unlink` cores for manually
+Launched via `python pipeline.py ui`. It is a thin Flask layer over the chain-service
+cores and the existing `jobs.db`: `mark_posting` / `reject_posting` (so repost-chain
+propagation and the status lift behave exactly like the CLI wrappers in pipeline.py),
+and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
 linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
 changes. Single-user, local-only — binds to 127.0.0.1.
 """
@@ -17,17 +17,33 @@ from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-import pipeline
+from chain import (resolve_posting, mark_posting, reject_posting, effective_decisions,
+                   dupe_resolve, dupe_commit, dupe_unlink)
+from core import connect_db, get_db, load_config
+from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
+from states import GATE_NAMES, STATUS_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY
 
 app = Flask(__name__)
 
-GATE_OPTIONS = pipeline.GATE_NAMES + ["other"]
+GATE_OPTIONS = GATE_NAMES + ["other"]
+
+# Hostnames this app may be addressed as. The Origin check below is defeated by DNS
+# rebinding on its own (the browser would send the attacker's domain as BOTH Host and
+# Origin, which then "match"), so every request first has its Host pinned to loopback
+# names. serve() extends the set when run on a non-default host/port.
+ALLOWED_HOSTS = {"127.0.0.1:5000", "localhost:5000"}
+
+
+@app.before_request
+def _pin_host():
+    if request.host not in ALLOWED_HOSTS:
+        return jsonify({"ok": False, "message": "unrecognized Host header"}), 403
 
 
 def row_to_dict(row, cap, dec):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
     configured max_description_chars — a stored description at that length was truncated.
-    `dec` is pipeline.effective_decision(conn, row) — the chain-wide decision, computed by the
+    `dec` is chain.effective_decision(conn, row) — the chain-wide decision, computed by the
     same function the report and dupe guard use, so the UI's "already applied/passed/rejected"
     marker can't drift from theirs."""
     ev = {}
@@ -49,11 +65,11 @@ def row_to_dict(row, cap, dec):
         "verdict": row["verdict"],
         "failed_gate": row["failed_gate"],
         "fit_score": row["fit_score"],
-        "band": pipeline.score_band(row["fit_score"]) if row["fit_score"] is not None else None,
+        "band": score_band(row["fit_score"]) if row["fit_score"] is not None else None,
         "bucket": bucket,
-        "bucket_label": pipeline.BUCKET_LABELS.get(bucket),
+        "bucket_label": BUCKET_LABELS.get(bucket),
         # Pass the breakdown through as-stored — older rows use a different set of score
-        # dimensions, and the report (pipeline._render_scored_job) renders whatever keys exist.
+        # dimensions, and the report (report._render_scored_job) renders whatever keys exist.
         "score_breakdown": ev.get("score_breakdown") or {},
         "one_line": ev.get("one_line"),
         "flags": ev.get("flags") or [],
@@ -61,15 +77,15 @@ def row_to_dict(row, cap, dec):
         "status_date": row["status_date"],
         "date_posted": row["date_posted"],
         "first_seen": row["first_seen"],
-        # Server-computed (pipeline.posting_age) so the label wording can't drift from the report.
-        "age_label": pipeline.posting_age(row["date_posted"], row["first_seen"]),
+        # Server-computed (report.posting_age) so the label wording can't drift from the report.
+        "age_label": posting_age(row["date_posted"], row["first_seen"]),
         "filter_source": row["filter_source"],
         "filter_gate": row["filter_gate"],
         "is_repost": bool(row["repost_of"]),
         # Manually-linked relisting (repost_source set) → the UI offers an "Unlink" control; an
         # auto-detected repost (repost_source NULL) is not user-unlinkable here.
         "is_manual_repost": row["repost_source"] is not None,
-        # The chain-wide decision (from pipeline.effective_decision), so the UI can show a
+        # The chain-wide decision (from chain.effective_decision), so the UI can show a
         # relisting's effective status even when its own app_status is NULL (only the canonical
         # carries the decision). The client only truthiness-checks chain_filter_source (index.html),
         # so the reject side collapses to the "manual" sentinel — this DROPS the real rule:<name> /
@@ -88,7 +104,7 @@ def row_to_dict(row, cap, dec):
 
 def jobs_for_view(conn, view, for_date, cap):
     """Fetch rows for a view and return a list of UI dicts. The chain decision each row shows
-    comes from pipeline.effective_decision (one source of truth, shared with the report and the
+    comes from chain.effective_decision (one source of truth, shared with the report and the
     dupe guard) rather than a per-view SQL join — so the three can't drift."""
     if view == "backlog":
         # Only actionable undecided jobs — exclude GATE_FAIL, which the model already
@@ -98,7 +114,8 @@ def jobs_for_view(conn, view, for_date, cap):
         # of triage ordering. Only applied/passed order in SQL (status_date — decision history).
         rows = conn.execute(
             "SELECT * FROM jobs WHERE app_status IS NULL AND filter_source IS NULL "
-            "AND status='evaluated' AND verdict IN ('PASS','RECRUITER_ONLY')"
+            "AND status=? AND verdict IN (?,?)",
+            (STATUS_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY),
         ).fetchall()
     elif view in ("applied", "passed"):
         rows = conn.execute(
@@ -112,14 +129,14 @@ def jobs_for_view(conn, view, for_date, cap):
         ).fetchall()
     if view not in ("applied", "passed"):
         # The triage views (today/backlog — any unknown view falls into the today branch above)
-        # share the report's two-band order (pipeline.recency_sort_key): at/above the apply line
+        # share the report's two-band order (report.recency_sort_key): at/above the apply line
         # freshest-first, below it fit-only. Applied/passed keep status_date DESC — they are
         # decision history, not triage.
-        rows = sorted(rows, key=pipeline.recency_sort_key)
+        rows = sorted(rows, key=recency_sort_key)
 
     # Batch the chain-decision lookup: one (chunked) query for the whole row set rather than a
     # per-row effective_decision call (that was O(N) round-trips — seconds on the backlog view).
-    decisions = pipeline.effective_decisions(conn, rows)
+    decisions = effective_decisions(conn, rows)
     out = []
     for r in rows:
         dec = decisions[r["job_url"]]
@@ -137,7 +154,7 @@ def jobs_for_view(conn, view, for_date, cap):
 
 @app.route("/")
 def index():
-    cfg = pipeline.load_config()
+    cfg = load_config()
     return render_template(
         "index.html",
         gates=GATE_OPTIONS,
@@ -150,9 +167,9 @@ def index():
 def api_jobs():
     view = request.args.get("view", "today")
     for_date = request.args.get("date") or date.today().isoformat()
-    cfg = pipeline.load_config()
+    cfg = load_config()
     cap = cfg["settings"]["max_description_chars"]
-    conn = pipeline.get_db(cfg)
+    conn = connect_db(cfg)
     try:
         return jsonify(jobs_for_view(conn, view, for_date, cap))
     finally:
@@ -166,9 +183,9 @@ def api_clip():
     job_url = request.args.get("job_url")
     if not job_url:
         return jsonify({"text": "", "truncated": False}), 400
-    cfg = pipeline.load_config()
+    cfg = load_config()
     cap = cfg["settings"]["max_description_chars"]
-    conn = pipeline.get_db(cfg)
+    conn = connect_db(cfg)
     try:
         row = conn.execute(
             "SELECT title, company, location, description, job_url FROM jobs WHERE job_url=?",
@@ -192,6 +209,7 @@ def _origin_ok():
     # cross-site POST; refuse it unless it matches our own origin. (Same-origin requests from the
     # UI either omit Origin or send a matching one.) Requiring real application/json — i.e. dropping
     # force=True on get_json — also forces a CORS preflight a cross-site page can't satisfy.
+    # (_pin_host has already vetted request.host, so host_url can't be a rebinding alias here.)
     origin = request.headers.get("Origin")
     return origin is None or origin == request.host_url.rstrip("/")
 
@@ -207,32 +225,25 @@ def api_decision():
     if not job_url or action not in ("applied", "passed", "reject", "undo_app", "undo_reject"):
         return jsonify({"ok": False, "message": "bad request"}), 400
 
-    conn = pipeline.get_db(pipeline.load_config())
+    conn = connect_db(load_config())
     try:
-        # The decision propagates across a repost chain (cmd_mark/cmd_reject update the canonical
-        # original too). Compute that target set so the UI can update every affected card, not just
-        # the one clicked — repost_of is static, so resolving it before the write is fine.
-        row = conn.execute(
-            "SELECT job_url, repost_of FROM jobs WHERE job_url=?", (job_url,)
-        ).fetchone()
-        affected = sorted(pipeline._chain_targets(conn, row)) if row else []
-        # job_url is unique, so passing it as the CLI's "unique substring" resolves to one row
-        # and reuses the exact same propagation / status logic as the command line.
+        # Same service cores as the CLI (chain.mark_posting / reject_posting), so propagation
+        # and the status lift can't drift between the two front-ends. `affected` is the whole
+        # repost chain — the client uses it to update sibling cards, not just the one clicked.
+        row, err = resolve_posting(conn, job_url)
+        if err:
+            return jsonify({"ok": False, "message": err, "affected": []})
         if action in ("applied", "passed"):
-            ok = pipeline.cmd_mark(conn, job_url, action)
+            ok, message, affected = mark_posting(conn, row, action)
         elif action == "undo_app":
-            ok = pipeline.cmd_mark(conn, job_url, None)
+            ok, message, affected = mark_posting(conn, row, None)
         elif action == "reject":
-            ok = pipeline.cmd_reject(conn, job_url, gate, None, None, False)
+            ok, message, affected = reject_posting(conn, row, gate)
         else:  # undo_reject
-            ok = pipeline.cmd_reject(conn, job_url, "other", None, None, True)
+            ok, message, affected = reject_posting(conn, row, "other", undo=True)
     finally:
         conn.close()
-    return jsonify({
-        "ok": bool(ok),
-        "message": "done" if ok else "no matching posting",
-        "affected": affected if ok else [],
-    })
+    return jsonify({"ok": bool(ok), "message": message, "affected": affected if ok else []})
 
 
 @app.route("/api/dupe", methods=["POST"])
@@ -248,19 +259,19 @@ def api_dupe():
     if not job_url or (not undo and not of_url):
         return jsonify({"ok": False, "message": "bad request"}), 400
 
-    conn = pipeline.get_db(pipeline.load_config())
+    conn = connect_db(load_config())
     try:
         if undo:
             row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
             if row is None:
                 return jsonify({"ok": False, "message": "no matching posting"}), 404
-            ok, message, _ = pipeline._dupe_unlink(conn, row)
+            ok, message, _ = dupe_unlink(conn, row)
         else:
-            plan, err = pipeline._dupe_resolve(conn, job_url, of_url)
+            plan, err = dupe_resolve(conn, job_url, of_url)
             if err:
                 ok, message = False, err
             else:
-                pipeline._dupe_commit(conn, plan)
+                dupe_commit(conn, plan)
                 w = plan["winner"]
                 ok, message = True, f"linked under {w['title']} — {w['company']}"
     finally:
@@ -271,6 +282,10 @@ def api_dupe():
 
 
 def serve(host="127.0.0.1", port=5000):
+    ALLOWED_HOSTS.update({f"{host}:{port}", f"127.0.0.1:{port}", f"localhost:{port}"})
+    # One-time schema/migration pass; every request after this opens a plain connect_db
+    # connection instead of re-running the idempotent DDL per request.
+    get_db(load_config()).close()
     url = f"http://{host}:{port}"
     print(f"[ui] triage UI at {url}  (Ctrl-C to stop)")
     try:

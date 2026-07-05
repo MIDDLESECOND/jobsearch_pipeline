@@ -5,11 +5,12 @@ ai_artifact_depth is 0 (or unparseable) is capped to RECRUITER_ONLY / bucket 1,
 even at a perfect score. Enforced in code so it can't depend on the model complying.
 """
 
-import pipeline
+import evaluation
+from conftest import make_job
 
 
 def _norm(**kw):
-    return pipeline.normalize_result(dict(kw))
+    return evaluation.normalize_result(dict(kw))
 
 
 def _bd(depth):
@@ -88,3 +89,47 @@ def test_unknown_verdict_becomes_gate_fail():
     r = _norm(verdict="MAYBE", fit_score=10)
     assert r["verdict"] == "GATE_FAIL"
     assert r["bucket"] is None
+
+
+# ----- retryable-vs-fatal error classification + the error-row requeue -----------
+
+class _HttpxStyleError(Exception):
+    """Carries .response.status_code, like httpx.HTTPStatusError."""
+    def __init__(self, status):
+        self.response = type("R", (), {"status_code": status})()
+
+
+class _AnthropicStyleError(Exception):
+    """Carries .status_code, like anthropic.APIStatusError."""
+    def __init__(self, status):
+        self.status_code = status
+
+
+def test_retryable_classification():
+    # Heals on its own -> retry: rate limits, timeouts, server errors, non-HTTP failures.
+    assert evaluation._retryable(_HttpxStyleError(429))
+    assert evaluation._retryable(_HttpxStyleError(408))
+    assert evaluation._retryable(_AnthropicStyleError(500))
+    assert evaluation._retryable(_AnthropicStyleError(529))
+    assert evaluation._retryable(ValueError("no JSON object in model response"))
+    assert evaluation._retryable(TimeoutError())
+    # Our request is wrong -> fatal for the row, no retry.
+    assert not evaluation._retryable(_HttpxStyleError(400))
+    assert not evaluation._retryable(_AnthropicStyleError(404))
+    assert not evaluation._retryable(_HttpxStyleError(422))
+
+
+def test_http_status_extraction():
+    assert evaluation._http_status(_HttpxStyleError(401)) == 401
+    assert evaluation._http_status(_AnthropicStyleError(403)) == 403
+    assert evaluation._http_status(ValueError("x")) is None
+
+
+def test_requeue_error_rows(conn):
+    make_job(conn, job_url="e1", status="error", verdict=None, fit_score=None, bucket=None)
+    make_job(conn, job_url="done", status="evaluated")
+    make_job(conn, job_url="fresh", status="new", verdict=None, fit_score=None, bucket=None)
+    assert evaluation.requeue_error_rows(conn) == 1
+    statuses = {r["job_url"]: r["status"]
+                for r in conn.execute("SELECT job_url, status FROM jobs")}
+    assert statuses == {"e1": "new", "done": "evaluated", "fresh": "new"}

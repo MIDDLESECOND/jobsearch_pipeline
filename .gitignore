@@ -34,8 +34,9 @@ logs/
 reports/
 compare_results.json
 
-# ---- Local validation tool (reads the private jobs.db; names real search targets) ----
-backtest_v2.py
+# ---- Local validation tools (read the private jobs.db; name real search targets) ----
+tests/validation/backtest_v2.py
+tests/validation/investigate_adzuna_churn.py
 
 # Make sure the shipped example templates are never accidentally ignored
 !config.example.yaml

@@ -28,7 +28,9 @@ PROJECT = Path(__file__).resolve().parent.parent
 # themselves) instead of a hardcoded list — so a NEW module is covered automatically. The gate
 # must not itself have the "forgot to add it to a list" footgun it exists to prevent.
 MODULES = sorted(
-    set(PROJECT.glob("*.py")) | set((PROJECT / "tests").glob("*.py"))
+    set(PROJECT.glob("*.py"))
+    | set((PROJECT / "tests").glob("*.py"))
+    | set((PROJECT / "tests" / "validation").glob("*.py"))
 )
 
 # Message classes that mean a real defect (a crash waiting to happen) or dead code.

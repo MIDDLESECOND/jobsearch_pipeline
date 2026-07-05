@@ -10,7 +10,12 @@
 
 settings:
   location: "United States"
-  hours_old: 13               # lookback per run; tune to how often you run it (dedupe handles overlap)
+  # Lookback per run — keep it >= your run interval + ~1h (overlap is free; dedupe absorbs it).
+  # Fresh postings get hundreds of applicants within hours, so a frequent schedule with a small
+  # window (every 3h -> 4) is how an application lands early enough to be seen. NOTE: a
+  # waking-hours-only schedule leaves an overnight LinkedIn gap unless this window covers it
+  # (Adzuna's day-level lookback and the full ATS board fetch backstop those sources overnight).
+  hours_old: 4
   results_per_search: 30
   delay_between_searches: 20   # seconds; be polite to the guest endpoint
   # Evaluator engine. Flip `provider` to switch; keep `model` consistent with it.

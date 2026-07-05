@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 
-from core import _ensure_api_key
+from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
 from chain import _norm_company, _norm_title, _fingerprint, _find_repost
 from filters import _pattern_matches, validate_pattern  # one pattern dialect + validator
 # for filters.yaml AND settings.ats
@@ -67,7 +67,8 @@ def fetch_new_jobs(cfg, conn):
             n, repost_of = _insert_posting(
                 conn, url=url, title=title, company=company, location=location,
                 search_name=name, tier=search.get("tier", "primary"),
-                date_posted=str(row.get("date_posted") or ""), first_seen=today_iso,
+                date_posted=_linkedin_date(row.get("date_posted")),
+                first_seen=today_iso,
                 salary_min=_num(row.get("min_amount")), salary_max=_num(row.get("max_amount")),
                 description=desc[: s["max_description_chars"]], source="linkedin",
             )
@@ -111,6 +112,17 @@ def _redact(msg, *secrets):
         if s:
             out = out.replace(s, "***")
     return out
+
+
+def _linkedin_date(v):
+    """Day-granularity date_posted for LinkedIn rows. jobspy yields a date or None, but a
+    pandas datetime64 column stringifies as "YYYY-MM-DD 00:00:00" — which parse_iso would
+    read as a real MIDNIGHT timestamp (fake hour precision, unhedged age label). LinkedIn
+    dates are day-granularity by nature, so keep ONLY the date part. Deliberately NOT routed
+    through _ats_date: that helper PRESERVES time-of-day, which is right for boards that mean
+    it and exactly wrong here. Non-date-ish values (None/NaT/nan) degrade to ""."""
+    s = str(v or "")
+    return s[:10] if re.match(r"\d{4}-\d{2}-\d{2}", s) else ""
 
 
 def _insert_posting(conn, *, url, title, company, location, search_name, tier,
@@ -309,17 +321,35 @@ def _strip_html(s, escaped=False):
 
 
 def _ats_date(v):
-    """Normalize a board's posted-at value to YYYY-MM-DD: ISO strings are sliced, Lever's
-    epoch-milliseconds converted; anything unparseable degrades to "" (date_posted is
-    display-only downstream, never parsed strictly). bool is excluded explicitly — it
-    passes isinstance(int) and would come back as 1969/1970."""
+    """Normalize a board's posted-at value for the date_posted column, PRESERVING time-of-day
+    when the board gives it — the recency triage (report._recency_dt) parses this strictly and
+    sorts fresh postings by it, so truncating a real timestamp to a bare date would throw away
+    exactly the intra-day precision that feature needs. Goes through core.parse_iso — the same
+    parser the read side uses — so what fetch stores, report can always parse. Storage shapes:
+    full timestamps (Greenhouse/Ashby ISO, Lever epoch-ms) → local-naive ISO seconds (the
+    first_seen convention); bare calendar dates in ANY ISO form → YYYY-MM-DD (day granularity
+    is honest — never invent a midnight); unparseable or absurd values (parse_iso's sanity
+    window) degrade to "". bool is excluded explicitly — it passes isinstance(int) and would
+    come back as 1969/1970; so is 0 (a zeroed Lever createdAt), the same epoch garbage."""
     if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if not v:
+            return ""
         try:
-            return datetime.fromtimestamp(v / 1000).date().isoformat()
+            dt = datetime.fromtimestamp(v / 1000)
         except (OverflowError, OSError, ValueError):
             return ""
-    if isinstance(v, str) and re.match(r"\d{4}-\d{2}-\d{2}", v):
-        return v[:10]
+        return dt.isoformat(timespec="seconds") if PARSE_MIN <= dt <= PARSE_MAX else ""
+    if isinstance(v, str):
+        s = v.strip()
+        parsed = parse_iso(s)
+        if parsed is None:
+            # Unparseable as ISO but starting with a date (e.g. an exotic suffix): keep the
+            # day — re-validated through parse_iso, so a range-rejected placeholder
+            # ("9999-12-31") or an invalid calendar date stays "", not rescued by the regex.
+            m = re.match(r"\d{4}-\d{2}-\d{2}", s)
+            return m.group(0) if m and parse_iso(m.group(0)) else ""
+        dt, day_only = parsed
+        return dt.date().isoformat() if day_only else dt.isoformat(timespec="seconds")
     return ""
 
 

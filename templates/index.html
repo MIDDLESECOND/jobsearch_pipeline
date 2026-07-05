@@ -196,7 +196,7 @@ function card(j) {
     <div class="meta">${verdict}${score}</div>
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
-    <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}</div>
+    <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}${j.age_label ? ` · 🕐 ${esc(j.age_label)}` : ""}</div>
     ${j.one_line ? `<div class="oneline">${esc(j.one_line)}</div>` : ""}
     ${j.fit_score != null ? `<div class="scores">${scoreLine(j.score_breakdown||{})}</div>` : ""}
     ${flags}

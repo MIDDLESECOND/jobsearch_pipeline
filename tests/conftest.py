@@ -32,7 +32,7 @@ _n = [0]
 
 def make_job(conn, *, job_url=None, title="Data Analyst", company="Acme Corp",
              location="New York, NY", search_name="s1", tier="primary",
-             first_seen="2026-06-01T00:00:00", status="evaluated", verdict="PASS",
+             first_seen="2026-06-01T00:00:00", date_posted="", status="evaluated", verdict="PASS",
              failed_gate=None, fit_score=12, bucket=2, eval_json=None,
              salary_min=None, salary_max=None, description="a job description",
              source="linkedin", repost_of=None, repost_source=None,
@@ -51,13 +51,13 @@ def make_job(conn, *, job_url=None, title="Data Analyst", company="Acme Corp",
         fingerprint = pipeline._fingerprint(company, location)
     conn.execute(
         """INSERT INTO jobs
-           (job_url, title, company, location, search_name, tier, first_seen,
+           (job_url, title, company, location, search_name, tier, first_seen, date_posted,
             status, verdict, failed_gate, fit_score, bucket, eval_json,
             salary_min, salary_max, description, source, repost_of, repost_source,
             app_status, status_date, filter_source, filter_gate, filter_date,
             norm_company, norm_title, fingerprint)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (job_url, title, company, location, search_name, tier, first_seen,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (job_url, title, company, location, search_name, tier, first_seen, date_posted,
          status, verdict, failed_gate, fit_score, bucket, eval_json,
          salary_min, salary_max, description, source, repost_of, repost_source,
          app_status, status_date, filter_source, filter_gate, filter_date,

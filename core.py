@@ -13,7 +13,7 @@ import sqlite3
 import sys
 import threading
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -45,19 +45,59 @@ SCORE_DIMS = ["ai_applied_vs_research", "ai_artifact_depth", "learning_value",
 VERDICTS = ["PASS", "GATE_FAIL", "RECRUITER_ONLY"]
 
 
+# ------------------------------------------------------------ posting-date parsing
+
+# Sanity window for posting dates. A parseable value outside it is a placeholder
+# ("9999-12-31") or corruption, not information — parse_iso treats it as unparseable, so
+# consumers degrade to their honest first_seen fallback instead of crashing (Windows'
+# mktime raises OSError outside roughly 1970..3000, and .timestamp()'s naive-datetime fold
+# probe reaches a further day back — so even "safe-looking" extreme values aren't) or
+# pinning a fake-fresh row to the top of the triage sort. PARSE_MIN also serves as the
+# sort-last sentinel: year 2000 is far from both mktime cliffs in every timezone.
+PARSE_MIN = datetime(2000, 1, 1)
+PARSE_MAX = datetime(2500, 1, 1)
+
+
+def parse_iso(s):
+    """Parse a stored posting-date string → (local-naive datetime, day_only), or None when
+    the value is empty, unparseable, or outside the PARSE_MIN..PARSE_MAX sanity window.
+
+    The ONE parser for `date_posted`/`first_seen` values: the fetch side normalizes through
+    it (fetch._ats_date) and the read side ranks/labels through it (report._recency_dt), so
+    the stored shape's producer and consumer can't drift. Accepts every stored convention —
+    bare dates, local-naive timestamps, and offset/'Z' timestamps (converted to local naive,
+    the same convention first_seen uses). day_only is True when the string carries no
+    time-of-day marker (a bare calendar date in any ISO form: '2026-07-04', '20260704', a
+    week date) — such values must never be given fake hour precision downstream."""
+    s = str(s or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            # astimezone() also goes through mktime's range check on Windows (OSError on
+            # absurd years) — inside the try on purpose.
+            dt = dt.astimezone().replace(tzinfo=None)
+    except (ValueError, OSError, OverflowError):
+        return None
+    if not (PARSE_MIN <= dt <= PARSE_MAX):
+        return None
+    return dt, not any(c in s for c in "T: ")
+
+
 # ------------------------------------------------------------------- run log
 #
 # Capture is app-level, not shell-level: a `run` tees stdout+stderr into
-# logs/pipeline.log itself, so a manual terminal run is recorded identically to a
-# scheduled one — the scheduler .bat no longer redirects (that would double-log).
+# logs/pipeline-YYYY-MM-DD.log itself, so a manual terminal run is recorded identically
+# to a scheduled one — the scheduler .bat no longer redirects (that would double-log).
 # The tee is an object-level swap of sys.stdout/stderr; it works for library logging
 # too because jobspy is imported lazily inside the run (after this swap), so its
 # StreamHandler binds the tee, not the original console stream.
+# One file per DAY (not per run): the frequent-run schedule would interleave a single
+# file into unreadability, while per-run files would scatter one day's story across
+# many; size rotation is moot at a day's volume, so retention is age-based instead.
 LOGS_DIR = BASE_DIR / "logs"
-LOG_PATH = LOGS_DIR / "pipeline.log"
-_LOG_ROTATED = LOGS_DIR / "pipeline.log.1"
-# Roll the log at this size (single generation) so it can't grow unbounded across runs.
-_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_KEEP_DAYS = 30
 
 
 class _Tee:
@@ -132,9 +172,9 @@ class _Tee:
 
 @contextlib.contextmanager
 def run_log(label="run"):
-    """Tee stdout+stderr for one CLI invocation into logs/pipeline.log, bracketed by the
-    same session markers the scheduler used to write. UTF-8/errors='replace' (matching the
-    stream reconfigure above) so a stray glyph degrades instead of crashing.
+    """Tee stdout+stderr for one CLI invocation into the day's logs/pipeline-YYYY-MM-DD.log,
+    bracketed by the same session markers the scheduler used to write. UTF-8/errors='replace'
+    (matching the stream reconfigure above) so a stray glyph degrades instead of crashing.
 
     On an uncaught exception the full traceback is written to the log before the streams
     are restored — the interpreter prints it only after this context exits, to the
@@ -142,19 +182,38 @@ def run_log(label="run"):
     would record only the exception's class name. The end marker is always written and the
     streams always restored; the exception then propagates unchanged."""
     LOGS_DIR.mkdir(exist_ok=True)
-    # Single-generation rotation before we start appending.
+    # The sink is dated per INVOCATION (not at import) so a long-lived process still logs
+    # each run under the day it ran. Best-effort retention sweep in place of the old size
+    # rotation: filename-dated files older than the window are removed; lexicographic
+    # comparison is date order for this name shape, and the old fixed-name pipeline.log /
+    # pipeline.log.1 never match the cutoff pattern, so they are simply left behind.
+    log_path = LOGS_DIR / f"pipeline-{date.today():%Y-%m-%d}.log"
+    cutoff = f"pipeline-{date.fromordinal(date.today().toordinal() - _LOG_KEEP_DAYS):%Y-%m-%d}.log"
+    # Retention must never block the run — and one stuck file must never block the sweep:
+    # the try sits INSIDE the loop, so a locked/read-only old log (editor, AV scan) or a file
+    # a concurrently-overlapping run already deleted (missing_ok) skips just that file, not
+    # every file after it.
     try:
-        if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
-            LOG_PATH.replace(_LOG_ROTATED)
+        old_logs = list(LOGS_DIR.glob("pipeline-????-??-??.log"))
     except OSError:
-        pass
+        old_logs = []
+    for old in old_logs:
+        if old.name < cutoff:
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # Logging must never block the actual work: if the file can't be opened (e.g. locked by
     # an overlapping run on Windows), run WITHOUT file capture instead of aborting the run.
+    # Line-buffered (buffering=1): _Tee emits whole lines but never flushes the sink itself,
+    # so with default block buffering a hard kill (timeout, closed laptop) silently discards
+    # the last ~8KB — the very tail that says where the run died. Log volume is tiny; the
+    # per-line flush is noise.
     try:
-        sink = open(LOG_PATH, "a", encoding="utf-8", errors="replace")
+        sink = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
     except OSError as e:
-        print(f"[run_log] could not open {LOG_PATH} ({e}); running without file capture",
+        print(f"[run_log] could not open {log_path} ({e}); running without file capture",
               file=sys.stderr)
         yield
         return

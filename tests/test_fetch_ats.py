@@ -15,6 +15,7 @@ from fetch import (
     _ats_rows_greenhouse,
     _ats_rows_lever,
     _ats_title_ok,
+    _linkedin_date,
     _strip_html,
 )
 
@@ -133,13 +134,32 @@ def test_strip_html_non_string():
 
 # --------------------------------------------------------------------- _ats_date
 
-def test_ats_date_iso_sliced():
-    assert _ats_date("2026-06-01T08:00:00-04:00") == "2026-06-01"
+def test_ats_date_iso_timestamp_kept_as_local_naive():
+    # Full board timestamps keep their time-of-day (the recency sort ranks by it), converted
+    # to local naive — the first_seen storage convention. Local wall time varies by machine
+    # timezone (the instant is 12:00 UTC), so assert the shape, not the exact hour.
+    assert re.fullmatch(r"2026-06-0[12]T\d{2}:\d{2}:\d{2}", _ats_date("2026-06-01T08:00:00-04:00"))
+
+
+def test_ats_date_fractional_seconds_normalized():
+    assert re.fullmatch(r"2026-06-1[12]T\d{2}:\d{2}:\d{2}", _ats_date("2026-06-11T17:21:26.410+00:00"))
+
+
+def test_ats_date_bare_date_passthrough():
+    # A board that only gives a calendar date must stay day-granularity — no invented midnight.
+    assert _ats_date("2026-06-11") == "2026-06-11"
+
+
+def test_ats_date_compact_and_week_dates_stay_day_granularity():
+    # Other ISO bare-date forms fromisoformat accepts must ALSO come out as bare dates,
+    # not fake-midnight timestamps.
+    assert _ats_date("20260601") == "2026-06-01"
+    assert _ats_date("2026-W27-5") == "2026-07-03"
 
 
 def test_ats_date_epoch_ms():
-    # Mid-day UTC so any local timezone lands on the same calendar day.
-    assert re.fullmatch(r"2026-06-1[56]", _ats_date(1781524800000))
+    # Mid-day UTC so any local timezone lands on the same calendar day; time-of-day kept.
+    assert re.fullmatch(r"2026-06-1[56]T\d{2}:\d{2}:\d{2}", _ats_date(1781524800000))
 
 
 def test_ats_date_unparseable():
@@ -147,6 +167,42 @@ def test_ats_date_unparseable():
     assert _ats_date("junk") == ""
     assert _ats_date(True) == ""  # bool passes isinstance(int) — must not become 1969/1970
     assert _ats_date("Posted 3 weeks ago") == ""  # >=10 chars but not a date — no blind slice
+
+
+def test_ats_date_zero_epoch_is_garbage_not_1970():
+    # A zeroed Lever createdAt is missing data, not a 1969/1970 posting.
+    assert _ats_date(0) == ""
+    assert _ats_date(0.0) == ""
+
+
+def test_ats_date_absurd_dates_rejected():
+    # Placeholder dates outside the parse_iso sanity window must not be stored.
+    assert _ats_date("9999-12-31") == ""
+    assert _ats_date("9999-12-31T00:00:00Z") == ""
+
+
+def test_ats_date_datelike_prefix_with_exotic_suffix_keeps_day():
+    # Starts with a date but isn't parseable ISO: degrade to the day, not to "" — including
+    # with incidental leading whitespace (both branches must strip identically).
+    assert _ats_date("2026-06-01 (updated)") == "2026-06-01"
+    assert _ats_date("  2026-06-01 (updated)") == "2026-06-01"
+
+
+# ------------------------------------------------------------------ _linkedin_date
+
+def test_linkedin_date_strips_pandas_fake_midnight():
+    # THE reason _linkedin_date exists and must never be "simplified" into _ats_date:
+    # a pandas datetime64 stringifies with a midnight time that isn't real precision.
+    assert _linkedin_date("2026-07-04 00:00:00") == "2026-07-04"
+
+
+def test_linkedin_date_passthrough_and_degrades():
+    from datetime import date as _date
+    assert _linkedin_date(_date(2026, 7, 4)) == "2026-07-04"  # jobspy's normal shape
+    assert _linkedin_date("2026-07-04") == "2026-07-04"
+    assert _linkedin_date(None) == ""
+    assert _linkedin_date("nan") == ""    # str(float('nan')) from an empty pandas cell
+    assert _linkedin_date("NaT") == ""    # str(pd.NaT)
 
 
 # ----------------------------------------------------------------------- filters
@@ -240,7 +296,7 @@ def test_greenhouse_rows_shape():
     assert r["title"] == "Data Analyst"
     assert r["company"] == "ExampleCorp"  # payload company_name wins over fallback
     assert r["location"] == "New York, NY"
-    assert r["date_posted"] == "2026-06-01"
+    assert re.fullmatch(r"2026-06-0[12]T\d{2}:\d{2}:\d{2}", r["date_posted"])  # local naive
     assert r["description"] == "Build & ship dashboards\nSQL\nPython"
     assert r["remote"] is False
 
@@ -252,7 +308,7 @@ def test_lever_rows_full_description():
     assert r["company"] == "Another Co"  # no company in Lever payloads → config name
     assert r["locations"] == ["New York, NY", "Toronto, ON"]  # allLocations, not just primary
     assert r["remote"] is False  # workplaceType "hybrid" — no location-substring heuristic
-    assert re.fullmatch(r"2026-06-1[56]", r["date_posted"])
+    assert re.fullmatch(r"2026-06-1[56]T\d{2}:\d{2}:\d{2}", r["date_posted"])
     # The description must include the intro, every list section (title + bullets),
     # and the closing blurb — not just descriptionPlain.
     for piece in ("Intro paragraph", "Requirements", "SQL mastery", "Python",
@@ -265,7 +321,7 @@ def test_ashby_rows_skip_unlisted_and_map_remote():
     assert [r["title"] for r in rows] == ["Data Analyst II"]
     r = rows[0]
     assert r["company"] == "Third Co"
-    assert r["date_posted"] == "2026-06-11"
+    assert re.fullmatch(r"2026-06-1[12]T\d{2}:\d{2}:\d{2}", r["date_posted"])  # local naive
     assert r["description"] == "Plain-text description already."
     assert r["remote"] is True  # isRemote flag, not a location-substring heuristic
     assert r["locations"] == ["New York, NY (HQ)", "Remote (US)"]  # + secondaryLocations

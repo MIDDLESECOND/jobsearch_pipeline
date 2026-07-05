@@ -16,7 +16,9 @@ resolving):
 - `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
   `effective_decision`, propagation). Imports stdlib only.
 - `core.py` — paths, the cross-cutting constants, `load_config`, the SQLite open/schema/**migrations**,
-  and `_ensure_api_key`. The foundation; imports only `chain`.
+  `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
+  normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
+  shape's producer and consumers can't drift). The foundation; imports only `chain`.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core`.

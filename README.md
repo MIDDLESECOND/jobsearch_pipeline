@@ -56,7 +56,8 @@ Adzuna and the ATS boards are optional and off until configured (setup steps 6�
 
 ## By the numbers
 
-Running since June 19, 2026, 2 scheduled runs/day: 13,268 postings fetched and deduped,
+Running since June 19, 2026 (2 scheduled runs/day through early July, every 3 hours across
+waking hours since — see §5): 13,268 postings fetched and deduped as of early July,
 13,205 evaluated, 1,907 reposts caught by fingerprint dedup. The default evaluator
 (`deepseek-v4-flash`) costs ~$0.07/run at typical volume; a Claude Sonnet option trades
 ~50× cost for better judgment on edge cases.
@@ -205,14 +206,25 @@ cost.
 2. General tab: name it `Job Pipeline`; select "Run whether user is logged on or not"
    only if your machine is always on — otherwise "Run only when user is logged on" and
    tick "Run task as soon as possible after a scheduled start is missed".
-3. Triggers tab: add Daily triggers. The config is tuned for **2 runs/day** (~9:00 and
-   ~21:00, 12h apart); a third midday run is fine if you want fresher coverage.
+3. Triggers tab: add a Daily trigger repeating **every 3 hours across waking hours**
+   (e.g. 8:00, repeat every 3h for a duration of **16 hours** → runs 8:00–23:00, 6/day).
+   Task Scheduler stops repeating AT the duration boundary, so a 15h duration would silently
+   drop the 23:00 run — size the duration one interval past the last run you want. New
+   postings collect
+   hundreds of applicants within hours, so running often — and being early — is what gets
+   an application actually reviewed; the report/UI surface each posting's age and sort
+   fresh strong matches first. Fewer runs work too — just keep `hours_old` ≥ the gap
+   between runs (plus ~1h overlap).
 4. Actions tab: Start a program → Program: `C:\jobsearch_pipeline\run_pipeline.bat`
    → "Start in": `C:\jobsearch_pipeline`.
-5. OK to save. Right-click → Run once to verify; check `logs\pipeline.log`.
+5. OK to save. Right-click → Run once to verify; check the day's
+   `logs\pipeline-YYYY-MM-DD.log` (one log file per day, pruned after 30 days).
 
-The times don't need to be exact — `hours_old: 13` in config.yaml gives each run overlap
-with the previous one, and the database dedupes anything seen twice.
+The times don't need to be exact — `hours_old: 4` in config.yaml gives each run overlap
+with the previous one, and the database dedupes anything seen twice. A waking-hours-only
+schedule leaves a small overnight LinkedIn gap (postings made ~23:00–04:00); Adzuna's
+1-day lookback and the full ATS board fetch cover those sources overnight regardless, and
+raising `hours_old` on its own closes the gap if you ever notice morning misses.
 
 ## 6. Editing searches
 
@@ -293,7 +305,9 @@ over-aggressive rule can't silently bury good jobs.
 ## Troubleshooting
 
 - **Searches return 0 or error with 429/blocked**: LinkedIn is rate-limiting your IP.
-  Raise `delay_between_searches` to 45–60, or drop to 2 runs/day. Blocks on the guest
+  Raise `delay_between_searches` to 45–60, or drop to 2 runs/day — **and if you reduce the
+  run frequency, raise `hours_old` to cover the new gap** (2 runs/day → 13), or each run
+  silently misses every LinkedIn posting older than its window. Blocks on the guest
   endpoint are temporary (hours).
 - **Every search errors after working previously**: LinkedIn changed the guest endpoint.
   Run `pip install -U python-jobspy` — the library usually patches within days. The

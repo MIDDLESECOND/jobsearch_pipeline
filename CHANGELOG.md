@@ -7,6 +7,47 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-04 — posting recency as a triage signal + every-3h runs
+
+### Why
+BI/SA postings collect hundreds of applicants within hours of going live; an application a day
+later is rarely seen. The pipeline captured `date_posted`/`first_seen` for all three sources but
+never used them: everything sorted `fit_score DESC` with no age shown, and the 2×/day schedule
+meant most postings were half a day old before triage.
+
+### What changed
+- **Two-band triage order (`report.recency_sort_key`, shared by report + web UI).** Within each
+  report section and in the UI's today/backlog views: postings at/above the **apply line**
+  (fit ≥ 10 — `score_band`'s existing "acceptable" threshold, not a new number) sort
+  **freshest-first** with fit as tiebreak — freshness is king where the role is worth applying
+  to; below the line, fit-only (recency last tiebreak). Applied/passed views keep
+  `status_date DESC` (decision history, not triage).
+- **Age labels everywhere (`report.posting_age`).** `🕐 3h ago` / `2d ago` on every rendered
+  posting (report headers, one-liner sections, UI cards). Precision degrades honestly: real
+  timestamps (Adzuna; ATS boards, whose full posted-at is now stored, not truncated to a date)
+  → hours; a date-only posting date at/after the fetch day falls back to `first_seen`, hedged
+  as `seen 3h ago` (a lower bound, never claimed as posting time); an OLD date-only posting
+  (ATS backlog) shows its real day-granularity age and can NOT masquerade as fresh via a recent
+  `first_seen`. LinkedIn's guest scrape currently returns no posting date (verified across the
+  full DB), so in practice LinkedIn rows carry the hedged `seen Xh ago` form — under the
+  3-hourly cadence that bounds true posting time within ~4h; if jobspy starts returning dates,
+  the day-only paths handle them. One implementation (core.parse_iso → report._recency_dt)
+  feeds the fetch-side normalization, the label, and the sort key, with a sanity window so a
+  placeholder date ("9999-12-31") can neither crash the sort nor pin itself to the top.
+- **Recency is triage metadata only** — deliberately NOT an eval-prompt input (a one-time verdict
+  must not embed a time-sensitive fact) and NOT a filter (old postings stay visible, just lower).
+- **Cadence: 2×/day → every 3h** (Task Scheduler 8:00–23:00, 6 runs/day) with `hours_old` 13 → 4.
+  Known tradeoff: postings created ~23:00–04:00 on LinkedIn are picked up late-or-never; Adzuna's
+  1-day lookback and the full ATS board fetch backstop those sources overnight.
+- Plumbing, same motivation: logs are now per-day (`logs/pipeline-YYYY-MM-DD.log`, 30-day
+  retention) instead of one size-rotated file — 6 runs/day interleaved unreadably.
+- A `run` keys its report to the date the run STARTED, not the date it finishes — a 23:xx run
+  dragging past midnight (throttled fetch) previously filed its report under the new day,
+  leaving its own postings (first_seen 23:xx) in no report at all.
+- No schema change (`date_posted`/`first_seen` already existed); no judgment/verdict change.
+
+---
+
 ## 2026-07-02 — third source: company ATS boards (Greenhouse / Lever / Ashby)
 
 ### Why

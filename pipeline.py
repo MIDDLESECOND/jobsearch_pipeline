@@ -81,8 +81,10 @@ from evaluation import (  # noqa: E402,F401
 # The daily markdown report (generate_report + the renderers: _repost_info, _repost_tag,
 # _source_tag, score_band, _render_scored_job, _fmt_sal, BUCKET_LABELS) moved to report.py;
 # re-imported for `run`/`report` and so app.py's pipeline.score_band / pipeline.BUCKET_LABELS resolve.
+# posting_age / recency_sort_key / APPLY_LINE: the recency triage helpers, shared with app.py the
+# same way so the UI's age labels and two-band ordering can't drift from the report's.
 from report import (  # noqa: E402,F401
-    generate_report, score_band, BUCKET_LABELS,
+    generate_report, score_band, BUCKET_LABELS, posting_age, recency_sort_key, APPLY_LINE,
 )
 
 
@@ -272,7 +274,8 @@ def _run_fetch_stage(fn, cfg, conn, label):
     committing its own work before it returns — a future fetcher that defers its commit across
     sources would have that uncommitted work silently discarded by a later source's crash.
     Catches Exception, NOT BaseException, so Ctrl-C / SystemExit still abort the run. run_log
-    tees stderr into logs/pipeline.log, so the message and traceback are captured there.
+    tees stderr into the day's logs/pipeline-YYYY-MM-DD.log, so the message and traceback are
+    captured there.
 
     This resilience wraps the FETCHERS only — the untrusted-input boundary. The deterministic
     downstream stages (salary/hard filters, eval, report) stay bare: they must fail loud, since
@@ -300,6 +303,15 @@ def main():
     ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule")
     args = ap.parse_args()
 
+    # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's
+    # age-label anchor parses it strictly, so a typo'd date must die here with a usable
+    # message, not as a fromisoformat traceback after the paid eval.
+    if args.date:
+        try:
+            args.date = date.fromisoformat(args.date).isoformat()
+        except ValueError:
+            ap.error(f"--date must be YYYY-MM-DD (got {args.date!r})")
+
     if args.command == "ui":
         # Lazy import so the core pipeline runs without Flask installed.
         try:
@@ -323,14 +335,22 @@ def main():
         #   skip_decided_reposts           'new' relisting of a decided role -> 'repost_decided'
         #   evaluate_new_jobs              remaining 'new'        -> 'evaluated' | 'needs_manual' | 'error'
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
-        # run_log tees this whole cycle into logs/pipeline.log so a manual terminal run is captured
-        # like a scheduled one (the .bat no longer redirects — that would double-log).
+        # run_log tees this whole cycle into the day's logs/pipeline-YYYY-MM-DD.log so a manual
+        # terminal run is captured like a scheduled one (the .bat no longer redirects — that
+        # would double-log).
         #
         # Each fetcher is guarded independently (_run_fetch_stage): one source's crash is logged
         # and rolled back, and the run still reaches the filters/eval/report for the sources that
         # succeeded. The deterministic stages below stay UNGUARDED on purpose — they must fail
         # loud, since continuing past a crashed filter would let un-filtered rows hit the paid eval.
         with run_log("run"):
+            # The report is keyed to the date the run STARTED, not the date it finishes:
+            # a run launched 23:xx that drags past midnight (throttled fetch, big eval batch)
+            # stamps its rows with yesterday's first_seen — keying the report to "today at
+            # report time" would file it under the new day and those rows would appear in NO
+            # report at all. This is a code invariant, deliberately not a scheduling
+            # constraint (any run can cross midnight if delayed).
+            run_date = args.date or date.today().isoformat()
             _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin")
             _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
             _run_fetch_stage(fetch_ats, cfg, conn, "ats")
@@ -338,7 +358,7 @@ def main():
             apply_hard_filters(cfg, conn)
             skip_decided_reposts(conn)
             evaluate_new_jobs(cfg, conn)
-            generate_report(cfg, conn, args.date)
+            generate_report(cfg, conn, run_date)
     elif args.command == "report":
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":

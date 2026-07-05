@@ -59,6 +59,10 @@ def row_to_dict(row, cap, dec):
         "flags": ev.get("flags") or [],
         "app_status": row["app_status"],
         "status_date": row["status_date"],
+        "date_posted": row["date_posted"],
+        "first_seen": row["first_seen"],
+        # Server-computed (pipeline.posting_age) so the label wording can't drift from the report.
+        "age_label": pipeline.posting_age(row["date_posted"], row["first_seen"]),
         "filter_source": row["filter_source"],
         "filter_gate": row["filter_gate"],
         "is_repost": bool(row["repost_of"]),
@@ -90,10 +94,11 @@ def jobs_for_view(conn, view, for_date, cap):
         # Only actionable undecided jobs — exclude GATE_FAIL, which the model already
         # hard-rejected (they'd otherwise swamp the list). Relistings whose chain is already
         # decided are filtered out below, via the shared effective_decision.
+        # No ORDER BY here or in the today branch: the Python sort below is the single owner
+        # of triage ordering. Only applied/passed order in SQL (status_date — decision history).
         rows = conn.execute(
             "SELECT * FROM jobs WHERE app_status IS NULL AND filter_source IS NULL "
-            "AND status='evaluated' AND verdict IN ('PASS','RECRUITER_ONLY') "
-            "ORDER BY fit_score DESC"
+            "AND status='evaluated' AND verdict IN ('PASS','RECRUITER_ONLY')"
         ).fetchall()
     elif view in ("applied", "passed"):
         rows = conn.execute(
@@ -102,9 +107,15 @@ def jobs_for_view(conn, view, for_date, cap):
         ).fetchall()
     else:  # "today" (default) — postings first seen on the given date
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE substr(first_seen,1,10)=? ORDER BY fit_score DESC",
+            "SELECT * FROM jobs WHERE substr(first_seen,1,10)=?",
             (for_date,),
         ).fetchall()
+    if view not in ("applied", "passed"):
+        # The triage views (today/backlog — any unknown view falls into the today branch above)
+        # share the report's two-band order (pipeline.recency_sort_key): at/above the apply line
+        # freshest-first, below it fit-only. Applied/passed keep status_date DESC — they are
+        # decision history, not triage.
+        rows = sorted(rows, key=pipeline.recency_sort_key)
 
     # Batch the chain-decision lookup: one (chunked) query for the whole row set rather than a
     # per-row effective_decision call (that was O(N) round-trips — seconds on the backlog view).

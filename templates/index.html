@@ -186,7 +186,12 @@ function card(j) {
   div.dataset.url = j.job_url;  // lets a decision update every affected (repost-chain) card
   const salary = fmtSalary(j.salary_min, j.salary_max);
   const score = j.fit_score != null ? `<span class="score">${j.fit_score}/18</span> (${j.band})` : "";
-  const verdict = j.verdict ? `<span class="verdict v-${j.verdict}">${j.verdict}</span>` : "";
+  // Eval-skipped relistings (repost_evaluated) have verdict NULL by design — show the chain's
+  // verdict + fit (read through chain.effective_decision) so a PASS-chain relisting isn't a
+  // bare card and the user sees the role's score without chasing the canonical.
+  const chainFit = j.chain_fit_score != null ? ` ${j.chain_fit_score}/18` : "";
+  const verdict = j.verdict ? `<span class="verdict v-${j.verdict}">${j.verdict}</span>`
+                : (j.chain_verdict ? `<span class="verdict v-${j.chain_verdict}">↻ chain ${j.chain_verdict}${chainFit}</span>` : "");
   const repost = j.is_repost ? `<span class="tag repost">↻ repost</span>` : "";
   const flags = (j.flags||[]).map(f => `<div class="flag">⚠️ ${esc(f)}</div>`).join("");
   const gateOpts = GATES.map(g => `<option value="${g}">${g}</option>`).join("");

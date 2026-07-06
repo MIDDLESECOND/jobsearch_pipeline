@@ -15,9 +15,9 @@ from datetime import date, datetime, time
 
 from core import BASE_DIR, PARSE_MIN, PARSE_MAX, parse_iso
 from chain import effective_decisions
-from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY,
+from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
                     STATUS_NEEDS_MANUAL, STATUS_ERROR, STATUS_SALARY_FILTERED,
-                    STATUS_REPOST_DECIDED)
+                    STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED)
 
 
 def generate_report(cfg, conn, for_date=None):
@@ -53,9 +53,23 @@ def generate_report(cfg, conn, for_date=None):
     recruiter = [r for r in rows if r["verdict"] == VERDICT_RECRUITER_ONLY and not r["filter_source"]]
     fails = [r for r in rows if r["verdict"] == VERDICT_GATE_FAIL and not r["filter_source"]]
     manual = [r for r in rows if r["status"] == STATUS_NEEDS_MANUAL and not r["filter_source"]]
-    errors = [r for r in rows if r["status"] == STATUS_ERROR]
-    salary_filtered = [r for r in rows if r["status"] == STATUS_SALARY_FILTERED]
-    repost_skipped = [r for r in rows if r["status"] == STATUS_REPOST_DECIDED]
+    # `not filter_source` on every bucket below: a rejected row belongs under Hard-fail
+    # filters only (hard_filtered selects on filter_source alone, regardless of status) —
+    # counting it in a status bucket too would render it twice and make the summary's
+    # buckets sum past the postings total. _REJECT_SET keeps the status of already-parked
+    # rows (error/salary_filtered/repost_decided), so the overlap is reachable for all four.
+    errors = [r for r in rows if r["status"] == STATUS_ERROR and not r["filter_source"]]
+    salary_filtered = [r for r in rows
+                       if r["status"] == STATUS_SALARY_FILTERED and not r["filter_source"]]
+    repost_skipped = [r for r in rows
+                      if r["status"] == STATUS_REPOST_DECIDED and not r["filter_source"]]
+    # Rows whose chain already holds a judge verdict — eval skipped, verdict read through the
+    # chain (dec["chain_verdict"]). Shown most-favorable-first so a PASS relisting still surfaces.
+    repost_evaluated = sorted(
+        (r for r in rows if r["status"] == STATUS_REPOST_EVALUATED and not r["filter_source"]),
+        key=lambda r: VERDICT_FAVOR.get(decisions[r["job_url"]]["chain_verdict"], -1),
+        reverse=True,
+    )
 
     reposts = [r for r in rows if r["repost_of"]]
     repost_status = [decisions[r["job_url"]]["app_status"] for r in reposts]
@@ -67,7 +81,7 @@ def generate_report(cfg, conn, for_date=None):
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
         f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | "
-        f"{len(hard_filtered)} hard-filtered | {len(repost_skipped)} repost-skipped | {len(errors)} errors"
+        f"{len(hard_filtered)} hard-filtered | {len(repost_skipped) + len(repost_evaluated)} repost-skipped | {len(errors)} errors"
     )
     if reposts:
         n = len(reposts)
@@ -101,12 +115,35 @@ def generate_report(cfg, conn, for_date=None):
         for r in recruiter:
             lines.extend(_render_scored_job(r, decisions[r["job_url"]], now))
 
+    if repost_evaluated:
+        # Not necessarily reposts: a still-'new' CANONICAL whose verdict sits on a sibling
+        # (requeued error row, dupe merge) lands here too — the title says "roles", not
+        # "reposts", so the header never asserts a repost relationship a row doesn't have.
+        lines.append("## ↻ Already-evaluated roles seen again (eval skipped)")
+        lines.append("")
+        lines.append(
+            "*The role's chain already holds a verdict, so these postings were not re-scored "
+            "(re-evaluating re-samples a noisy judge and costs money). Verdict shown is the "
+            "chain's most favorable — a PASS here is still worth a look if you never acted on it.*"
+        )
+        lines.append("")
+        for r in repost_evaluated:
+            dec = decisions[r["job_url"]]
+            # 'first seen' only for actual reposts: for a skipped canonical the original's
+            # first_seen IS its own, and _age_tag already covers that date.
+            seen = f" · first seen {_seen_day(dec)}" if dec["is_repost"] else ""
+            lines.append(
+                f"- **{r['title']} — {r['company']}** · chain verdict **{dec['chain_verdict'] or '?'}**"
+                f"{_repost_tag(dec, r)}{_source_tag(r)}{_age_tag(r, now)}{seen} · [link]({r['job_url']})"
+            )
+        lines.append("")
+
     if manual:
         lines.append("## 👀 Needs manual review (no description retrieved)")
         lines.append("")
         for r in manual:
             lines.append(
-                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(decisions[r['job_url']])}{_source_tag(r)}{_age_tag(r, now)} · [link]({r['job_url']})"
+                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)} · [link]({r['job_url']})"
             )
         lines.append("")
 
@@ -117,7 +154,7 @@ def generate_report(cfg, conn, for_date=None):
     for r in fails:
         ev = json.loads(r["eval_json"] or "{}")
         lines.append(
-            f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']])}{_source_tag(r)}{_age_tag(r, now)}: `{r['failed_gate']}` — "
+            f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)}: `{r['failed_gate']}` — "
             f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
         )
     lines.append("")
@@ -133,11 +170,16 @@ def generate_report(cfg, conn, for_date=None):
         for r in hard_filtered:
             src = r["filter_source"] or ""
             tag = f"`rule: {src[5:]}`" if src.startswith("rule:") else "`manual`"
-            note = " (model under-filtered)" if (src == "manual" and r["verdict"] in (VERDICT_PASS, VERDICT_RECRUITER_ONLY)) else ""
+            # chain_verdict, not the row's own: a rejected eval-skipped relisting carries
+            # verdict NULL by design while the judge's PASS sits on a sibling — the chain
+            # reading is the one that says "you overruled the model" (one verdict per chain).
+            note = (" (model under-filtered)"
+                    if (src == "manual" and decisions[r["job_url"]]["chain_verdict"]
+                        in (VERDICT_PASS, VERDICT_RECRUITER_ONLY)) else "")
             # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
             # so a rule can't silently bury a relisting of a role you already applied to.
             lines.append(
-                f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']])}{_source_tag(r)}{_age_tag(r, now)} · {tag} · "
+                f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)} · {tag} · "
                 f"gate `{r['filter_gate']}`{note} · [link]({r['job_url']})"
             )
         lines.append("")
@@ -157,32 +199,56 @@ def generate_report(cfg, conn, for_date=None):
     print(f"[report] written: {out_path}")
 
 
+def _seen_day(dec):
+    """The chain original's first-seen DAY for display — one owner for the date slice, shared
+    by the banner and the eval-skipped section so the two can't format the same fact apart."""
+    return (dec["original_first_seen"] or "")[:10] or "unknown"
+
+
 def _repost_info(dec):
     """For a posting, return (banner_lines, effective_status) for the report. `dec` is the chain's
     decision from chain.effective_decision(s) — the single source of truth, shared with the web UI
     and the dupe guard — so this function only FORMATS it into markdown (it is conn-free: the caller
     fetches all decisions once, batched, and passes each in). `effective_status` is 'applied',
     'passed', or None (applied outranks passed across the chain); `banner_lines` are the matching
-    markdown lines (loud for applied, quiet for passed) plus the repost note."""
+    markdown lines (loud for applied, quiet for passed) plus the chain-reject and repost notes."""
     status = dec["app_status"]
     lines = []
     if status == "applied":
         lines.append(f"- 🚫 **ALREADY APPLIED** ({dec['status_date']}) — do not re-apply")
     elif status == "passed":
         lines.append(f"- ↩ You reviewed & passed on {dec['status_date']} — skip unless reconsidering")
+    elif dec["reject"]:
+        # A chain reject can sit entirely on a SIBLING (a filters.yaml rule stamps only the row
+        # it matched), so this scored card's own filter_source is NULL and it renders under its
+        # verdict — without this line the card would invite applying to a role the chain rejects.
+        lines.append(f"- 🚫 Chain rejected (gate `{dec['filter_gate']}`) — a rule or manual "
+                     f"reject applies to this role; skim before acting")
     if dec["is_repost"]:
-        seen = (dec["original_first_seen"] or "")[:10]
-        lines.append(f"- ↻ Repost — original first seen {seen}, prior verdict {dec['original_verdict']}")
+        # chain_verdict, not the canonical's own verdict: the canonical may be verdict-NULL
+        # (salary-filtered) while a sibling holds the judge's answer — one verdict reading per
+        # chain, everywhere. Clause suppressed when no judge ever scored the chain.
+        v = dec["chain_verdict"]
+        lines.append(f"- ↻ Repost — original first seen {_seen_day(dec)}"
+                     + (f", chain verdict {v}" if v else ""))
     return lines, status
 
 
-def _repost_tag(dec):
-    """Compact inline marker for one-liner sections (gate fails, manual review)."""
+def _repost_tag(dec, row=None):
+    """Compact inline marker for one-liner sections (gate fails, manual review). Pass the row
+    when available: the reject marker exists to flag a reject living on a SIBLING, so it is
+    suppressed for a row whose OWN filter_source is set (the Hard-fail section already labels
+    those with their `rule:`/`manual` tag — repeating it there is noise)."""
     _, status = _repost_info(dec)
     if status == "applied":
         return " · 🚫 **ALREADY APPLIED**"
     if status == "passed":
         return " · ↩ passed"
+    own_filter = row is not None and "filter_source" in row.keys() and row["filter_source"]
+    if dec["reject"] and not own_filter:
+        # A chain-wide reject can sit on a sibling while this row renders under its own verdict
+        # — without the marker a rejected role reads as still-actionable.
+        return " · 🚫 rejected" + (" · ↻ repost" if dec["is_repost"] else "")
     return " · ↻ repost" if dec["is_repost"] else ""
 
 
@@ -288,11 +354,14 @@ def posting_age(date_posted, first_seen, now=None):
     return f"seen {label}" if mode == "seen" else label
 
 
-def recency_sort_key(row):
+def recency_sort_key(row, fit=None):
     """The single two-band triage sort key (ascending sort), shared by the report and the web
     UI's today/backlog views. At/above APPLY_LINE: freshest-first, fit tiebreak. Below: fit-only,
-    freshness as final tiebreak. Rows with no usable timestamp sort last within their band."""
-    fit = row["fit_score"] or 0
+    freshness as final tiebreak. Rows with no usable timestamp sort last within their band.
+    `fit` overrides the row's own fit_score — the UI passes the chain's fit for eval-skipped
+    rows (own fit NULL), so a relisting of a strong role doesn't sink to the bottom band."""
+    if fit is None:
+        fit = row["fit_score"] or 0
     dt, _ = _recency_dt(row["date_posted"], row["first_seen"])
     # Dead by construction — parse_iso range-checks every value and the sentinel IS the
     # floor — and kept anyway: if parse_iso's window is ever loosened or broken, this clamp

@@ -75,6 +75,53 @@ def test_today_view_returns_rows_seen_that_day(client, seed):
     assert j["band"] == "acceptable" and j["bucket_label"] and "age_label" in j
 
 
+def test_job_payload_carries_chain_verdict(client, seed):
+    # The exact row class chain_verdict exists for: an eval-skipped relisting
+    # (status='repost_evaluated', own verdict/fit_score NULL by design) must expose the
+    # chain's PASS through /api/jobs so the UI can badge it.
+    make_job(seed, job_url="canon", verdict="PASS", first_seen="2026-05-20T09:00:00")
+    make_job(seed, job_url="relist", repost_of="canon", status="repost_evaluated",
+             verdict=None, fit_score=None, bucket=None, first_seen=TODAY_SEEN)
+    got = client.get("/api/jobs?view=today&date=2026-06-01").get_json()
+    j = next(x for x in got if x["job_url"] == "relist")
+    assert j["verdict"] is None             # own verdict stays NULL — never copied
+    assert j["band"] is None                # NULL-score path renders without crashing
+    assert j["chain_verdict"] == "PASS"     # the chain's most favorable, read through
+    assert j["chain_fit_score"] == 12       # the winning member's fit (badge + sort fallback)
+
+
+def test_today_sort_promotes_eval_skipped_rows_but_not_other_fit_null_rows(client, seed):
+    # The chain-fit sort fallback is gated on the two eval-skip statuses: a PASS/14-chain
+    # relisting sorts with fit 14 (above a scored fit-11 card), while a salary_filtered or
+    # needs_manual relisting of the same chain keeps fit 0 (bottom band) — a rejected or
+    # description-less row must never outrank genuinely scored cards.
+    make_job(seed, job_url="chain-c", company="SortCo", verdict="PASS", fit_score=14,
+             first_seen="2026-05-20T09:00:00")
+    make_job(seed, job_url="skip-r", company="SortCo", title="Skipped Role",
+             repost_of="chain-c", status="repost_evaluated", verdict=None, fit_score=None,
+             bucket=None, first_seen=TODAY_SEEN)
+    make_job(seed, job_url="sal-r", company="SortCo", title="Salary Role",
+             repost_of="chain-c", status="salary_filtered", verdict=None, fit_score=None,
+             bucket=None, first_seen=TODAY_SEEN)
+    make_job(seed, job_url="scored11", company="Mid Co", verdict="PASS", fit_score=11,
+             first_seen=TODAY_SEEN)
+    got = client.get("/api/jobs?view=today&date=2026-06-01").get_json()
+    order = [j["job_url"] for j in got]
+    assert order.index("skip-r") < order.index("scored11")   # promoted by chain fit
+    assert order.index("sal-r") > order.index("scored11")    # NOT promoted
+
+
+def test_chain_verdict_takes_most_favorable_member(client, seed):
+    # Noisy repeat evals: a GATE_FAIL sample on one member never outranks a PASS on another.
+    make_job(seed, job_url="canon2", verdict="PASS", first_seen="2026-05-20T09:00:00")
+    make_job(seed, job_url="relist2", repost_of="canon2", status="evaluated",
+             verdict="GATE_FAIL", first_seen=TODAY_SEEN)
+    got = client.get("/api/jobs?view=today&date=2026-06-01").get_json()
+    j = next(x for x in got if x["job_url"] == "relist2")
+    assert j["verdict"] == "GATE_FAIL"      # the row's own (noisy) sample, unchanged
+    assert j["chain_verdict"] == "PASS"
+
+
 def test_backlog_only_undecided_gates_passed(client, seed):
     make_job(seed, job_url="pass1")                                   # PASS, undecided -> in
     make_job(seed, job_url="rec1", verdict="RECRUITER_ONLY")          # in

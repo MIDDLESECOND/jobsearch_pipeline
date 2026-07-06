@@ -172,6 +172,53 @@ def test_report_orders_pass_section_freshest_first(tmp_path, conn):
     assert "🕐" in text  # age tag rendered
 
 
+def test_report_renders_repost_evaluated_section_with_chain_verdict(tmp_path, conn):
+    # A relisting whose eval was skipped (status='repost_evaluated', own verdict NULL) must
+    # still surface in the report, labeled with the chain's most favorable verdict — and
+    # PASS chains sort above GATE_FAIL chains within the section.
+    d = "2026-07-04"
+    make_job(conn, job_url="c-pass", company="PassCo", verdict="PASS",
+             first_seen="2026-07-01T09:00:00")
+    make_job(conn, job_url="r-pass", company="PassCo", title="Pass Role", repost_of="c-pass",
+             status="repost_evaluated", verdict=None, fit_score=None, bucket=None,
+             first_seen=f"{d}T09:00:00")
+    make_job(conn, job_url="c-fail", company="FailCo", verdict="GATE_FAIL",
+             first_seen="2026-07-01T09:00:00")
+    make_job(conn, job_url="r-fail", company="FailCo", title="Fail Role", repost_of="c-fail",
+             status="repost_evaluated", verdict=None, fit_score=None, bucket=None,
+             first_seen=f"{d}T08:00:00")
+    cfg = {"settings": {"reports_dir": str(tmp_path)}}
+    report.generate_report(cfg, conn, for_date=d)
+    text = (tmp_path / f"report_{d}.md").read_text(encoding="utf-8")
+    assert "Already-evaluated roles seen again" in text
+    assert "chain verdict **PASS**" in text and "chain verdict **GATE_FAIL**" in text
+    assert text.index("Pass Role") < text.index("Fail Role")  # most-favorable-first
+    assert "| 2 repost-skipped |" in text  # counted in the summary line
+
+
+def test_rejected_rows_count_once_regardless_of_status(tmp_path, conn):
+    # A rejected row belongs to the Hard-fail bucket ONLY: _REJECT_SET keeps the status of
+    # already-parked rows (error/salary_filtered/repost_decided), so without the
+    # `not filter_source` guard on every status bucket the same posting is counted (and for
+    # errors, rendered) twice and the summary's buckets sum past the postings total.
+    d = "2026-07-04"
+    make_job(conn, job_url="rej-err", title="Errored Role", status="error", verdict=None,
+             fit_score=None, bucket=None, filter_source="manual", filter_gate="other",
+             filter_date=d, first_seen=f"{d}T09:00:00")
+    make_job(conn, job_url="rej-sal", title="Salary Role", status="salary_filtered",
+             verdict=None, fit_score=None, bucket=None, filter_source="manual",
+             filter_gate="other", filter_date=d, first_seen=f"{d}T09:00:00")
+    make_job(conn, job_url="rej-rd", title="Decided Role", status="repost_decided",
+             verdict=None, fit_score=None, bucket=None, filter_source="manual",
+             filter_gate="other", filter_date=d, first_seen=f"{d}T09:00:00")
+    cfg = {"settings": {"reports_dir": str(tmp_path)}}
+    report.generate_report(cfg, conn, for_date=d)
+    text = (tmp_path / f"report_{d}.md").read_text(encoding="utf-8")
+    assert "| 3 hard-filtered | 0 repost-skipped | 0 errors" in text
+    assert "0 salary-filtered" in text
+    assert text.count("Errored Role") == 1  # rendered under Hard-fail only
+
+
 def test_past_report_ages_anchor_to_report_date_not_wall_clock(tmp_path, conn):
     # Rebuilding a past day's report must reproduce it: labels anchor to that date's end,
     # not to whenever the rebuild happens to run.

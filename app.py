@@ -26,7 +26,8 @@ from chain import (resolve_posting, mark_posting, reject_posting, effective_deci
                    dupe_resolve, dupe_commit, dupe_unlink)
 from core import connect_db, get_db, load_config
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
-from states import GATE_NAMES, STATUS_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY
+from states import (GATE_NAMES, STATUS_EVALUATED, STATUS_REPOST_DECIDED,
+                    STATUS_REPOST_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 
 app = Flask(__name__)
 
@@ -103,6 +104,11 @@ def row_to_dict(row, cap, dec):
         "chain_app_status": dec["app_status"],
         "chain_filter_source": "manual" if dec["reject"] else None,
         "chain_status_date": dec["status_date"],
+        # The ROLE's verdict read through the chain (most favorable member — states.VERDICT_FAVOR).
+        # For a 'repost_evaluated' row (eval skipped, own verdict NULL) this is the one to show;
+        # for an evaluated row it normally equals row.verdict.
+        "chain_verdict": dec["chain_verdict"],
+        "chain_fit_score": dec["chain_fit_score"],
         # Cheap booleans for the send-to-assistant button — not the description text itself,
         # so the list payload stays small.
         "has_description": bool(row["description"]),
@@ -135,16 +141,28 @@ def jobs_for_view(conn, view, for_date, cap):
             "SELECT * FROM jobs WHERE substr(first_seen,1,10)=?",
             (for_date,),
         ).fetchall()
+    # Batch the chain-decision lookup: one (chunked) query for the whole row set rather than a
+    # per-row effective_decision call (that was O(N) round-trips — seconds on the backlog view).
+    # Computed BEFORE the sort: the sort key needs each row's chain fit as a fallback.
+    decisions = effective_decisions(conn, rows)
+
     if view not in ("applied", "passed"):
         # The triage views (today/backlog — any unknown view falls into the today branch above)
         # share the report's two-band order (report.recency_sort_key): at/above the apply line
         # freshest-first, below it fit-only. Applied/passed keep status_date DESC — they are
-        # decision history, not triage.
-        rows = sorted(rows, key=recency_sort_key)
-
-    # Batch the chain-decision lookup: one (chunked) query for the whole row set rather than a
-    # per-row effective_decision call (that was O(N) round-trips — seconds on the backlog view).
-    decisions = effective_decisions(conn, rows)
+        # decision history, not triage. Eval-SKIPPED rows (fit_score NULL by design, the
+        # role's score lives on the chain) sort by their CHAIN's fit — otherwise a relisting
+        # of a strong PASS role sinks to the bottom band, burying exactly the rows the
+        # chain_verdict badge exists to surface. Gated on the two skip statuses: other
+        # fit-NULL rows (needs_manual, error, salary_filtered, still-'new') must NOT inherit
+        # the chain's fit — a deterministically rejected or description-less row sorting
+        # above genuinely scored cards would mislead triage.
+        def _triage_key(r):
+            fit = r["fit_score"]
+            if fit is None and r["status"] in (STATUS_REPOST_EVALUATED, STATUS_REPOST_DECIDED):
+                fit = decisions[r["job_url"]]["chain_fit_score"] or 0
+            return recency_sort_key(r, fit=fit)
+        rows = sorted(rows, key=_triage_key)
     out = []
     for r in rows:
         dec = decisions[r["job_url"]]
@@ -303,6 +321,11 @@ def serve(host="127.0.0.1", port=5000):
         sys.exit(2)
     except ValueError as e:
         print(f"[config] {e}", file=sys.stderr)
+        sys.exit(2)
+    except RuntimeError as e:
+        # The stale-CHECK rebuild's actionable message (core._rebuild_for_stale_checks) —
+        # same clean-exit treatment as a config problem.
+        print(f"[db] {e}", file=sys.stderr)
         sys.exit(2)
     url = f"http://{host}:{port}"
     print(f"[ui] triage UI at {url}  (Ctrl-C to stop)")

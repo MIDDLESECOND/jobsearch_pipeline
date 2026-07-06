@@ -1,9 +1,9 @@
 """cmd_prune — reclaims description space WITHOUT touching anything still readable/undoable.
 
 The keep-list is the contract: gates-passed rows (backtest_v2 re-evaluates from stored text;
-applied/passed history keeps its JD), repost_decided rows (an undo re-news them for a re-eval),
-and never-evaluated manual rejects (reject --undo re-news them). Only aged-out GATE_FAIL and
-salary_filtered rows are cleared, and eval_json survives everywhere.
+applied/passed history keeps its JD), repost_decided AND repost_evaluated rows (an undo/unlink
+re-news them for a re-eval), and never-evaluated manual rejects (reject --undo re-news them).
+Only aged-out GATE_FAIL and salary_filtered rows are cleared, and eval_json survives everywhere.
 """
 
 import pipeline
@@ -40,12 +40,15 @@ def test_prune_keeps_everything_still_readable_or_undoable(conn):
     # Applied history keeps its JD (even a GATE_FAIL verdict, via chain propagation).
     make_job(conn, job_url="old_applied_fail", first_seen=OLD, verdict="GATE_FAIL",
              fit_score=None, bucket=None, app_status="applied", status_date="2026-02-01")
-    # Undo returns these to 'new' for a re-eval, which needs the text.
+    # Undo/unlink returns these to 'new' for a re-eval, which needs the text.
     make_job(conn, job_url="old_repost_skip", first_seen=OLD, status="repost_decided",
              verdict=None, fit_score=None, bucket=None)
+    make_job(conn, job_url="old_repost_eval", first_seen=OLD, status="repost_evaluated",
+             verdict=None, fit_score=None, bucket=None, repost_of="old_pass")
     make_job(conn, job_url="old_manual_rej", first_seen=OLD, status="rule_filtered",
              verdict=None, fit_score=None, bucket=None,
              filter_source="manual", filter_gate="other", filter_date="2026-02-01")
     pipeline.cmd_prune(conn, days=90, vacuum=False)
-    for url in ("old_pass", "old_rec", "old_applied_fail", "old_repost_skip", "old_manual_rej"):
+    for url in ("old_pass", "old_rec", "old_applied_fail", "old_repost_skip",
+                "old_repost_eval", "old_manual_rej"):
         assert _desc(conn, url) is not None, f"{url} must keep its description"

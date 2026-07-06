@@ -33,7 +33,7 @@ from datetime import date, timedelta
 from core import load_config, get_db, run_log
 from states import GATE_NAMES, VERDICT_GATE_FAIL, STATUS_SALARY_FILTERED
 from chain import (
-    skip_decided_reposts, resolve_posting, _fmt_decision,
+    skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
     mark_posting, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
 )
 from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats
@@ -75,8 +75,10 @@ def cmd_prune(conn, days, vacuum):
     narrow, because three consumers still need old descriptions:
       * gates-passed rows (PASS / RECRUITER_ONLY) — backtest_v2 re-evaluates known postings
         from their stored text, and applied/passed history keeps its JD for reference;
-      * repost_decided rows — undoing the chain's decision returns them to 'new' for a
-        re-eval, which needs the text;
+      * repost_decided AND repost_evaluated rows — undoing the chain's decision (or unlinking
+        the dupe) returns them to 'new' for a re-eval, which needs the text; both are part of
+        the keep-list CONTRACT (their protection here is that verdict stays NULL and their
+        status isn't in the pruned pair — a widened prune must keep honoring it);
       * manual rejects on never-evaluated rows (verdict NULL) — `reject --undo` re-news them.
     eval_json is kept everywhere (small, and old reports rebuild their one-liners from it).
     The freed pages only shrink the file with `--vacuum`."""
@@ -295,6 +297,10 @@ def main():
     # before any fetch/eval spend, and with a message instead of a KeyError traceback.
     try:
         cfg = load_config()
+        # Inside the guard: get_db can raise the stale-CHECK rebuild's actionable
+        # RuntimeError, which deserves the same clean exit as a config problem — in the
+        # scheduled .bat log a traceback reads as a crash, not an instruction.
+        conn = get_db(cfg)
     except FileNotFoundError:
         print("[config] config.yaml not found — copy config.example.yaml to config.yaml "
               "and edit it for your search", file=sys.stderr)
@@ -302,7 +308,9 @@ def main():
     except ValueError as e:
         print(f"[config] {e}", file=sys.stderr)
         sys.exit(2)
-    conn = get_db(cfg)
+    except RuntimeError as e:
+        print(f"[db] {e}", file=sys.stderr)
+        sys.exit(2)
 
     if args.command == "run":
         # The `status` column is a state machine and THIS ORDER IS LOAD-BEARING: each stage gates
@@ -312,9 +320,14 @@ def main():
         #   requeue_error_rows             last run's 'error'     -> 'new'  (retry — BEFORE the
         #                                  filters, so a requeued row re-faces the current rules
         #                                  and any chain decision made while it sat in 'error')
+        #   skip passes (restore dir)      undone/unlinked 'repost_*' -> 'new'  (also BEFORE the
+        #                                  filters — a restored row re-faces the current rules)
         #   apply_salary_filter            'new' below floor      -> 'salary_filtered'
         #   apply_hard_filters             'new' hits a rule      -> 'rule_filtered'
-        #   skip_decided_reposts           'new' relisting of a decided role -> 'repost_decided'
+        #   skip_decided_reposts (fwd)     'new' relisting of a decided role -> 'repost_decided'
+        #   skip_evaluated_reposts (fwd)   'new' relisting of an evaluated role -> 'repost_evaluated'
+        #                                  (after the decided pass — a user decision is the more
+        #                                  informative skip reason when both apply)
         #   evaluate_new_jobs              remaining 'new'        -> 'evaluated' | 'needs_manual' | 'error'
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
         # run_log tees this whole cycle into the day's logs/pipeline-YYYY-MM-DD.log so a manual
@@ -337,9 +350,19 @@ def main():
             _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
             _run_fetch_stage(fetch_ats, cfg, conn, "ats")
             requeue_error_rows(conn)
+            # RESTORE direction first, BEFORE the filters: a skipped row whose chain decision
+            # was undone (or whose chain verdict was cleared) returns to 'new' here so it
+            # re-faces the CURRENT salary/hard rules — same re-facing contract as
+            # requeue_error_rows above. Restoring after the filters would hand it straight to
+            # the paid eval past a rule added while it sat skipped.
+            skip_decided_reposts(conn, forward=False)
+            skip_evaluated_reposts(conn, forward=False)
             apply_salary_filter(cfg, conn)
             apply_hard_filters(cfg, conn)
-            skip_decided_reposts(conn)
+            # FORWARD direction after the filters: a rule keeps first claim on a 'new'
+            # relisting; whatever the rules didn't take is then skip-checked before the eval.
+            skip_decided_reposts(conn, restore=False)
+            skip_evaluated_reposts(conn, restore=False)
             evaluate_new_jobs(cfg, conn)
             generate_report(cfg, conn, run_date)
     elif args.command == "report":

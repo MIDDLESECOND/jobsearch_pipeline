@@ -114,7 +114,17 @@ def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys
     monkeypatch.setattr(pipeline, "fetch_ats", make("ats"))
     monkeypatch.setattr(pipeline, "apply_salary_filter", lambda c, cn: calls.append("salary"))
     monkeypatch.setattr(pipeline, "apply_hard_filters", lambda c, cn: calls.append("hard"))
-    monkeypatch.setattr(pipeline, "skip_decided_reposts", lambda cn: calls.append("skip"))
+    def _skip_stub(name):
+        def stub(cn, forward=True, restore=True):
+            # Label each direction so the order assertion pins the restore-before-filters /
+            # forward-after-filters split, not just "the passes ran". Fails loud (KeyError)
+            # on a direction combination the run order doesn't use.
+            suffix = {(True, True): "", (True, False): ":fwd", (False, True): ":restore"}[
+                (forward, restore)]
+            calls.append(name + suffix)
+        return stub
+    monkeypatch.setattr(pipeline, "skip_decided_reposts", _skip_stub("skip"))
+    monkeypatch.setattr(pipeline, "skip_evaluated_reposts", _skip_stub("skip_eval"))
     monkeypatch.setattr(pipeline, "evaluate_new_jobs", lambda c, cn: calls.append("eval"))
     monkeypatch.setattr(pipeline, "generate_report", lambda c, cn, d: calls.append("report"))
     monkeypatch.setattr(sys, "argv", ["pipeline.py", "run"])
@@ -122,7 +132,11 @@ def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys
     pipeline.main()
 
     # Every fetcher attempted (the crasher caught), every downstream stage ran, in order.
-    assert calls == ["linkedin", "adzuna", "ats", "salary", "hard", "skip", "eval", "report"]
+    assert calls == ["linkedin", "adzuna", "ats",
+                     "skip:restore", "skip_eval:restore",   # restores BEFORE the filters
+                     "salary", "hard",
+                     "skip:fwd", "skip_eval:fwd",           # forward skips after them
+                     "eval", "report"]
     # The FAILED log names the source that actually crashed — a wrong `label` at the call site
     # (e.g. passing "adzuna" for fetch_ats) would break this for the mislabeled source.
     assert f"[run] {crasher} fetch FAILED" in capsys.readouterr().err

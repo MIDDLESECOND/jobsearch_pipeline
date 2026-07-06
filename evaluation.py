@@ -220,8 +220,9 @@ def requeue_error_rows(conn):
     'error' row (provider outage, rate-limit storm) is stranded forever — no stage reads
     'error'. Runs as its OWN stage in `run`, after the fetchers and BEFORE the deterministic
     filters — deliberately not inside evaluate_new_jobs: a requeued row must re-face the
-    salary filter, the CURRENT hard rules, and skip_decided_reposts, so a rule added (or a
-    chain decision made) while the row sat in 'error' still catches it before the paid eval.
+    salary filter, the CURRENT hard rules, skip_decided_reposts, AND skip_evaluated_reposts,
+    so a rule added, a chain decision made, or a chain verdict recorded while the row sat in
+    'error' still catches it before the paid eval.
     A permanently failing row re-errors each run — visible in the report's errors section,
     costing only its own retries. Returns the requeued count."""
     n = conn.execute("UPDATE jobs SET status=? WHERE status=?",

@@ -136,8 +136,14 @@ def apply_hard_filters(cfg, conn):
     rules = load_filters()
     if not rules:
         return
+    # filter_source IS NULL: never clobber an existing attribution. A row rejected while it
+    # sat in 'error' returns through requeue_error_rows as 'new' still carrying the user's
+    # filter_source='manual' + chosen gate — re-stamping it as 'rule:<name>' would silently
+    # replace the manual attribution, and a later `reject --undo` (which clears only 'manual'
+    # rows) would report success while clearing nothing.
     rows = conn.execute(
-        "SELECT job_url, title, description FROM jobs WHERE status=?", (STATUS_NEW,)
+        "SELECT job_url, title, description FROM jobs WHERE status=? "
+        "AND filter_source IS NULL", (STATUS_NEW,)
     ).fetchall()
     today = date.today().isoformat()
     filtered = 0

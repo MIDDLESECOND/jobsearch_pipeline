@@ -18,9 +18,11 @@ and the stdlib.
 """
 
 import re
+import sys
 from datetime import date
 
-from states import GATE_NAMES, STATUS_NEW, STATUS_RULE_FILTERED, STATUS_REPOST_DECIDED
+from states import (GATE_NAMES, STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
+                    STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_FAVOR, sql_list)
 
 
 # ------------------------------------------------------- normalization / fingerprint
@@ -166,39 +168,174 @@ def _find_repost(conn, fingerprint, norm_title, exclude_url=None):
 
 # ------------------------------------------------------------- chain reconcile
 
-def skip_decided_reposts(conn):
+def skip_decided_reposts(conn, forward=True, restore=True):
     """Skip the paid eval for a relisting whose role the user has already decided. A repost links
     to its canonical original via `repost_of`, and every applied/passed/reject decision propagates
     to that canonical (see _chain_targets), so the canonical's decision state is authoritative for
     the whole chain. Matched rows get status='repost_decided' (skipped by evaluate_new_jobs).
-    Mirrors apply_salary_filter / apply_hard_filters — a deterministic pre-eval pass."""
+    Mirrors apply_salary_filter / apply_hard_filters — a deterministic pre-eval pass.
+
+    `forward`/`restore` select the directions to run. `run` calls the RESTORE direction before
+    the salary/hard filters and the FORWARD direction after them: a restored row must re-face
+    the CURRENT rules before the paid eval (the same re-facing contract requeue_error_rows'
+    stage placement provides), while forward-skipping stays after the filters so a rule keeps
+    first claim on a 'new' relisting. Every other caller runs both (order-independent there —
+    no eval follows)."""
     # Reconciles in BOTH directions from current decision state, so it self-corrects: a 'new'
     # relisting of a decided chain is skipped, and a previously-skipped relisting whose chain
     # decision was since undone returns to 'new' to be (re-)evaluated. Without the reverse pass
     # an undo would strand the sibling at 'repost_decided' forever (never re-evaluated).
-    # Keyed off the canonical (repost_of) only, which is sound for the decisions this is meant to
-    # propagate: applied/passed/manual-reject all write chain-wide (incl. the canonical) via the
-    # propagate_* helpers, so the canonical is authoritative for them. NOT chain-wide for the
-    # deterministic rule filters — apply_hard_filters stamps filter_source on the single matched
-    # row only — so a rule-rejected NON-canonical relisting can leave its canonical "undecided"
-    # here while effective_decision (chain-wide) reports the role rejected. Accepted: the only cost
-    # is one extra eval on a later relisting whose own text didn't re-trip the rule; no wrong verdict.
-    decided = ("(SELECT job_url FROM jobs WHERE app_status IS NOT NULL "
-               "OR filter_source IS NOT NULL)")
-    cur = conn.execute(
-        f"UPDATE jobs SET status='{STATUS_REPOST_DECIDED}' WHERE status='{STATUS_NEW}' "
-        f"AND repost_of IN {decided}"
-    )
-    # repost_of / job_url are never NULL here, so NOT IN is safe (no NULL-row short-circuit).
-    rev = conn.execute(
-        f"UPDATE jobs SET status='{STATUS_NEW}' WHERE status='{STATUS_REPOST_DECIDED}' "
-        f"AND repost_of NOT IN {decided}"
-    )
+    # Both directions key on COALESCE(repost_of, job_url) — the row's own canonical — which is
+    # sound for the decisions this propagates: applied/passed/manual-reject all write chain-wide
+    # (incl. the canonical) via the propagate_* helpers. The COALESCE matters twice: a decided
+    # row that is itself a still-'new' CANONICAL (marked before its eval ran) is skipped by its
+    # own stamp, and an unlinked ex-canonical (dupe_unlink sets repost_of=NULL) is judged by its
+    # own row — kept skipped while its copied decision stands, restored once that is undone
+    # (bare `repost_of NOT IN` was NULL-false for such rows and stranded them forever).
+    # NOT chain-wide for the deterministic rule filters — apply_hard_filters stamps
+    # filter_source on the single matched row only — so a rule-rejected NON-canonical relisting
+    # can leave its canonical "undecided" here while effective_decision (chain-wide) reports the
+    # role rejected. Accepted: the only cost is one extra eval on a later relisting whose own
+    # text didn't re-trip the rule; no wrong verdict.
+    # The forward pass also UPGRADES 'repost_evaluated' rows: a user decision is the more
+    # informative skip reason, and leaving the old label would keep the row in the report's
+    # "already-evaluated" section after the user acted on the role.
+    # (job_url IS NOT NULL: SQLite tolerates NULL in a TEXT PRIMARY KEY, and one NULL in the
+    # subquery would poison NOT IN to never-true, silently disabling the reverse pass.)
+    decided = ("(SELECT job_url FROM jobs WHERE (app_status IS NOT NULL "
+               "OR filter_source IS NOT NULL) AND job_url IS NOT NULL)")
+    if forward:
+        cur = conn.execute(
+            f"UPDATE jobs SET status='{STATUS_REPOST_DECIDED}' "
+            f"WHERE status IN ('{STATUS_NEW}', '{STATUS_REPOST_EVALUATED}') "
+            f"AND COALESCE(repost_of, job_url) IN {decided}"
+        )
+        if cur.rowcount:
+            print(f"[repost-skip] {cur.rowcount} relistings of already-decided roles (eval skipped, cost saved)")
+    if restore:
+        # Own-row guard (same as the evaluated pass's): a row whose OWN stamp survives while
+        # its canonical reads undecided (legacy/partially-synced rows only — propagate/clear
+        # write chain-wide) must not be released to the paid eval.
+        rev = conn.execute(
+            f"UPDATE jobs SET status='{STATUS_NEW}' WHERE status='{STATUS_REPOST_DECIDED}' "
+            f"AND app_status IS NULL AND filter_source IS NULL "
+            f"AND COALESCE(repost_of, job_url) NOT IN {decided}"
+        )
+        if rev.rowcount:
+            print(f"[repost-skip] {rev.rowcount} relistings restored to 'new' (chain decision undone)")
     conn.commit()
-    if cur.rowcount:
-        print(f"[repost-skip] {cur.rowcount} relistings of already-decided roles (eval skipped, cost saved)")
-    if rev.rowcount:
-        print(f"[repost-skip] {rev.rowcount} relistings restored to 'new' (chain decision undone)")
+
+
+def skip_evaluated_reposts(conn, forward=True, restore=True):
+    """Skip the paid eval for a relisting whose role chain already holds a verdict — the eval's
+    answer for the ROLE exists; re-asking just re-samples a noisy judge (a 2026-07 backtest over
+    the real DB found only 72% of multi-eval chains verdict-stable) while costing money on every
+    relisting cycle (Adzuna re-serves its whole active pool daily). Matched rows get
+    status='repost_evaluated' and keep verdict=NULL; readers see the role's verdict via
+    effective_decision's chain_verdict (most favorable member — see states.VERDICT_FAVOR).
+    Runs AFTER skip_decided_reposts (a user decision is the more informative skip reason) and,
+    like it, mirrors the deterministic pre-eval filter passes. `forward`/`restore` split the
+    directions for `run`'s stage order — restores happen BEFORE the salary/hard filters so a
+    restored row re-faces the current rules (see skip_decided_reposts).
+
+    The match keys off canonicals of any JUDGE-verdict-bearing member: verdicts don't propagate
+    chain-wide the way decisions do, so a chain's only verdict may sit on a sibling (e.g. the
+    canonical was salary-filtered, a later relisting was evaluated). The subquery requires
+    status='evaluated' because verdict alone is NOT eval-only — apply_hard_filters stamps a
+    synthetic verdict=GATE_FAIL on rule_filtered rows, and counting those would silently close
+    the gap the decided pass's docstring deliberately pays one extra eval for (a relisting whose
+    reworded text no longer trips the rule must get its safety-valve eval, not inherit a rule
+    stamp dressed up as a judge verdict). It also requires the verdict to be IN the current
+    vocabulary, matching chain_verdict's `in VERDICT_FAVOR` filter — an off-vocabulary legacy
+    verdict (pre-CHECK DBs are unconstrained) must not skip rows it can't label. Both directions
+    use COALESCE(repost_of, job_url) so a still-'new' CANONICAL whose verdict sits on a sibling
+    is skipped too (requeued error rows, dupe merges with a not-yet-evaluated winner) and stays
+    skipped through the reverse pass.
+    The reverse pass restores a row only while it is UNDECIDED: mark_posting stamps app_status
+    without lifting status, so without the guard an unlink would hand an APPLIED row back to
+    the paid eval (rejects are already lifted to rule_filtered by _REJECT_SET; the
+    filter_source arm is belt-and-braces for legacy rows). No full-text exception for
+    snippet-evaluated (Adzuna) canonicals: the same backtest found 5 of 14,058 chains would
+    ever qualify — not worth the code path."""
+    _verdicts = sql_list(VERDICT_FAVOR)
+    evaluated = (f"(SELECT COALESCE(repost_of, job_url) FROM jobs "
+                 f"WHERE verdict IN ({_verdicts}) AND status='{STATUS_EVALUATED}' "
+                 f"AND job_url IS NOT NULL)")
+    if forward:
+        # verdict IS NULL: a manually reset row carrying its own verdict must keep its re-eval.
+        cur = conn.execute(
+            f"UPDATE jobs SET status='{STATUS_REPOST_EVALUATED}' WHERE status='{STATUS_NEW}' "
+            f"AND verdict IS NULL AND COALESCE(repost_of, job_url) IN {evaluated}"
+        )
+        if cur.rowcount:
+            print(f"[repost-skip] {cur.rowcount} relistings of already-evaluated roles (eval skipped, cost saved)")
+    if restore:
+        # Restore direction so no undecided row is stranded: dupe_unlink clears repost_of (the
+        # row is no longer a relisting of anything → it needs its own eval), and a chain can
+        # lose its verdicts (e.g. a manual reset for re-evaluation).
+        rev = conn.execute(
+            f"UPDATE jobs SET status='{STATUS_NEW}' WHERE status='{STATUS_REPOST_EVALUATED}' "
+            f"AND app_status IS NULL AND filter_source IS NULL "
+            f"AND COALESCE(repost_of, job_url) NOT IN {evaluated}"
+        )
+        if rev.rowcount:
+            print(f"[repost-skip] {rev.rowcount} relistings restored to 'new' (chain unlinked or verdict cleared)")
+    conn.commit()
+
+
+def _reconcile_chain_skips(conn, canonical_url):
+    """Chain-SCOPED skip-label reconcile for the decision/dupe write paths — the one name for
+    'this chain's decision state just changed; fix its members' skip labels NOW'. Semantics:
+      * decided, both directions: a decision skips/upgrades still-pending members immediately
+        (decided rows never need the eval, so no filter re-facing is owed), and an undo
+        releases them;
+      * evaluated, RESTORE direction only: an unlink/undo must free stranded rows, but the
+        evaluated-FORWARD skip deliberately stays in `run`'s post-filter phase — re-skipping a
+        just-released row here would let it bypass the current salary/hard rules (the
+        restore-before-filters contract), so a released row honestly shows as 'new' (the UI
+        badges it with its chain verdict) until the next run labels it after the filters.
+    Scoped to one chain via the indexable `(repost_of=? OR job_url=?)` form — the global
+    passes' subqueries full-scan the table, which measured ~0.7-1.0s per call at 20k rows;
+    this form measured ~90ms. (COALESCE(repost_of, job_url)=? is NOT indexable — don't.)
+    Quiet on purpose (service code, like resolve_posting): the callers report their own
+    outcome, and a reconcile failure must never unwind a decision that already committed —
+    it degrades to a warning; the global passes self-heal on the next run."""
+    member = "(repost_of=? OR job_url=?)"
+    u2 = (canonical_url, canonical_url)
+    _verdicts = sql_list(VERDICT_FAVOR)
+    try:
+        decided = conn.execute(
+            f"SELECT 1 FROM jobs WHERE {member} AND (app_status IS NOT NULL "
+            f"OR filter_source IS NOT NULL) LIMIT 1", u2
+        ).fetchone() is not None
+        if decided:
+            conn.execute(
+                f"UPDATE jobs SET status='{STATUS_REPOST_DECIDED}' "
+                f"WHERE {member} AND status IN ('{STATUS_NEW}', '{STATUS_REPOST_EVALUATED}')",
+                u2,
+            )
+        else:
+            # Undone: release decided-skips; keep evaluated-skips only while the chain still
+            # holds a judge verdict AND the row itself is undecided (mirrors the global passes).
+            conn.execute(
+                f"UPDATE jobs SET status='{STATUS_NEW}' WHERE {member} "
+                f"AND status='{STATUS_REPOST_DECIDED}' "
+                f"AND app_status IS NULL AND filter_source IS NULL", u2,
+            )
+            has_verdict = conn.execute(
+                f"SELECT 1 FROM jobs WHERE {member} AND verdict IN ({_verdicts}) "
+                f"AND status='{STATUS_EVALUATED}' LIMIT 1", u2
+            ).fetchone() is not None
+            if not has_verdict:
+                conn.execute(
+                    f"UPDATE jobs SET status='{STATUS_NEW}' WHERE {member} "
+                    f"AND status='{STATUS_REPOST_EVALUATED}' "
+                    f"AND app_status IS NULL AND filter_source IS NULL", u2,
+                )
+        conn.commit()
+    except Exception as e:  # noqa: BLE001 — the decision is durable; labels self-heal next run
+        print(f"[repost-skip] chain reconcile failed (labels self-heal next run): {e}",
+              file=sys.stderr)
 
 
 # ------------------------------------------------------ url resolution / chain reads
@@ -307,8 +444,8 @@ def _fmt_decision(dec):
 # reduce a decision, PLUS the canonical's first_seen/verdict for the repost note, PLUS repost_of so
 # the batched variant can group members back to their canonical. Both queries share this list so
 # their column shapes can't drift.
-_MEMBER_COLS = ("job_url, repost_of, first_seen, verdict, app_status, status_date, "
-                "filter_source, filter_gate, filter_date")
+_MEMBER_COLS = ("job_url, repost_of, first_seen, verdict, status, fit_score, app_status, "
+                "status_date, filter_source, filter_gate, filter_date")
 
 
 def effective_decision(conn, row):
@@ -324,6 +461,15 @@ def effective_decision(conn, row):
       is_repost             True if `row` itself is a relisting (repost_of set)
       original_first_seen   the canonical original's first_seen (for the repost note), or None
       original_verdict      the canonical original's model verdict, or None
+      chain_verdict         the ROLE's verdict: most favorable across all members' (noisy)
+                            JUDGE verdicts (status='evaluated' only — a rule-stamped
+                            GATE_FAIL on a rule_filtered row is a deterministic text match,
+                            not a judgment), per states.VERDICT_FAVOR, or None if no judge
+                            ever scored the chain. What readers show for a
+                            'repost_evaluated' row, whose own verdict stays NULL.
+      chain_fit_score       the winning member's fit_score (best fit among the most
+                            favorable verdicts), or None — the triage-sort fallback for
+                            rows whose own fit_score is NULL.
     """
     canonical_url = row["repost_of"] or row["job_url"]
     # One query for the whole chain: fetch every member row with the columns _decide needs PLUS the
@@ -345,6 +491,16 @@ def _effective_from_members(row, members):
     # The canonical's own row (None only if repost_of points at a row that doesn't exist — an
     # orphaned manual edit; original_* then stay None, as before).
     canon = next((m for m in members if m["job_url"] == canonical_url), None)
+    # Judge verdicts only: status='evaluated' excludes the synthetic GATE_FAIL that
+    # apply_hard_filters stamps on rule_filtered rows (same predicate as skip_evaluated_reposts).
+    # The WINNING member (most favorable verdict, best fit as tiebreak) supplies both the chain
+    # verdict and the chain fit score — the latter lets a verdict-less 'repost_evaluated' row
+    # sort where its role belongs instead of sinking to the bottom band (fit NULL reads as 0).
+    winner = max(
+        (m for m in members
+         if m["status"] == STATUS_EVALUATED and m["verdict"] in VERDICT_FAVOR),
+        key=lambda m: (VERDICT_FAVOR[m["verdict"]], m["fit_score"] or 0), default=None,
+    )
     return {
         "app_status": dec.get("app_status"),
         "status_date": dec.get("status_date"),
@@ -354,6 +510,8 @@ def _effective_from_members(row, members):
         "is_repost": bool(row["repost_of"]),
         "original_first_seen": canon["first_seen"] if canon else None,
         "original_verdict": canon["verdict"] if canon else None,
+        "chain_verdict": winner["verdict"] if winner else None,
+        "chain_fit_score": winner["fit_score"] if winner else None,
     }
 
 
@@ -393,12 +551,16 @@ def effective_decisions(conn, rows):
 # them, so the write paths can't drift the way they did when each had its own inline UPDATE.
 # (The read counterpart is effective_decision; callers commit.)
 
-# SET clause for a manual hard-fail override: stamp 'manual' + attribution, and lift a still-'new'
-# row to 'rule_filtered' so the next run's paid eval skips it (an already-evaluated row keeps its
-# status — the report groups by filter_source either way). Two placeholders: (gate, date).
+# SET clause for a manual hard-fail override: stamp 'manual' + attribution, and lift a
+# never-evaluated row — still-'new' OR eval-skipped 'repost_evaluated' (its own verdict is NULL
+# by construction) — to 'rule_filtered' so the paid eval can never see it again (an
+# already-evaluated row keeps its status — the report groups by filter_source either way).
+# Without the repost_evaluated arm, a rejected skipped relisting kept its skip status, and a
+# later dupe-unlink's reverse pass would hand the REJECTED row back to the eval queue.
+# Two placeholders: (gate, date).
 _REJECT_SET = ("filter_source='manual', filter_gate=?, filter_date=?, "
-               f"status=CASE WHEN status='{STATUS_NEW}' THEN '{STATUS_RULE_FILTERED}' "
-               "ELSE status END")
+               f"status=CASE WHEN status IN ('{STATUS_NEW}', '{STATUS_REPOST_EVALUATED}') "
+               f"THEN '{STATUS_RULE_FILTERED}' ELSE status END")
 
 
 def propagate_app_status(conn, member_urls, status, status_date):
@@ -470,6 +632,12 @@ def mark_posting(conn, row, status):
     stamp = date.today().isoformat() if status else None
     propagate_app_status(conn, targets, status, stamp)
     conn.commit()
+    # Reconcile this chain's skip labels immediately: a decision must upgrade any
+    # 'repost_evaluated' sibling to 'repost_decided' (and an undo must release skipped rows)
+    # NOW, not at the next run — a report rebuild or UI refresh in between would show the
+    # stale label. Chain-scoped: the global passes cost ~1s per call and every triage click
+    # lands here (see _reconcile_chain_skips).
+    _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
     verb = f"marked {status}" if status else "cleared status"
     msg = f"{verb}: {row['title']} — {row['company']}" + (f" ({stamp})" if status else "")
     return True, msg, sorted(targets)
@@ -484,12 +652,16 @@ def reject_posting(conn, row, gate, undo=False):
     if undo:
         clear_reject(conn, targets)
         conn.commit()
+        # Reconcile this chain now (see mark_posting): an undone reject may release skipped
+        # siblings back to 'new' (they re-face the filters in the next run, before any eval).
+        _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
         return True, f"cleared override: {row['title']} — {row['company']}", sorted(targets)
     if gate not in GATE_NAMES + ["other"]:
         return False, f"gate must be one of {GATE_NAMES + ['other']}", []
     today = date.today().isoformat()
     propagate_reject(conn, targets, gate, today, force_url=row["job_url"], overwrite_manual=True)
     conn.commit()
+    _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
     return True, f"rejected (gate: {gate}): {row['title']} — {row['company']} ({today})", sorted(targets)
 
 
@@ -589,7 +761,11 @@ def dupe_commit(conn, plan):
             propagate_reject(conn, all_members, dec["filter_gate"], dec["filter_date"],
                              overwrite_manual=False)
     conn.commit()
-    skip_decided_reposts(conn)  # eval-skip any still-'new' member now under a decided canonical
+    # Chain-scoped reconcile of the merged chain: a decided merge skips still-'new' members
+    # now; an undecided-but-evaluated merge deliberately leaves 'new' members for the next
+    # run's post-filter forward pass (they must re-face the current rules before any label
+    # spares them the eval — see _reconcile_chain_skips).
+    _reconcile_chain_skips(conn, winner["job_url"])
     return sorted(winner_members | loser_members)
 
 
@@ -629,7 +805,12 @@ def dupe_unlink(conn, a):
             (restored_parent, r["job_url"]),
         )
     conn.commit()
-    skip_decided_reposts(conn)  # reverse pass restores any 'repost_decided' member to 'new'
+    # Reconcile BOTH resulting chains: the detached loser chain (skipped members whose new
+    # chain lacks a decision/verdict are released) and the remaining winner chain (`a` still
+    # holds its pre-detach repost_of — the winner canonical).
+    _reconcile_chain_skips(conn, loser_canon_url)
+    if a["repost_of"]:
+        _reconcile_chain_skips(conn, a["repost_of"])
     msg = (f"unlinked: {loser_canon['title']} — {loser_canon['company']} "
            f"({len(rows)} row(s) restored to their own chain); any decision propagated by the merge "
            f"was left as-is — undo it separately (passed/applied/reject) if it shouldn't carry over")

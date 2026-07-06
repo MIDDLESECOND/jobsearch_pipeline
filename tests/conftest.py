@@ -27,6 +27,13 @@ def conn(tmp_path):
         c.close()
 
 
+def job_status(conn, url):
+    """The one spelling of "read this row's status" for state-machine tests."""
+    return conn.execute(
+        "SELECT status FROM jobs WHERE job_url=?", (url,)
+    ).fetchone()["status"]
+
+
 # Monotonic default url so callers that don't care about the url still get unique ones.
 _n = [0]
 

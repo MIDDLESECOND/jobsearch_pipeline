@@ -1,0 +1,179 @@
+"""The DB-open migration path — specifically _rebuild_for_stale_checks.
+
+SQLite freezes CHECK constraints at CREATE TABLE time, so a DB created while an older
+STATUSES/VERDICTS vocabulary was current REJECTS newly-added legal values (IntegrityError
+in the deliberately-unguarded run stages — every run aborts). get_db must detect the stale
+CHECK text and rebuild the table once, preserving rows; pre-CHECK DBs and current-CHECK
+DBs must pass through untouched. This is the guard for every FUTURE vocabulary addition,
+not just 'repost_evaluated'.
+"""
+
+import sqlite3
+
+import chain
+import core
+from conftest import job_status
+from states import STATUSES, STATUS_REPOST_EVALUATED
+
+# The literal 7-value vocabulary that shipped with the first CHECK-bearing schema
+# (commit 479b3b1) — frozen here on purpose; do NOT derive it from states.STATUSES.
+_OLD_STATUSES = ("new", "evaluated", "needs_manual", "salary_filtered",
+                 "rule_filtered", "repost_decided", "error")
+_OLD_VERDICTS = ("PASS", "GATE_FAIL", "RECRUITER_ONLY")
+
+
+def _jobs_ddl(status_ck="", verdict_ck=""):
+    """The full historical column set, with optional CHECK clauses — a pre-CHECK DB is this
+    shape without them, a 479b3b1-era DB is this shape with the old 7/3-value vocabulary."""
+    return f"""
+        CREATE TABLE jobs (
+            job_url      TEXT PRIMARY KEY,
+            title        TEXT, company TEXT, location TEXT, search_name TEXT, tier TEXT,
+            date_posted  TEXT, first_seen TEXT, salary_min REAL, salary_max REAL,
+            description  TEXT,
+            status       TEXT{status_ck},
+            verdict      TEXT{verdict_ck},
+            failed_gate  TEXT, fit_score INTEGER, bucket INTEGER, eval_json TEXT,
+            norm_company TEXT, norm_title TEXT, fingerprint TEXT,
+            repost_of    TEXT, repost_source TEXT,
+            app_status   TEXT, status_date TEXT,
+            filter_source TEXT, filter_gate TEXT, filter_date TEXT, source TEXT
+        )
+    """
+
+
+def _make_old_check_db(path):
+    """A DB whose jobs table carries the old, smaller CHECK — as a fresh clone at the
+    previous release would have created it."""
+    conn = sqlite3.connect(path)
+    status_ck = " CHECK (status IN (" + ", ".join(f"'{s}'" for s in _OLD_STATUSES) + "))"
+    verdict_ck = " CHECK (verdict IN (" + ", ".join(f"'{v}'" for v in _OLD_VERDICTS) + "))"
+    conn.execute(_jobs_ddl(status_ck, verdict_ck))
+    conn.execute(
+        "INSERT INTO jobs (job_url, title, status, verdict, first_seen) "
+        "VALUES ('c', 'Canonical', 'evaluated', 'PASS', '2026-06-01T00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO jobs (job_url, title, status, repost_of, first_seen) "
+        "VALUES ('r1', 'Relisting', 'new', 'c', '2026-06-02T00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_stale_check_db_is_rebuilt_and_accepts_new_statuses(tmp_path):
+    path = str(tmp_path / "old.db")
+    _make_old_check_db(path)
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        # Rows survived the table swap.
+        rows = {r["job_url"]: r for r in conn.execute("SELECT * FROM jobs")}
+        assert set(rows) == {"c", "r1"} and rows["c"]["verdict"] == "PASS"
+        # The rebuilt CHECK names every current status — the exact write that aborted
+        # every run on the stale schema now succeeds through the real pass.
+        chain.skip_evaluated_reposts(conn)
+        assert job_status(conn, "r1") == STATUS_REPOST_EVALUATED
+        # The swap is one-shot: the current DDL text now names every status.
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()[0]
+        assert all(f"'{s}'" in sql for s in STATUSES)
+        # And the indexes dropped with the old table were recreated by get_db.
+        idx = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")}
+        assert {"idx_fingerprint", "idx_repost_of", "idx_status"} <= idx
+    finally:
+        conn.close()
+
+
+def test_pre_check_db_is_left_alone(tmp_path):
+    # A DB from before the CHECKs existed has no constraint to go stale — the rebuild must
+    # not touch it (code-side constants remain its enforcement, per the documented policy).
+    path = str(tmp_path / "precheck.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_jobs_ddl())  # full column set, no CHECKs — the pre-479b3b1 shape
+    conn.execute("INSERT INTO jobs (job_url, title, status) VALUES ('x', 'T', 'new')")
+    conn.commit()
+    conn.close()
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()[0]
+        assert "CHECK" not in sql  # no rebuild happened
+        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_current_check_db_not_rebuilt_twice(tmp_path, capsys):
+    # Idempotence: a fresh current-schema DB must pass the stale-CHECK probe untouched.
+    # DDL-text comparison alone is VACUOUS here — a rebuild is a textual fixed point (the
+    # renamed table re-rebuilds to byte-identical SQL), so a probe regression that rebuilds
+    # on every startup would still pass `before == after`. Assert on the migration's own
+    # print instead: no '[migrate] rebuilt' line may appear on either open of a current DB.
+    path = str(tmp_path / "fresh.db")
+    core.get_db({"settings": {"db_path": path}}).close()
+    core.get_db({"settings": {"db_path": path}}).close()
+    assert "[migrate] rebuilt" not in capsys.readouterr().out
+    # And the stored DDL is the fresh-created form (unquoted name), not a rebuild residue
+    # (a RENAME rewrites the stored SQL with a quoted "jobs").
+    conn = sqlite3.connect(path)
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()[0]
+    conn.close()
+    assert '"jobs"' not in sql
+
+
+def test_rebuild_preserves_hand_added_columns(tmp_path):
+    # A single-user tool accumulates ad-hoc columns; the swap must carry them (and their
+    # data) into the new table rather than silently dropping them with the old one —
+    # including SQL-keyword/spaced names (identifiers must be quoted) and DEFAULTs.
+    path = str(tmp_path / "handcol.db")
+    _make_old_check_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE jobs ADD COLUMN my_notes TEXT")
+    conn.execute('ALTER TABLE jobs ADD COLUMN "order" INTEGER DEFAULT 7')
+    conn.execute('ALTER TABLE jobs ADD COLUMN "my notes 2" TEXT')
+    conn.execute("UPDATE jobs SET my_notes='irreplaceable', \"my notes 2\"='spaced' "
+                 "WHERE job_url='c'")
+    conn.commit()
+    conn.close()
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        row = conn.execute(
+            'SELECT my_notes, "order", "my notes 2" FROM jobs WHERE job_url=\'c\'').fetchone()
+        assert row["my_notes"] == "irreplaceable"
+        assert row["order"] == 7               # keyword-named column + its DEFAULT survived
+        assert row["my notes 2"] == "spaced"   # spaced name survived
+        # The carried DEFAULT applies to future inserts too.
+        conn.execute("INSERT INTO jobs (job_url, status) VALUES ('z', 'new')")
+        assert conn.execute('SELECT "order" FROM jobs WHERE job_url=\'z\'').fetchone()[0] == 7
+    finally:
+        conn.close()
+
+
+def test_rebuild_refuses_off_vocabulary_values_loudly(tmp_path):
+    # A stored value outside the current vocabulary (renamed status, hand-edited typo) would
+    # make the copy raise a bare IntegrityError inside get_db — every command bricked with no
+    # hint. The rebuild must fail with an actionable message naming the values instead.
+    import pytest
+    path = str(tmp_path / "badval.db")
+    _make_old_check_db(path)
+    conn = sqlite3.connect(path)
+    # Simulate a vocabulary RENAME's aftermath: swap 'error' for 'gone_status' inside the
+    # stored CHECK (writable_schema edits the DDL text without a rebuild), then stamp a row
+    # with it. The edited CHECK now lacks 'error' → the probe fires; the row's value is
+    # outside the CURRENT vocabulary → the copy would violate the fresh CHECK.
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.execute("""UPDATE sqlite_master SET sql=replace(sql, "'error'", "'gone_status'")
+                    WHERE name='jobs'""")
+    conn.commit()  # the sqlite_master UPDATE opens a transaction; close() would roll it back
+    conn.execute("PRAGMA writable_schema=OFF")
+    conn.close()
+    conn = sqlite3.connect(path)  # reopen so the edited schema is re-read
+    conn.execute("UPDATE jobs SET status='gone_status' WHERE job_url='r1'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError, match="gone_status"):
+        core.get_db({"settings": {"db_path": path}}).close()

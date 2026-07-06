@@ -7,7 +7,7 @@ even at a perfect score. Enforced in code so it can't depend on the model comply
 
 import chain
 import evaluation
-from conftest import make_job
+from conftest import make_job, job_status
 
 
 def _norm(**kw):
@@ -146,5 +146,17 @@ def test_requeued_error_row_refaces_the_filters(conn):
              status="error", verdict=None, fit_score=None, bucket=None)
     evaluation.requeue_error_rows(conn)   # error -> new (the run stage after the fetchers)
     chain.skip_decided_reposts(conn)      # then the pre-eval passes run over 'new'
-    status = conn.execute("SELECT status FROM jobs WHERE job_url='err'").fetchone()[0]
-    assert status == "repost_decided"     # eval never sees it
+    assert job_status(conn, "err") == "repost_decided"   # eval never sees it
+
+
+def test_requeued_relisting_of_evaluated_chain_is_not_rebilled(conn):
+    """Same stage-order contract for the evaluated-chain skip: a relisting requeued from
+    'error' whose role already holds a verdict goes to 'repost_evaluated', not back into
+    the paid eval."""
+    make_job(conn, job_url="canon", company="Chain Co", status="evaluated", verdict="PASS")
+    make_job(conn, job_url="err", company="Chain Co", repost_of="canon",
+             status="error", verdict=None, fit_score=None, bucket=None)
+    evaluation.requeue_error_rows(conn)
+    chain.skip_decided_reposts(conn)      # no user decision — this pass leaves it 'new'
+    chain.skip_evaluated_reposts(conn)    # ...and this one catches it
+    assert job_status(conn, "err") == "repost_evaluated"   # eval never sees it

@@ -266,7 +266,10 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
 **Status markers** (your decisions + repost history, shown on a posting regardless of verdict):
 
 - **↻ Repost — original first seen …** = the same role relisted under a new URL. The line
-  carries the original's first-seen date and prior verdict so you know you've seen it before.
+  carries the original's first-seen date and the chain's verdict (the most favorable one the
+  evaluator ever gave this role) so you know you've seen it before. Relistings of a role that
+  already holds a verdict are not re-evaluated — they appear in a compact "already-evaluated"
+  report section instead of being re-scored.
 - **🚫 ALREADY APPLIED — do not re-apply** = you ran `applied` on this role (or an earlier
   posting of it). The loudest marker — it's the double-apply guard.
 - **↩ You reviewed & passed …** = you ran `passed` on it. A quiet note; the job stays visible

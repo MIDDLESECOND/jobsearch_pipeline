@@ -7,6 +7,131 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-05 — one eval per role chain; Adzuna URLs canonicalized to the ad id
+
+### Why
+A read-only investigation (local `tests/validation/investigate_adzuna_churn.py`) confirmed two
+compounding leaks behind the ~3× eval-cost jump since Adzuna launched (2026-06-29). First,
+Adzuna's `redirect_url` embeds a per-request tracking token (`?se=...`), so the same ad got a
+fresh `job_url` (the PK) on every API call — 2,956 redundant rows from URL churn alone; the
+fingerprint linked them as reposts but couldn't stop the insert. Second, `skip_decided_reposts`
+only spared relistings of USER-decided chains, so a relisting of a merely-*evaluated* role
+re-entered the paid eval on every cycle — 3,564 avoidable evals (~60% of daily spend). The
+investigation also found repeat evals are NOISY: only 72% of multi-eval chains got the same
+verdict every time, so re-evaluating was buying re-rolls of a noisy judge (and verdict flapping
+between daily reports), not accuracy.
+
+### What changed
+- **Adzuna `job_url` is now canonical** (`fetch._adzuna_job_url`): built from the stable ad id
+  (`https://www.adzuna.com/details/<id>`; the `id` field, else parsed from either observed
+  `redirect_url` shape; raw-URL fallback if neither parses). Re-serves of the same ad now hit
+  the PK's `ON CONFLICT DO NOTHING` — no row, no eval. Going-forward only; existing tokened
+  rows stay and keep dedup'ing via the fingerprint.
+- **New pre-eval pass `chain.skip_evaluated_reposts`** (runs right after `skip_decided_reposts`):
+  a `'new'` relisting whose chain already holds ANY member verdict → `status='repost_evaluated'`
+  (new `states.py` status), skipping the paid eval. Bidirectional like the decided pass: a
+  `dupe --undo` unlink (or a cleared chain verdict) restores the row to `'new'`. The row's own
+  verdict stays NULL — no copies to go stale.
+- **The role's verdict is read through the chain**: `chain.effective_decision(s)` now also
+  returns `chain_verdict` = the MOST FAVORABLE member verdict (`states.VERDICT_FAVOR`:
+  PASS > RECRUITER_ONLY > GATE_FAIL). Rationale: the eval is a cheap pre-filter in front of a
+  human — with a noisy judge, a false PASS costs seconds of triage while a false GATE_FAIL
+  buries a role; `max()` is also order-independent, unlike "canonical's" or "latest". Spam that
+  lucks into one PASS remains a `filters.yaml` / `reject --pattern` problem, as before.
+- **Report**: new compact "Already-evaluated roles seen again (eval skipped)" section
+  (title/company/chain verdict/age/link, most-favorable-first) — a PASS relisting still
+  surfaces, it just isn't re-scored; the summary's repost-skipped count now includes these.
+  **Web UI**: `row_to_dict` exposes `chain_verdict` (additive JSON field).
+- Known accepted gap in "one eval per chain": two members of one chain first seen in the
+  SAME run both get evaluated (no verdict exists yet when the skip pass runs) — bounded to a
+  chain's debut run; the canonical-URL fix removes most same-run duplicates at insert.
+- Deliberately NOT included: a "re-evaluate when full text arrives for a snippet-evaluated
+  role" exception — only 5 of 14,058 chains would ever qualify. `prune` keeps
+  `repost_evaluated` descriptions (mirrors the `repost_decided` precedent: an unlink can send
+  the row back to eval, which needs the text).
+- **Hardened by a third max-effort review round** (13 confirmed findings applied):
+  - **Per-click cost**: the decision paths' reconcile is now CHAIN-SCOPED
+    (`chain._reconcile_chain_skips`, indexable `(repost_of=? OR job_url=?)` form) — the
+    round-2 global sweeps measured ~0.7–1.0s on every applied/passed/reject click; the
+    scoped form measured ~90ms. Policy folded in: inline reconciles run decided(both) +
+    evaluated(restore only), so an undo-released row honestly shows as 'new' and re-faces
+    the current rules in the next run before any label spares it the eval (the previous
+    inline evaluated-forward skip bypassed that contract). Reconcile failures after the
+    decision commit degrade to a warning — the decision is durable, labels self-heal.
+  - **Sort fallback scoped**: the today-view chain-fit fallback is gated on the two
+    eval-skip statuses — a salary-filtered or description-less relisting of a scored chain
+    no longer outranks genuinely scored cards.
+  - **`apply_hard_filters` never clobbers an existing attribution** (`filter_source IS
+    NULL` guard): a row rejected while in 'error' kept its manual attribution through
+    requeue, so `reject --undo` works instead of silently no-oping.
+  - **Rebuild hardening**: hand-added columns survive the swap with quoted identifiers
+    (keyword/spaced names) and carried DEFAULT/NOT NULL; the off-vocabulary error now names
+    values the OLD schema also accepts (the previous instruction was self-defeating — the
+    stale CHECK rejects new values); the CHECK probe tolerates quoted identifiers and
+    treats an unparseable CHECK as stale (rebuild) rather than absent (skip);
+    `in_transaction` is pinned before BEGIN IMMEDIATE; the RuntimeError gets the clean
+    `[db]`-style exit in both front-ends instead of a traceback.
+  - **Report**: the `not filter_source` double-count guard now covers ALL status buckets
+    (errors, salary-filtered, repost-decided); the eval-skipped section prints 'first seen'
+    only for actual reposts. The decided pass's restore direction gained the same own-row
+    decision guard as the evaluated pass (symmetry; legacy rows only).
+  - Cleanups: `states.sql_list` (one owner for the quoted IN-list idiom), the UI badge
+    shows the chain's fit score (`↻ chain PASS 14/18`), plus ordering/regression tests for
+    the sort fallback, bucket guards, attribution guard, and keyword-column rebuild.
+  - Declined as over-engineering: eval-roster grouping for the same-run debut gap
+    (documented above instead), boolean-kwarg API reshaping, and aesthetic reflows of
+    already-hardened code.
+- **Hardened by a second max-effort review round** (13 more confirmed findings applied):
+  - **Stage order**: the skip passes' RESTORE direction now runs BEFORE the salary/hard filters
+    (their FORWARD direction stays after) — a row released back to `'new'` re-faces the current
+    rules instead of slipping straight to the paid eval past a rule added while it sat skipped.
+  - **Rebuild robustness**: the stale-CHECK probe reads each column's CHECK clause (not the
+    whole DDL, whose comments contain quoted words that masked future collisions); the swap runs
+    under an explicit `BEGIN IMMEDIATE` (its atomicity no longer rides on Python sqlite3's
+    legacy transaction mode); hand-added columns are carried through the swap instead of
+    silently dropped; and off-vocabulary stored values abort with an actionable message instead
+    of a bare IntegrityError bricking every command.
+  - **Decisions reconcile immediately**: `mark_posting`/`reject_posting` now run both skip
+    passes like the dupe paths, so a UI/CLI decision upgrades or releases skipped rows at once.
+  - **Report/UI consistency**: the `repost_decided` summary term got the same
+    `not filter_source` double-count guard; the scored-card banner gained the chain-reject
+    marker the tag already had (and the tag stops repeating it inside the Hard-fail section);
+    the "(model under-filtered)" note reads `chain_verdict`; the eval-skipped section is titled
+    for roles, not reposts (still-'new' canonicals land there too); and the UI today-view sort
+    falls back to the chain's fit score (`chain_fit_score`) so a PASS-chain relisting no longer
+    sinks to the bottom band.
+  - **Adzuna URL edge cases**: the ad-id regex is ASCII-only and searches only the URL path
+    (a query-string id is another page's id — minting from it collided distinct ads on one PK);
+    a malformed or scheme-less `redirect_url` falls back to the raw URL instead of raising
+    (one bad row aborted the whole Adzuna batch) or minting a wrong-country host.
+- **Hardened by a max-effort review before landing** (13 confirmed findings applied):
+  - The "evaluated" predicate counts JUDGE verdicts only (`status='evaluated'`) — the synthetic
+    `GATE_FAIL` a filters.yaml rule stamps must neither suppress the safety-valve eval the
+    decided pass's docstring reserves for drifted relistings, nor masquerade as a chain verdict.
+  - Both skip passes key on `COALESCE(repost_of, job_url)` in BOTH directions: a still-'new'
+    canonical whose verdict/decision sits on a sibling (requeued error rows, dupe merges,
+    `applied` before eval) is now skipped too, and an unlinked ex-canonical is no longer
+    stranded by `repost_of NOT IN`'s NULL-false (a pre-existing `repost_decided` bug).
+  - The decided pass upgrades `repost_evaluated` → `repost_decided`; `_REJECT_SET` lifts
+    `repost_evaluated` → `rule_filtered`; the evaluated reverse pass restores only UNDECIDED
+    rows — together closing a leak where a rejected-then-unlinked row re-entered the paid eval.
+  - Stale-CHECK migration (`core._rebuild_for_stale_checks`): a DB whose baked-in status/verdict
+    CHECK predates a vocabulary addition is rebuilt once at startup instead of aborting every
+    run with IntegrityError (SQLite can't ALTER a CHECK; this guards all future additions too).
+  - Adzuna canonical URLs keep `redirect_url`'s host (country-correct site, not hardcoded
+    `.com`) and require a `redirect_url` (id-only degenerate results are skipped, as before).
+  - Report: chain-rejected skipped rows render only under Hard-fail (no double-count); the
+    repost banner reads `chain_verdict` (no more "prior verdict None"); rejected chains get an
+    inline `🚫 rejected` marker. Web UI: the card badge falls back to the chain verdict, so an
+    eval-skipped PASS relisting is visible in the today view. New `idx_status` index.
+
+### Expected effect
+~450 avoidable evals/day stop (~$0.22/day → run cost from ~$0.35 toward ~$0.10–0.15), the DB
+stops accreting URL-churn rows, and a role's verdict is stable across daily reports instead of
+re-rolling with each relisting.
+
+---
+
 ## 2026-07-05 — status-machine hardening: error retry, fail-fast auth, schema CHECKs, prune
 
 ### Why

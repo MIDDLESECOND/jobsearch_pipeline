@@ -20,7 +20,9 @@ re-export hub):
   `resolve_posting`, `mark_posting`, `reject_posting`, and `dupe_resolve`/`dupe_commit`/
   `dupe_unlink`. Imports only `states` + stdlib.
 - `core.py` — paths, `load_config` (+ shape validation), the SQLite open/schema/**migrations**,
-  and `_ensure_api_key`. The foundation; imports only `chain` and `states`.
+  `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
+  normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
+  shape's producer and consumers can't drift). The foundation; imports only `chain` and `states`.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core` and `states`.
@@ -55,7 +57,7 @@ predicted salaries).
 ```bash
 pip install -r requirements.txt          # python-jobspy, anthropic, pyyaml (.venv present)
 
-python pipeline.py run                    # full cycle: fetch → salary filter → hard filters → eval → report
+python pipeline.py run                    # full cycle: fetch → error requeue → repost-skip restores → salary filter → hard filters → repost-skip forward → eval → report
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
 
@@ -88,9 +90,14 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
 ## Architecture invariants (the non-obvious parts)
 
 - **The `run` stage order is load-bearing.** Each stage gates on the `status` column, and only
-  `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost filters (salary, then
-  hard-requirement rules) run *before* the LLM and short-circuit obvious rejects. A new pre-eval
-  filter must set a non-`new` status, mirroring the existing salary/hard-filter passes. All three
+  `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost passes run *before*
+  the LLM and short-circuit obvious rejects: the two repost-skip reconciles' RESTORE direction
+  (released rows re-face the current rules), then the salary and hard-requirement filters, then
+  the skip passes' FORWARD direction (`skip_decided_reposts` runs first; the decided label also
+  wins order-independently — its forward pass upgrades `repost_evaluated` rows — and the
+  restore-before-filters order is behaviorally pinned by tests). A new
+  pre-eval filter must set a non-`new` status, mirroring the existing salary/hard-filter passes,
+  and must run BEFORE the forward skip passes so their reconciles see its stamps. All three
   fetchers (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`, then `fetch_ats`) run first and only
   insert `status='new'` rows, so everything downstream is source-agnostic — the `source` column is
   for provenance/flagging only. Each fetcher is wrapped by `_run_fetch_stage` (the untrusted-input
@@ -101,8 +108,11 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
 
 - **SQLite (`jobs.db`) is the single source of truth; reports are disposable derivations.** Never
   reconstruct state from `reports/` (per-day and lossy). The schema and all migrations live inline
-  in the DB-open path and run on *every* startup — idempotent and additive. Add schema changes
-  there; there are no separate migration files.
+  in the DB-open path and run on *every* startup — idempotent and additive, plus ONE sanctioned
+  non-additive mechanism: a one-shot row-preserving table rebuild when a DB's baked-in
+  status/verdict CHECK falls behind `states.py` (`_rebuild_for_stale_checks` — SQLite can't ALTER
+  a CHECK, and a stale one aborts every run). Add schema changes there; there are no separate
+  migration files.
 
 - **Dedup is two-layer and guards against double-applying.** Beyond the `job_url` primary key, a
   content fingerprint (normalized company+location + **exact** normalized title) catches LinkedIn
@@ -120,7 +130,11 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
   (`dupe_resolve` / `dupe_commit` / `dupe_unlink`) in `chain.py`; the guard/conflict logic lives
   there, not in either front-end. **The "what has the user decided about this role's chain?" question
   has exactly one implementation — `chain.effective_decision` — used by the report (`_repost_info`),
-  the web UI (`row_to_dict`), and the dupe conflict guard, so the three can't drift.**
+  the web UI (`row_to_dict`), and the dupe conflict guard, so the three can't drift.** The same
+  function owns the chain-level verdict reading (`chain_verdict`/`chain_fit_score`: the most
+  favorable JUDGE verdict, `status='evaluated'` rows only — a filters.yaml GATE_FAIL stamp is not a
+  judgment); `chain.skip_evaluated_reposts`' SQL subquery mirrors that predicate, and the two carry
+  cross-referencing comments — change one, change both.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

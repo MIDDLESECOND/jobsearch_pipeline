@@ -10,6 +10,7 @@ import FROM here; nothing here imports them (so there are no cycles).
 
 import contextlib
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -20,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from chain import _norm_company, _norm_title, _fingerprint, _NORM_VERSION
-from states import STATUSES, VERDICTS
+from states import STATUSES, VERDICTS, sql_list
 
 # Windows consoles (and redirected log files) default to the locale code page — here `gbk` —
 # which can't encode characters that show up in scraped LinkedIn text: em-dashes in our own
@@ -337,15 +338,18 @@ def connect_db(cfg):
     return conn
 
 
-def get_db(cfg):
-    conn = connect_db(cfg)
-    # The status/verdict CHECKs guard FRESH databases only — SQLite can't add a constraint to
-    # an existing table without a full rebuild, which isn't worth the migration risk on a live
-    # DB. Code-side, the states.py constants are the enforcement that covers both.
-    _status_ck = ", ".join(f"'{s}'" for s in STATUSES)
-    _verdict_ck = ", ".join(f"'{v}'" for v in VERDICTS)
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS jobs (
+def _jobs_table_sql(name, if_not_exists=False):
+    """The ONE authoritative jobs DDL — used by get_db's CREATE IF NOT EXISTS and by
+    _rebuild_for_stale_checks' table swap, so the two can never drift. The status/verdict
+    CHECKs are enforced on fresh databases; a pre-CHECK DB is covered by the code-side
+    states.py constants, and a DB whose baked-in CHECK has fallen behind a grown
+    STATUSES/VERDICTS is rebuilt once by _rebuild_for_stale_checks (a stale CHECK doesn't
+    just under-enforce — it REJECTS newly-legal values and aborts the run)."""
+    _status_ck = sql_list(STATUSES)
+    _verdict_ck = sql_list(VERDICTS)
+    ine = "IF NOT EXISTS " if if_not_exists else ""
+    return f"""
+        CREATE TABLE {ine}{name} (
             job_url      TEXT PRIMARY KEY,
             title        TEXT,
             company      TEXT,
@@ -358,7 +362,7 @@ def get_db(cfg):
             salary_max   REAL,
             description  TEXT,
             status       TEXT CHECK (status IN ({_status_ck})),   -- see states.py
-            verdict      TEXT CHECK (verdict IN ({_verdict_ck})), -- PASS | GATE_FAIL | RECRUITER_ONLY
+            verdict      TEXT CHECK (verdict IN ({_verdict_ck})), -- see states.VERDICT_FAVOR
             failed_gate  TEXT,
             fit_score    INTEGER,
             bucket       INTEGER, -- 1 | 2 | 3 (channel routing; null for gate fails)
@@ -376,12 +380,20 @@ def get_db(cfg):
             filter_date  TEXT,    -- date the override was set
             source       TEXT     -- where the posting came from: 'linkedin' | 'adzuna' | an ATS board ('greenhouse' | 'lever' | 'ashby')
         )
-    """)
+    """
+
+
+def get_db(cfg):
+    conn = connect_db(cfg)
+    conn.execute(_jobs_table_sql("jobs", if_not_exists=True))
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;
     # index it so chain resolution is O(chain) not O(table).
     conn.execute("CREATE INDEX IF NOT EXISTS idx_repost_of ON jobs(repost_of)")
+    # Every run stage and both repost-skip reconcile passes gate on status; without this the
+    # reverse passes (and the per-click dupe sweeps in the web UI) full-scan the table.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs(status)")
     conn.commit()
     return conn
 
@@ -421,8 +433,121 @@ def _migrate(conn):
         print("[migrate] backfilled jobs.source='linkedin' for existing rows")
     conn.commit()
     _migrate_applied_to_status(conn, cols)
+    _rebuild_for_stale_checks(conn)
     _backfill_fingerprints(conn)
     _recompute_fingerprints(conn)
+
+
+def _check_clause_values(sql, column):
+    """The raw text inside `column`'s CHECK (... IN (<here>)) clause of a stored CREATE TABLE,
+    or None when that column has no CHECK. Probing PER CLAUSE matters: the stored DDL keeps
+    column comments (which quote words like 'manual', 'linkedin', 'adzuna') and the OTHER
+    vocabulary's CHECK — a whole-DDL substring test would let any such text mask a value
+    genuinely missing from its own CHECK, silently disabling the rebuild. Identifier quotes
+    are tolerated (["'`]?): third-party DB tools commonly rewrite DDL with quoted column
+    names on their own table edits, and a probe that reads that as 'no CHECK' would skip the
+    rebuild while the stale CHECK keeps aborting every run."""
+    q = r"[\"'`]?"
+    m = re.search(
+        rf"\b{q}{column}{q}[^,]*?CHECK\s*\(\s*{q}{column}{q}\s+IN\s*\(([^)]*)\)", sql)
+    return m.group(1) if m else None
+
+
+def _rebuild_for_stale_checks(conn):
+    """One-shot table swap for a DB whose baked-in status/verdict CHECK predates the current
+    STATUSES/VERDICTS. SQLite freezes CHECKs at CREATE TABLE time and can't ALTER them, so a
+    DB created under an older vocabulary REJECTS a newly-added legal value (IntegrityError in
+    the deliberately-unguarded run stages — every run aborts). Idempotent: no-op for
+    pre-CHECK DBs (code-side constants remain their enforcement) and for DBs whose CHECKs
+    already name every current value. Runs AFTER the column migrations so the old table
+    carries the full current column set."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+    ).fetchone()
+    sql = (row[0] if row else "") or ""
+    if "CHECK" not in sql:
+        return
+    missing = []
+    parsed_any = False
+    for column, vocab in (("status", STATUSES), ("verdict", VERDICTS)):
+        clause = _check_clause_values(sql, column)
+        if clause is None:
+            continue  # this column carries no parseable CHECK
+        parsed_any = True
+        missing += [v for v in vocab if f"'{v}'" not in clause]
+    if not parsed_any:
+        # A CHECK exists but neither clause parses (table-level CHECK, exotic tool-rewritten
+        # DDL). Unverifiable staleness is treated as stale: the rebuild is idempotent and
+        # one-shot (its own output parses), while skipping could leave a stale CHECK aborting
+        # every run with no message.
+        missing = ["<unparseable CHECK — rebuilding to the canonical schema>"]
+    if not missing:
+        return
+    # A row holding a value OUTSIDE the current vocabulary (a renamed/removed status, a
+    # hand-edited typo) would make the copy below raise a bare IntegrityError inside get_db —
+    # bricking every command, including read-only ones, with no way to fix the data first.
+    # Fail loud and actionable instead.
+    _status_sql = sql_list(STATUSES)
+    _verdict_sql = sql_list(VERDICTS)
+    bad = conn.execute(
+        f"SELECT DISTINCT status FROM jobs WHERE status IS NOT NULL "
+        f"AND status NOT IN ({_status_sql}) "
+        f"UNION SELECT DISTINCT verdict FROM jobs WHERE verdict IS NOT NULL "
+        f"AND verdict NOT IN ({_verdict_sql})"
+    ).fetchall()
+    if bad:
+        vals = ", ".join(repr(r[0]) for r in bad)
+        # The OLD table's frozen CHECK rejects any value it doesn't already contain, so
+        # "update to the new value" would itself raise IntegrityError — the escape hatch is a
+        # value present in BOTH vocabularies (empirically verified: updating to one, then
+        # rerunning, rebuilds cleanly).
+        both = [v for v in (*STATUSES, *VERDICTS)
+                if any(f"'{v}'" in (_check_clause_values(sql, c) or "")
+                       for c in ("status", "verdict"))]
+        hint = (f" (e.g. {', '.join(repr(v) for v in both[:4])})" if both else "")
+        raise RuntimeError(
+            f"jobs.db needs a schema rebuild (CHECK lacks: {', '.join(missing)}) but holds "
+            f"off-vocabulary values the current CHECKs would reject: {vals}. "
+            f"UPDATE those rows to a value the OLD schema also accepts{hint}, "
+            f"then rerun — the rebuild will then widen the CHECKs."
+        )
+    # BEGIN IMMEDIATE: make the swap's atomicity EXPLICIT rather than an accident of Python
+    # sqlite3's legacy implicit-transaction mode (under autocommit semantics, a crash between
+    # DROP TABLE jobs and the RENAME would leave no jobs table — the next startup would mint
+    # an empty one and strand all data in jobs_new). Also blocks a concurrent writer mid-swap.
+    conn.execute("DROP TABLE IF EXISTS jobs_new")  # leftover from a crashed prior rebuild
+    if conn.in_transaction:
+        # Pin the invariant the BEGIN below depends on: every migration step before this one
+        # commits its work. An uncommitted statement here would make BEGIN raise.
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(_jobs_table_sql("jobs_new"))
+    # One PRAGMA read feeds both views of the old table (names for the copy list, full row
+    # for type/NOT NULL/DEFAULT reconstruction) so the two can't diverge.
+    old_info = {r[1]: r for r in conn.execute("PRAGMA table_info(jobs)")}
+    new_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs_new)")}
+    # A hand-ALTERed extra column must survive the swap — recreate it on jobs_new rather than
+    # silently dropping the user's data (this is a single-user tool; ad-hoc columns happen).
+    # Identifiers are quoted (a column named `order` or "my notes" is legal), and the
+    # NOT NULL/DEFAULT halves of the declaration are carried from PRAGMA table_info.
+    for col, info in old_info.items():
+        if col not in new_cols:
+            decl = info[2] or "TEXT"
+            if info[4] is not None:   # dflt_value — already SQL-literal text
+                decl += f" DEFAULT {info[4]}"
+            if info[3] and info[4] is not None:  # notnull — ADD COLUMN requires a default
+                decl += " NOT NULL"
+            elif info[3]:
+                print(f"[migrate] note: NOT NULL on jobs.{col} could not be carried "
+                      f"(no default) — data preserved, constraint dropped")
+            conn.execute(f'ALTER TABLE jobs_new ADD COLUMN "{col}" {decl}')
+            print(f"[migrate] preserved non-standard column jobs.{col} through the rebuild")
+    cols_sql = ", ".join(f'"{c}"' for c in old_info)
+    conn.execute(f"INSERT INTO jobs_new ({cols_sql}) SELECT {cols_sql} FROM jobs")
+    conn.execute("DROP TABLE jobs")  # also drops the indexes; get_db recreates them after
+    conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
+    conn.commit()
+    print(f"[migrate] rebuilt jobs table — stale CHECK constraint lacked: {', '.join(missing)}")
 
 
 def _migrate_applied_to_status(conn, cols):

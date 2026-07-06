@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 
 from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
@@ -164,9 +165,51 @@ def _insert_posting(conn, *, url, title, company, location, search_name, tier,
 #     so these rows are flagged in the report/UI (the eval judges them on thin text);
 #   * salaries may be ML-PREDICTED (the `salary_is_predicted` flag). A predicted number must
 #     not reach the deterministic salary filter, so we store it as NULL ("unstated", kept).
+#   * `redirect_url` embeds a PER-REQUEST tracking token (?se=...), so the same ad gets a
+#     different URL on every API call — stored raw it defeats the job_url primary key and the
+#     same ad re-inserts (and re-bills the eval) every run. We therefore store a canonical URL
+#     built from the stable ad id instead (see _adzuna_job_url).
 # Everything else flows through the same dedup/eval/report path as LinkedIn.
 
 ADZUNA_SEARCH_URL = "https://api.adzuna.com/v1/api/jobs/{country}/search/1"
+# Ad id as it appears in either observed redirect_url shape: /land/ad/<id>?se=... (tracked)
+# and /details/<id>?utm_... — [0-9] on purpose (\d also matches Unicode digits, which the
+# id-field guard below rejects; the two paths must agree or one ad splits across two PKs).
+_ADZUNA_AD_ID = re.compile(r"/(?:land/ad|details)/([0-9]+)")
+
+
+def _adzuna_job_url(r):
+    """The canonical, stable job_url for an Adzuna result dict: built from the ad id (the `id`
+    field, else parsed out of redirect_url's PATH) and redirect_url's own host — the host
+    follows the configured country (adzuna.co.uk for gb, ...), so hardcoding www.adzuna.com
+    would bake wrong-site links into the PK for non-us configs. Re-serves of the same ad then
+    dedup on the primary key at insert. Falls back to the raw redirect_url whenever a canonical
+    can't be built confidently (unparseable/scheme-less/malformed URL, no id) — a churny row
+    beats a dropped posting or a wrong-host PK (the fingerprint still catches its reposts).
+    Returns None when the result has no redirect_url at all: same skip as before this helper
+    existed (an id-only degenerate result carries no title/company/description worth a row)."""
+    redirect = r.get("redirect_url")
+    if not isinstance(redirect, str) or not redirect:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(redirect)
+    except ValueError:
+        # Malformed authority (e.g. an unclosed IPv6 bracket) — one bad row must not abort
+        # the whole Adzuna batch via _run_fetch_stage.
+        return redirect
+    # fullmatch on ASCII digits (str.isdigit also accepts Unicode digits, which would mint a
+    # URL the regex-parsed form of the same ad never matches). `or ""` also rejects id=0/None.
+    ad_id = str(r.get("id") or "")
+    if not re.fullmatch(r"[0-9]+", ad_id):
+        # Search the PATH only: an id inside the query string (?return_to=/details/999) is some
+        # OTHER page's id — minting a canonical from it would collide distinct ads on one PK.
+        m = _ADZUNA_AD_ID.search(parts.path)
+        if not m:
+            return redirect
+        ad_id = m.group(1)
+    if not parts.hostname:
+        return redirect  # scheme-less/relative URL: no trustworthy host — keep the raw URL
+    return f"https://{parts.hostname}/details/{ad_id}"
 # Adzuna keyword params we forward from a query block; anything else in the block is ignored.
 # All are AND-combined by Adzuna; within `what_or`/`what_exclude` the words are any-of/none-of.
 _ADZUNA_WHAT_KEYS = ("what", "what_and", "what_phrase", "what_or", "what_exclude")
@@ -174,7 +217,6 @@ _ADZUNA_WHAT_KEYS = ("what", "what_and", "what_phrase", "what_or", "what_exclude
 
 def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
     """One Adzuna API call. `query` is a dict of what_* params. Returns the results list."""
-    import urllib.parse
     import urllib.request
 
     params = {
@@ -251,8 +293,8 @@ def fetch_adzuna(cfg, conn):
                 continue
 
             for r in results:
-                url = r.get("redirect_url")
-                if not isinstance(url, str) or not url:
+                url = _adzuna_job_url(r)
+                if not url:
                     continue
                 title = r.get("title")
                 company = (r.get("company") or {}).get("display_name")

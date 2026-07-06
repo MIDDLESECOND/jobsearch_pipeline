@@ -44,6 +44,26 @@ def test_rule_hit_empty_rule():
     assert filters._rule_hit({}, "anything") is None
 
 
+def test_apply_hard_filters_never_clobbers_existing_attribution(conn, monkeypatch):
+    """A row rejected while it sat in 'error' returns through requeue as 'new' still carrying
+    filter_source='manual' + the user's gate. The rule pass must leave it alone: re-stamping
+    it 'rule:<name>' would silently replace the manual attribution, and `reject --undo`
+    (which clears only 'manual' rows) would then report success while clearing nothing."""
+    from conftest import make_job
+    make_job(conn, job_url="u", status="new", verdict=None,
+             description="requires TS/SCI clearance",
+             filter_source="manual", filter_gate="employment_type",
+             filter_date="2026-07-01")
+    monkeypatch.setattr(filters, "load_filters",
+                        lambda: [{"name": "clearance", "gate": "work_auth", "any": ["TS/SCI"]}])
+    filters.apply_hard_filters({"settings": {}}, conn)
+    row = conn.execute(
+        "SELECT filter_source, filter_gate, status FROM jobs WHERE job_url='u'").fetchone()
+    assert row["filter_source"] == "manual"          # attribution preserved
+    assert row["filter_gate"] == "employment_type"   # user's gate preserved
+    assert row["status"] == "new"  # decided skip pass (key: own stamp) parks it pre-eval
+
+
 def test_load_filters_warns_on_broken_pattern_but_keeps_rule(tmp_path, monkeypatch, capsys):
     # A hand-edited filters.yaml with a broken `re:` must WARN (not drop the rule and not
     # crash), so the user learns the rule silently matches nothing — the "or loaded" half of

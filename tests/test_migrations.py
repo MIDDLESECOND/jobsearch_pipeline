@@ -177,3 +177,46 @@ def test_rebuild_refuses_off_vocabulary_values_loudly(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError, match="gone_status"):
         core.get_db({"settings": {"db_path": path}}).close()
+
+
+def test_connections_run_in_wal_mode(tmp_path):
+    # connect_db switches the DB to WAL so a slow concurrent reader (the UI's full-table
+    # view scan) can never block an eval write past the busy timeout — the failure mode
+    # that discarded a paid eval result mid-run. (Persistence of the mode in the file is
+    # SQLite's own contract — only the switch itself is ours to pin.)
+    path = str(tmp_path / "wal.db")
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()
+
+
+def test_wal_conversion_lock_loss_degrades_gracefully(tmp_path, monkeypatch, capsys):
+    # If the one-time WAL conversion loses its lock race, connect_db must hand back a
+    # usable rollback-mode connection and warn once — not raise, and not stall on the 30s
+    # busy timeout. A concurrent write lock makes the conversion fail fast.
+    monkeypatch.setattr(core, "_wal_warned", False)
+    path = str(tmp_path / "locked.db")
+    holder = sqlite3.connect(path)
+    holder.execute("CREATE TABLE t (x)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")  # write lock: the mode switch cannot proceed
+    try:
+        conn = core.connect_db({"settings": {"db_path": path}})
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+            assert conn.execute("SELECT count(*) FROM t").fetchone()[0] == 0  # still usable
+        finally:
+            conn.close()
+    finally:
+        holder.rollback()
+        holder.close()
+    assert "[db] not in WAL mode" in capsys.readouterr().err
+    # And the busy timeout was restored after the capped conversion attempt: a second
+    # connect (lock now released) converts, proving the degrade was per-attempt, not sticky.
+    conn = core.connect_db({"settings": {"db_path": path}})
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()

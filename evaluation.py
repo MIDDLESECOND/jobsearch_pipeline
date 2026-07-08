@@ -376,18 +376,27 @@ def evaluate_new_jobs(cfg, conn):
                 usage_cache_read += cr
                 usage_cache_write += cw
                 usage_out += tout
-                try:
-                    _write_result(job_url, result)
-                except Exception as e:
-                    # A write failure (e.g. sqlite 'database is locked' from a concurrent
-                    # run) must not abort the batch. Roll back so the failed row's staged
-                    # UPDATE isn't later flushed by the next row's commit — it genuinely
-                    # stays 'new' for a clean retry next run (matching the log below).
+                for attempt in (1, 2):
                     try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    print(f"[eval] DB write failed for {job_url} ({e}); left 'new'", file=sys.stderr)
+                        _write_result(job_url, result)
+                        break
+                    except Exception as e:
+                        # A write failure (sqlite 'database is locked' from a concurrent
+                        # run, a transient disk error) must not abort the batch. Roll back
+                        # so the failed row's staged UPDATE isn't later flushed by the next
+                        # row's commit. The result in hand is already PAID for, so retry
+                        # the write once (milliseconds vs re-billing the eval) before
+                        # leaving the row 'new' for a clean re-eval next run (matching the
+                        # log below).
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        if attempt == 1:
+                            time.sleep(1)
+                            continue
+                        print(f"[eval] DB write failed for {job_url} ({e}); left 'new'",
+                              file=sys.stderr)
         except KeyboardInterrupt:
             # Default pool exit calls shutdown(wait=True), which would drain the ENTIRE
             # remaining queue (hours of paid calls) before Ctrl-C takes effect. Cancel the

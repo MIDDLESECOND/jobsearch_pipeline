@@ -325,8 +325,11 @@ def load_config():
         return validate_config(yaml.safe_load(f))
 
 
+_wal_warned = False  # connect_db's not-in-WAL-mode warning fires once per process
+
+
 def connect_db(cfg):
-    """A plain connection (row factory + busy timeout), with NO schema/migration work — for
+    """A plain connection (row factory + busy timeout + WAL), with NO schema/migration work — for
     callers that open a connection per request (the web UI), where re-running the idempotent
     DDL/migration pass on every request is pure waste. Run get_db once at process start to
     ensure the schema, then connect_db afterwards.
@@ -335,6 +338,30 @@ def connect_db(cfg):
     open during the one-time fingerprint recompute waits it out instead of erroring."""
     conn = sqlite3.connect(BASE_DIR / cfg["settings"]["db_path"], timeout=30)
     conn.row_factory = sqlite3.Row
+    # WAL, so readers and the writer never block each other. In the default rollback-journal
+    # mode ANY reader blocks a writer's COMMIT — a slow UI table scan concurrent with a run
+    # once held its read lock past the 30s timeout above, and the eval write it starved was
+    # discarded (the paid result lost, the row retried next run). WAL leaves only
+    # writer-vs-writer contention, which that timeout comfortably covers. The mode persists
+    # in the DB file (re-issuing it on a converted DB is an instant no-op); the
+    # jobs.db-wal/-shm sidecars it creates are part of the database while anything holds it
+    # open (gitignored — never delete a hot -wal, it carries committed rows).
+    try:
+        # The one-time conversion needs a brief exclusive lock. Don't let it inherit the
+        # 30s busy timeout: during the conversion window a long-lived concurrent reader
+        # would stall EVERY open — each UI request — for the full 30s. Cap the wait at 1s;
+        # a lost race degrades below and the next connect retries the switch.
+        conn.execute("PRAGMA busy_timeout=1000")
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    except sqlite3.OperationalError as e:  # locked/read-only. Anything else (a corrupt DB
+        mode = f"switch failed: {e}"       # file raises DatabaseError) fails loud instead.
+    finally:
+        conn.execute("PRAGMA busy_timeout=30000")  # restore parity with timeout=30 above
+    global _wal_warned
+    if mode != "wal" and not _wal_warned:
+        _wal_warned = True  # once per process — a stuck conversion must not spam per request
+        print(f"[db] not in WAL mode ({mode}); a concurrent reader can starve writes past "
+              "the busy timeout until a later connect completes the switch", file=sys.stderr)
     return conn
 
 

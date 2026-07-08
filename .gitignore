@@ -30,6 +30,10 @@ filters.yaml
 # ---- Generated / runtime data (third-party scraped content, run output) ----
 jobs.db
 *.db
+# SQLite sidecars (WAL mode: -wal/-shm; rollback journal: -journal)
+*.db-wal
+*.db-shm
+*.db-journal
 logs/
 reports/
 compare_results.json

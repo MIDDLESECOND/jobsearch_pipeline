@@ -271,7 +271,9 @@ def main():
     ap.add_argument("--days", type=int, default=90,
                     help="`prune`: age floor in days — only rows first seen before this are touched (default 90)")
     ap.add_argument("--vacuum", action="store_true",
-                    help="`prune`: also VACUUM so the freed pages shrink jobs.db on disk")
+                    help="`prune`: also VACUUM so the freed pages shrink jobs.db on disk "
+                         "(under WAL the shrink lands at checkpoint — i.e. once no other "
+                         "process, e.g. the web UI, has the DB open)")
     args = ap.parse_args()
 
     # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's

@@ -112,7 +112,10 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
   non-additive mechanism: a one-shot row-preserving table rebuild when a DB's baked-in
   status/verdict CHECK falls behind `states.py` (`_rebuild_for_stale_checks` — SQLite can't ALTER
   a CHECK, and a stale one aborts every run). Add schema changes there; there are no separate
-  migration files.
+  migration files. The DB runs in WAL mode: the `jobs.db-wal`/`jobs.db-shm` sidecars are part
+  of the database whenever a process has it open — copy/back up `jobs.db` only when nothing has
+  it open (a clean close checkpoints and removes them), and never delete a hot `-wal` (it holds
+  committed rows).
 
 - **Dedup is two-layer and guards against double-applying.** Beyond the `job_url` primary key, a
   content fingerprint (normalized company+location + **exact** normalized title) catches LinkedIn

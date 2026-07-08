@@ -82,6 +82,8 @@ reason a high-scoring role still won't convert cold.
 - If *applied-vs-research* (`ai_applied_vs_research`) scores 0–1 → near-disqualifying regardless of total (a research role wearing an architect title).
 - **If *artifact-evidences-required-depth* (`ai_artifact_depth`) scores 0 → the verdict is CAPPED at "RECRUITER_ONLY," regardless of total.** A 16/18 with this line at 0 is NOT the same role as a 16/18 with it at 3. Cold-applying the former is the "50/0" pattern. It does not become a PASS just because every other line is strong.
 
+**Enablement-cluster (assistive flag, not a cap).** The pure-enablement false positive: a role whose *entire* responsibility set is awareness campaigns, workshops/training, evangelism, adoption playbooks, and tool-selection guidance, with **no build/own/ship verbs anywhere** (strongest tell: self-declared "not hands-on" language in the posting itself). It still passes the gates — it IS applied-AI work, not research — so do not gate-fail it: emit an `enablement-cluster` flag, score `title_trajectory` honestly (0–1), and route it as deadline insurance (below Bucket 3 priority; see Part 2.5). Enablement-in-title with real build content (enablement *engineer/developer* roles) gets no flag — read the responsibilities, not the title. Decide deliberately whether this cluster should harden into a role-substance gate fail once your deadline pressure lifts (e.g., after an offer lands).
+
 ---
 
 ## PART 2.5 — BUCKET + CHANNEL ROUTING (read before setting the verdict)
@@ -111,9 +113,13 @@ where the required bar is "you've shipped a working AI workflow," not "you've bu
 - **Channel: cold-apply is fine — this is where cold conversion is realistic.** This is the
   slice where AI-realism and landability *agree*. Concentrate cold-application effort here.
 
+**Enablement-cluster overlay:** flagged pure-enablement roles (see Part 2) route like Bucket 2 —
+cold-apply OK as deadline insurance, always below Bucket 3 in priority.
+
 **Routing summary:** Cold applications (verdict **PASS**) → Bucket 3 first, small-gap Bucket 2
-second. Bucket 1 → verdict **RECRUITER_ONLY**, recruiters and referrals only. The fix for a
-50/0 is routing, not de-prioritizing AI.
+second, flagged `enablement-cluster` roles as insurance behind both. Bucket 1 → verdict
+**RECRUITER_ONLY**, recruiters and referrals only. The fix for a 50/0 is routing, not
+de-prioritizing AI.
 
 ---
 

@@ -7,6 +7,40 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-06 — `enablement-cluster` flag + deadline-insurance routing (guide only, no code)
+
+### Why
+The [redacted] "Senior Technology Consultant – GenAI & AI Adoption" posting passed the eval
+(PASS, 15/18, bucket 3) while manual triage failed it categorically on role substance —
+the second such divergence ([redacted] "AI Training and Adoption Consultant",
+2026-07-01). Investigation showed the pipeline followed its spec: the guide's
+role_substance gate only screens out *research* roles, and the management-drift note is
+explicitly flag-only "until the pattern proves structural." It now has. But with the
+deadline and the 50/0 cold-conversion history, pure-enablement roles are also the
+highest-conversion slice of the funnel (~4-5 enablement-titled passes/day), so hiding
+them in GATE_FAIL was rejected in favor of keeping them visible as flagged insurance.
+
+### What changed (evaluation_guide.md + evaluation_guide.example.md — data, not code)
+- **New `enablement-cluster` assistive flag** (Part 2, sibling of management-drift):
+  responsibilities are entirely awareness/workshops/evangelism/adoption-playbooks with no
+  build/own/ship verbs (strongest tell: self-declared "not hands-on" language). Gates
+  still PASS; `title_trajectory` scored 0–1. Distinct from management-drift (managing
+  real delivery) and from enablement-*engineer* roles with build content (no flag).
+- **Part 2.5 insurance overlay:** flagged roles route like Bucket 2 — cold-apply OK,
+  always below Bucket 3 in priority; permanent-FTE only (many are staffing-vendor seats).
+- **Sunset written into the guide:** once an offer lands or the deadline passes,
+  the cluster hardens into a role_substance hard FAIL.
+- **Worked Example D ([redacted])** added (personal `evaluation_guide.md` only — the committed
+  `.example` template carries the flag + routing text but still ends at Example C); two
+  backtest cases ([redacted], [redacted]) added to `tests/validation/backtest_v2.py`
+  asserting PASS + `enablement-cluster` flag.
+- Also noted during investigation: `filters.yaml` has never existed, so the deterministic
+  hard-filter layer has been a no-op every run. Left as-is deliberately — a title-based
+  enablement rule was rejected (enablement-titled ≠ pure enablement; a major bank's
+  "Legal GenAI Enablement – AI Practitioner" scored 18/18).
+
+---
+
 ## 2026-07-05 — one eval per role chain; Adzuna URLs canonicalized to the ad id
 
 ### Why

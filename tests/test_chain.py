@@ -408,7 +408,7 @@ def test_dupe_commit_links_and_propagates_then_unlink_restores(conn):
     assert late["app_status"] == "applied"
 
     # Undo splits them back into independent chains.
-    ok, msg, _ = chain.dupe_unlink(conn, late)
+    ok, msg, _, _ = chain.dupe_unlink(conn, late)
     assert ok
     late = conn.execute("SELECT * FROM jobs WHERE job_url='late'").fetchone()
     assert late["repost_of"] is None
@@ -435,7 +435,7 @@ def test_dupe_commit_defers_eval_skip_to_run_and_unlink_restores(conn):
     late = conn.execute("SELECT * FROM jobs WHERE job_url='late'").fetchone()
     assert late["verdict"] is None          # read through the chain, never copied
 
-    ok, _, _ = chain.dupe_unlink(conn, late)
+    ok, _, _, _ = chain.dupe_unlink(conn, late)
     assert ok
     assert job_status(conn, "late") == "new"  # its own chain again → needs its own eval
 
@@ -471,3 +471,104 @@ def test_dupe_merge_propagates_reject_without_clobbering_rule(conn):
             for r in conn.execute("SELECT job_url, filter_source FROM jobs")}
     assert rows["late"] == "manual"            # was un-attributed → filled in by the merge
     assert rows["late_rule"] == "rule:clearance"  # rule attribution left intact
+
+
+# ----- exempt contract (the UI hide-filter's keep-visible lists) ----------------
+#
+# Four review rounds of vanishing-card bugs traced to exemption edge cases, so the
+# computation moved server-side; these pin the contract so a refactor of the pre/post-
+# mutation state reads can't silently invert the sets. The operative rule: exempt =
+# rows whose DISPLAYED state flips undecided -> decided (the only transition the hide
+# filter acts on), plus the named interaction handle(s). Displayed state is CHAIN-level.
+
+def _row(conn, url):
+    return conn.execute("SELECT * FROM jobs WHERE job_url=?", (url,)).fetchone()
+
+
+def test_forward_exempt_on_undecided_chain_is_whole_chain(conn):
+    make_job(conn, job_url="c")
+    make_job(conn, job_url="r1", repost_of="c")
+    ok, _, affected, exempt = chain.mark_posting(conn, _row(conn, "r1"), "applied")
+    assert ok
+    assert exempt == ["c", "r1"] == affected  # every member's displayed state flipped
+
+
+def test_forward_exempt_on_already_decided_chain_is_named_only(conn):
+    # A rule-stamped sibling means the chain already DISPLAYS decided — a further forward
+    # override exempts only its own handle; deliberately-hidden members stay hidden.
+    make_job(conn, job_url="c")
+    make_job(conn, job_url="r1", repost_of="c", filter_source="rule:clearance",
+             filter_gate="work_auth")
+    ok, _, _, exempt = chain.mark_posting(conn, _row(conn, "c"), "applied")
+    assert ok
+    assert exempt == ["c"]
+
+
+def test_undo_exempt_empty_when_chain_ends_undecided(conn):
+    # Nothing gets hidden by an undo that leaves the chain undecided — no exemptions.
+    make_job(conn, job_url="c", app_status="applied", status_date="2026-06-01")
+    make_job(conn, job_url="r1", repost_of="c", app_status="applied",
+             status_date="2026-06-01")
+    ok, _, _, exempt = chain.mark_posting(conn, _row(conn, "c"), None)
+    assert ok
+    assert exempt == []
+
+
+def test_undo_exempt_rule_survivor_yields_named_handle_only(conn):
+    # Undoing a manual reject leaves a sibling's rule stamp (clear_reject is manual-only):
+    # the chain still displays rejected, so the clicked card stays reachable — but the rule
+    # row is display-only (no undo control in the UI) and stays unexempted/hidden.
+    make_job(conn, job_url="c", filter_source="manual", filter_gate="other",
+             filter_date="2026-06-01")
+    make_job(conn, job_url="r1", repost_of="c", filter_source="rule:clearance",
+             filter_gate="work_auth")
+    ok, _, _, exempt = chain.reject_posting(conn, _row(conn, "c"), "other", undo=True)
+    assert ok
+    assert exempt == ["c"]
+
+
+def test_undo_exempt_manual_survivor_included_as_next_handle(conn):
+    # Mixed chain: undoing the app decision leaves a sibling's MANUAL reject — the chain
+    # still displays decided and that sibling carries the next undo control, so both the
+    # named row and the survivor are exempt (the UI reloads rather than patching in place).
+    make_job(conn, job_url="c", app_status="applied", status_date="2026-06-01")
+    make_job(conn, job_url="r1", repost_of="c", app_status="applied",
+             status_date="2026-06-01", filter_source="manual", filter_gate="other",
+             filter_date="2026-06-01")
+    ok, _, _, exempt = chain.mark_posting(conn, _row(conn, "c"), None)
+    assert ok
+    assert exempt == ["c", "r1"]
+
+
+def test_dupe_commit_exempt_flips_only_the_undecided_side(conn):
+    # The decided chain includes an UNSTAMPED relisting (fetched after the decision — the
+    # skip passes label status only, never app_status): it already displays the decision
+    # chain-level and must NOT be exempted; the undecided side flips and must be.
+    make_job(conn, job_url="w-can", first_seen="2026-06-01T00:00:00",
+             app_status="applied", status_date="2026-06-02")
+    make_job(conn, job_url="w-rep", repost_of="w-can", first_seen="2026-06-03T00:00:00",
+             status="repost_decided", verdict=None)
+    make_job(conn, job_url="l-can", first_seen="2026-06-05T00:00:00")
+    plan, err = chain.dupe_resolve(conn, "l-can", "w-can")
+    assert err is None
+    _, exempt = chain.dupe_commit(conn, plan)
+    assert "w-rep" not in exempt              # displayed decided all along
+    assert set(exempt) == {"l-can", "w-can"}  # the flipped side + the named pair
+
+
+def test_dupe_unlink_exempt_is_the_interaction_handles(conn):
+    # Merge loser chain {l-can, l-rep} under decided w-can, then unlink by clicking the
+    # CHILD: exempt = clicked row + restored loser canonical + old winner canonical — the
+    # three cards a follow-up undo of the propagated decision may need.
+    make_job(conn, job_url="w-can", first_seen="2026-06-01T00:00:00",
+             app_status="applied", status_date="2026-06-02")
+    make_job(conn, job_url="l-can", first_seen="2026-06-05T00:00:00")
+    make_job(conn, job_url="l-rep", repost_of="l-can", first_seen="2026-06-06T00:00:00")
+    plan, err = chain.dupe_resolve(conn, "l-can", "w-can")
+    assert err is None
+    chain.dupe_commit(conn, plan)
+    child = _row(conn, "l-rep")
+    assert child["repost_source"] == "manual:l-can"
+    ok, _, _, exempt = chain.dupe_unlink(conn, child)
+    assert ok
+    assert set(exempt) == {"l-rep", "l-can", "w-can"}

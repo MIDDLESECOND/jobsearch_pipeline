@@ -78,6 +78,7 @@
     <button class="tab" data-view="passed">Passed</button>
   </div>
   <input type="date" id="date" value="{{ today }}">
+  <button id="toggleDecided" class="tab" style="display:none"></button>
   <span id="count"></span>
   <div id="linkbar"></div>
 </header>
@@ -114,6 +115,28 @@ const ASSISTANT = (() => {
 const SEND_LABEL = ASSISTANT ? "Send to " + ASSISTANT : "Copy JD";
 const TODAY = {{ today | tojson }};
 let view = "today";
+// localStorage access can throw outright (browser set to block all site data) — a top-level
+// throw would kill this whole script block, so route through a wrapper that degrades to
+// "works, just doesn't persist".
+const storage = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+// Today-view display filter: hide cards that arrived already-decided (with multiple runs a day,
+// earlier batches are mostly triaged clutter). Persisted; default hidden. Today-only — Backlog
+// already excludes decided rows server-side, and Applied/Passed ARE decision history.
+let hideDecided = storage.get("hideDecided") !== "0";
+// Cards the hide-decided filter must keep visible this session — so a card the user just acted
+// on can't vanish and take its Undo button with it. Fed by the server's per-operation `exempt`
+// lists (chain.py computes which rows' displayed state each mutation flips), NOT the whole
+// affected chain: over-exempting would resurface long-hidden decided relistings. Undo actions
+// additionally drop their chain's now-stale grants first (see decide()).
+const decidedThisSession = new Set();
+
+// The ONE feeder for decidedThisSession. Mutation handlers pass the server's data.exempt
+// verbatim — the curation lives in chain.py's _forward_exempt/_undo_exempt/dupe cores, not
+// here. Catch paths pass the clicked url as a best-effort fallback for a lost response.
+function exemptFromHide(urls) { for (const u of urls || []) decidedThisSession.add(u); }
 // The posting pinned as the anchor for manual duplicate-linking, or null. Kept in module state
 // (not reset by load()) so it survives tab/date changes — you can pin one card, navigate to a
 // different day or the Backlog, and click the duplicate there. Mirrors `pipeline dupe`.
@@ -121,11 +144,32 @@ let linkAnchor = null;
 // Guards against a second link/unlink POST while one is in flight (the buttons render on every
 // card, so a per-card .busy isn't enough — a fast click on two different targets would double-fire).
 let linkBusy = false;
+// Count of in-flight /api/decision POSTs. The hide-decided toggle and the link-mode controls
+// skip re-rendering while this or linkBusy is set — churn-avoidance, not correctness: a rebuild
+// mid-flight is SAFE (busyUrls re-locks the pending card, and decide() falls back to a reload
+// for its detached node), it just costs an extra refetch and a flash for nothing.
+let mutBusy = 0;
+// urls with a decision/dupe POST in flight. Two jobs, both load-bearing: card() re-applies the
+// .busy lock from this set so any rebuild recreates a pending card LOCKED instead of live (the
+// double-fire guard), and the handlers' entry checks use it to block keyboard re-activation
+// (.busy's pointer-events:none stops the mouse but not Enter on the focused button).
+const busyUrls = new Set();
 
-const tabs = document.querySelectorAll(".tab");
+// Selected by data-view — the semantic the click handler consumes — so a button that merely
+// shares the .tab pill style (#toggleDecided) can never be picked up as a view tab, even if it
+// later moves inside the .tabs container.
+const tabs = document.querySelectorAll(".tabs [data-view]");
 const dateInput = document.getElementById("date");
 const list = document.getElementById("list");
 const countEl = document.getElementById("count");
+const toggleDecidedBtn = document.getElementById("toggleDecided");
+
+toggleDecidedBtn.addEventListener("click", () => {
+  if (mutBusy || linkBusy) return;  // churn-avoidance while a mutation POST is mid-flight (see mutBusy)
+  hideDecided = !hideDecided;
+  render();
+  storage.set("hideDecided", hideDecided ? "1" : "0");  // best-effort — set() never throws
+});
 
 tabs.forEach(t => t.addEventListener("click", () => {
   tabs.forEach(x => x.classList.remove("active"));
@@ -182,7 +226,9 @@ function scoreLine(b) {
 
 function card(j) {
   const div = document.createElement("div");
-  div.className = "card";
+  // Re-apply the in-flight lock: a card rebuilt while its POST is pending must not come back
+  // with live buttons (double-fire) — see busyUrls.
+  div.className = busyUrls.has(j.job_url) ? "card busy" : "card";
   div.dataset.url = j.job_url;  // lets a decision update every affected (repost-chain) card
   const salary = fmtSalary(j.salary_min, j.salary_max);
   const score = j.fit_score != null ? `<span class="score">${j.fit_score}/18</span> (${j.band})` : "";
@@ -240,20 +286,26 @@ function card(j) {
     actions.appendChild(sel);
   }
 
-  // Manual duplicate-linking affordances. Sticky across reloads (card() re-reads linkAnchor),
-  // so you can pin one card and click its match in another tab/date.
+  appendLinkControls(actions, div, j);
+  return div;
+}
+
+// The manual duplicate-linking affordances — shared by card() and refreshLinkControls(), which
+// patches them in place on non-today views. Sticky across reloads (re-reads linkAnchor), so you
+// can pin one card and click its match in another tab/date. The buttons carry .linkctl so the
+// in-place patch can find and replace exactly them.
+function appendLinkControls(actions, div, j) {
+  div.classList.toggle("anchor", !!(linkAnchor && linkAnchor.job_url === j.job_url));
   if (linkAnchor && linkAnchor.job_url === j.job_url) {
-    div.classList.add("anchor");
-    actions.appendChild(btn("Cancel link", "undo", cancelLink));
+    actions.appendChild(btn("Cancel link", "undo linkctl", cancelLink));
   } else if (linkAnchor) {
-    actions.appendChild(btn("↩ same role", "dupe-target", () => completeLink(div, j)));
+    actions.appendChild(btn("↩ same role", "dupe-target linkctl", () => completeLink(div, j)));
   } else {
-    actions.appendChild(btn("⧉ duplicate", "dupe", () => startLink(j)));
+    actions.appendChild(btn("⧉ duplicate", "dupe linkctl", () => startLink(j)));
   }
   if (j.is_manual_repost) {
-    actions.appendChild(btn("Unlink dup", "undo", () => unlinkDup(div, j)));
+    actions.appendChild(btn("Unlink dup", "undo linkctl", () => unlinkDup(div, j)));
   }
-  return div;
 }
 
 function btn(label, cls, onClick) {
@@ -301,8 +353,36 @@ async function sendToAssistant(div, job_url) {
   }
 }
 
-function setCount(n) {
-  countEl.textContent = n + " posting" + (n === 1 ? "" : "s");
+function setCount(n, hidden = 0) {
+  countEl.textContent = n + " posting" + (n === 1 ? "" : "s")
+    + (hidden ? ` · ${hidden} decided hidden` : "");
+}
+
+// Shared POST for the three mutation handlers — one copy of the headers and of the 30s
+// timeout (a wedged server request, e.g. the jobs.db-on-USB hang, must not pin the busy
+// flags forever). Old browsers lack AbortSignal.timeout — degrade to no timeout rather
+// than a dead mutation surface.
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+    signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+      ? AbortSignal.timeout(30000) : undefined,
+  });
+  return res.json();
+}
+
+// Release an in-flight lock. Clears the set, unlocks the handler's captured node (may be
+// detached — harmless), AND unlocks any freshly-rendered card for the same url: the success
+// paths re-render BEFORE this cleanup runs, and card() bakes .busy from busyUrls, so without
+// the re-query the new card would stay locked forever.
+function releaseBusy(url, div) {
+  busyUrls.delete(url);
+  div.classList.remove("busy");
+  list.querySelectorAll(".card.busy").forEach(el => {
+    if (el.dataset.url === url) el.classList.remove("busy");
+  });
 }
 
 // Mirror server-side cmd_mark / cmd_reject on the local job object so we can update the card
@@ -322,40 +402,81 @@ function patchJob(j, action, gate) {
 }
 
 async function decide(div, j, action, gate) {
-  const v = view;  // capture: the user may switch tabs while the POST is in flight
+  // linkBusy: a chain merge/unlink is committing — don't race a decision against it.
+  // busyUrls: this url already has a POST in flight — .busy's pointer-events:none stops mouse
+  // re-clicks but NOT keyboard activation (Enter on the still-focused button), so guard by url.
+  if (linkBusy || busyUrls.has(j.job_url)) return;
+  const seq0 = loadSeq;  // capture: detect a load() racing this mutation (its rows may pre-date the commit)
   div.classList.add("busy");
+  busyUrls.add(j.job_url);
+  mutBusy++;
   try {
-    const res = await fetch("/api/decision", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job_url: j.job_url, action, gate}),
-    });
-    const data = await res.json();
-    if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
-    if (v !== view) { load(); return; }  // tab changed mid-flight — just reload the new view
-    patchJob(j, action, gate);
+    const data = await postJSON("/api/decision", {job_url: j.job_url, action, gate});
+    if (!data.ok) { alert(data.message || "failed"); return; }
     // The decision propagates across the repost chain, so more than the clicked card may change.
     const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
-    if (v === "today") {
-      // The clicked card still belongs to today's date — re-render it in place.
+    // Apply the server's exemption list (chain.py owns the curation). UNDO actions first drop
+    // the chain's existing grants — the forward action's exemptions are stale, which is how an
+    // undone reject stops leaking a rule-restamped sibling past the filter — then re-add the
+    // surviving handles. Forward actions ADD only: deleting here would wipe exemptions earned
+    // by EARLIER actions this session (a sibling decided minutes ago would vanish the moment a
+    // second operation touches its chain). Runs BEFORE any early return, so a committed
+    // decision can never re-hide the card and take its Undo button with it.
+    if (action === "undo_app" || action === "undo_reject") {
+      affected.forEach(u => decidedThisSession.delete(u));
+    }
+    exemptFromHide(data.exempt);
+    patchJob(j, action, gate);
+    // A load() raced this decision (tab/date change mid-flight — the only rebuild sources the
+    // entry guards don't block, and each bumps loadSeq): its rows may have been read before the
+    // commit — refetch rather than patch a snapshot that may not show it. Past this check,
+    // `view` is still the view the click happened in.
+    if (loadSeq !== seq0) { await load(); return; }
+    if (view === "today") {
+      // An undo that leaves the chain still displaying a decision (exempt non-empty: a
+      // sibling's manual reject or app_status survives) can't be patched in place — patchJob
+      // just synced this row's chain_* fields to its own nulls, which would render the card
+      // falsely undecided with live buttons. Refetch the truth.
+      if ((action === "undo_app" || action === "undo_reject") && data.exempt && data.exempt.length) {
+        await load(); return;
+      }
+      // Backstop, unreachable under the current entry guards (every render() caller is
+      // mutBusy/linkBusy-guarded and every load() bumps loadSeq, caught above): if a future
+      // rebuild source detaches this node, an in-place replace would be a silent no-op.
+      if (!div.isConnected) { await load(); return; }
+      // Re-render the clicked card in place, and refresh the toggle label (undoing an
+      // arrived-decided card changes the would-hide count).
       div.replaceWith(card(j));
-      // A chain sibling sharing today's view is rare; if one is present, reload to reflect it.
-      const sibling = [...list.querySelectorAll(".card")]
-        .some(el => el.dataset.url !== j.job_url && affected.has(el.dataset.url));
+      renderToggle();
+      // A chain sibling sharing today's view is rare; if one exists — even hidden by the decided
+      // filter, so scan jobsData rather than the DOM — reload to refresh its cached chain fields.
+      const sibling = jobsData.some(r => r.job_url !== j.job_url && affected.has(r.job_url));
       if (sibling) {
         const y = window.scrollY;  // the reload rebuilds the list and resets scroll to the top
-        await load();
-        window.scrollTo(0, y);     // same cards return in the same order → restore exact position
+        // Restore only if OUR reload reached the screen — a superseded load must not scroll
+        // whatever view replaced it to this view's offset.
+        if (await load()) window.scrollTo(0, y);
       }
     } else {
-      // backlog / applied / passed: every affected row leaves the view → drop those cards.
+      // backlog / applied / passed: every affected row leaves the view → drop those cards, and
+      // prune jobsData to match so render() stays a pure function of it. The count comes from
+      // the pruned model, not a second full-DOM walk.
       list.querySelectorAll(".card").forEach(el => { if (affected.has(el.dataset.url)) el.remove(); });
-      const n = list.querySelectorAll(".card").length;
+      jobsData = jobsData.filter(r => !affected.has(r.job_url));
+      const n = jobsData.length;
       setCount(n);
       if (n === 0) list.innerHTML = `<div class="empty">Nothing here.</div>`;
     }
   } catch (e) {
-    alert("error: " + e); div.classList.remove("busy");
+    alert("error: " + e);
+    // The server may have committed before the response was lost — exempt the clicked url so a
+    // decision that DID land can't re-hide the card (a false exemption just leaves it visible).
+    // Best-effort by necessity: without the response the client can't know the chain, so a
+    // visible sibling the committed decision also flipped may still hide on the next reload.
+    exemptFromHide([j.job_url]);
+  } finally {
+    mutBusy--;
+    releaseBusy(j.job_url, div);
   }
 }
 
@@ -364,25 +485,67 @@ function renderLinkbar() {
   if (!linkAnchor) { bar.style.display = "none"; bar.innerHTML = ""; return; }
   bar.style.display = "block";  // explicit — "" would fall back to the stylesheet's display:none
   bar.innerHTML = `Linking <b>${esc(linkAnchor.title)} — ${esc(linkAnchor.company)}</b> — `
-    + `click <b>↩ same role</b> on its duplicate (switch tabs/dates to find it).`;
+    + `click <b>↩ same role</b> on its duplicate (switch tabs/dates to find it; `
+    + `hidden decided cards are shown while linking).`;
   const cancel = btn("Cancel", "undo", cancelLink);
   bar.appendChild(cancel);
 }
 
 function startLink(j) {
+  // Not a correctness guard (busyUrls re-locks a rebuilt in-flight card, and seq0 refetches):
+  // entering link mode mid-mutation would just churn — detach the busy card, forcing decide's
+  // reload fallback. It can wait the fraction of a second.
+  if (mutBusy || linkBusy) return;
   linkAnchor = { job_url: j.job_url, title: j.title, company: j.company };
   renderLinkbar();
-  load();  // re-render cards so every other card shows the "↩ same role" target button
+  refreshLinkControls();
 }
 
 function cancelLink() {
+  if (linkBusy) return;  // the pinned pair is mid-commit — let it finish
   linkAnchor = null;
-  renderLinkbar();
-  load();
+  renderLinkbar();       // leave link mode immediately, even while a decision POST is in flight
+  // ...but defer the re-render while one is: it would detach the busy card for no gain. The
+  // stale "↩ same role" buttons are inert without an anchor (completeLink no-ops) and correct
+  // themselves on the next render.
+  if (!mutBusy) refreshLinkControls();
+}
+
+// Re-render the linking affordances after linkAnchor changes — client-side state only, so no
+// refetch. On Today a full render() is required (pinning an anchor suspends the hide-decided
+// filter, changing WHICH cards render). On the other views the visible set can't change
+// (wouldHide is today-gated), so patch the .linkctl buttons per card in place instead of
+// rebuilding a ~7600-card backlog for a one-button swap.
+function refreshLinkControls() {
+  if (view === "today") {
+    // Mid-load or after a failed load there is nothing valid to render — render() would paint
+    // "Nothing here." from the emptied jobsData over the Loading/error state. The linkbar is
+    // already updated; cards get the right buttons when the pending/next load renders.
+    if (loadState !== "idle") return;
+    const y = window.scrollY;
+    render();
+    // Pinning reveals hidden decided cards — possibly above the old offset, so a pixel restore
+    // would land elsewhere: keep the just-pinned anchor in view instead. On cancel the set only
+    // shrinks back; the pixel restore is right there.
+    const anchorEl = linkAnchor
+      && [...list.querySelectorAll(".card")].find(c => c.dataset.url === linkAnchor.job_url);
+    if (anchorEl) anchorEl.scrollIntoView({block: "center"});
+    else window.scrollTo(0, y);
+    return;
+  }
+  const byUrl = new Map(jobsData.map(r => [r.job_url, r]));
+  list.querySelectorAll(".card").forEach(div => {
+    const j = byUrl.get(div.dataset.url);
+    if (!j) return;
+    div.querySelectorAll(".linkctl").forEach(b => b.remove());
+    appendLinkControls(div.querySelector(".actions"), div, j);
+  });
 }
 
 async function completeLink(div, target) {
-  if (linkBusy || !linkAnchor || target.job_url === linkAnchor.job_url) return;
+  if (linkBusy || mutBusy || busyUrls.has(target.job_url)
+      || !linkAnchor || target.job_url === linkAnchor.job_url) return;
+  const anchorUrl = linkAnchor.job_url;
   const ok = confirm(
     `Link these as the SAME role?\n\n`
     + `  • ${target.title} — ${target.company}\n`
@@ -391,48 +554,128 @@ async function completeLink(div, target) {
   if (!ok) return;
   linkBusy = true;
   div.classList.add("busy");
+  busyUrls.add(target.job_url);
   try {
-    const res = await fetch("/api/dupe", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job_url: target.job_url, of: linkAnchor.job_url}),
-    });
-    const data = await res.json();
-    if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
+    const data = await postJSON("/api/dupe", {job_url: target.job_url, of: anchorUrl});
+    if (!data.ok) { alert(data.message || "failed"); return; }
+    // Add the server's exemptions (chain.py: the named pair plus the members of the side the
+    // merge flipped to decided). ADD only — a delete here would wipe exemptions earned by
+    // earlier actions this session on the same chain.
+    exemptFromHide(data.exempt);
     linkAnchor = null;
     renderLinkbar();
-    load();  // repost state changed across both chains — reload to reflect it
-  } catch (e) { alert("error: " + e); div.classList.remove("busy"); }
-  finally { linkBusy = false; }
+    // Repost state changed across both chains — reload, and hold linkBusy until it lands so a
+    // toggle/pin click can't render the stale pre-merge rows in the gap.
+    await load();
+  } catch (e) {
+    alert("error: " + e);
+    // The merge may have committed before the response was lost/timed out — keep the pair
+    // reachable and refetch the truth rather than leaving stale pre-merge rows on screen.
+    // linkAnchor stays pinned: the user chooses to retry or cancel. Await the recovery reload
+    // so the finally can't drop the guards while stale rows are still on screen (the same
+    // hold-until-landed rule as the success path).
+    exemptFromHide([target.job_url, anchorUrl]);
+    await load();
+  }
+  finally { linkBusy = false; releaseBusy(target.job_url, div); }
 }
 
 async function unlinkDup(div, j) {
-  if (linkBusy || !confirm(`Unlink "${j.title} — ${j.company}" from its canonical (split the manual link)?`)) return;
+  if (linkBusy || mutBusy || busyUrls.has(j.job_url)
+      || !confirm(`Unlink "${j.title} — ${j.company}" from its canonical (split the manual link)?`)) return;
   linkBusy = true;
   div.classList.add("busy");
+  busyUrls.add(j.job_url);
   try {
-    const res = await fetch("/api/dupe", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job_url: j.job_url, undo: true}),
-    });
-    const data = await res.json();
-    if (!data.ok) { alert(data.message || "failed"); div.classList.remove("busy"); return; }
-    load();
-  } catch (e) { alert("error: " + e); div.classList.remove("busy"); }
-  finally { linkBusy = false; }
+    const data = await postJSON("/api/dupe", {job_url: j.job_url, undo: true});
+    if (!data.ok) { alert(data.message || "failed"); return; }
+    // Add the server's exemptions (chain.py: just the interaction handles — clicked row, the
+    // restored loser canonical, the old winner canonical; the split changes no member's
+    // displayed decision, so the rest of the detached sub-chain stays hidden if it was
+    // hidden). ADD only — see completeLink.
+    exemptFromHide(data.exempt);
+    await load();  // hold linkBusy until the reload lands (see completeLink)
+  } catch (e) {
+    alert("error: " + e);
+    exemptFromHide([j.job_url]);  // see completeLink's catch — the split may have committed
+    await load();                 // and hold the guards through the recovery reload too
+  }
+  finally { linkBusy = false; releaseBusy(j.job_url, div); }
 }
 
+let jobsData = [];  // last-fetched rows, so the hide-decided toggle re-renders without a refetch
+let loadSeq = 0;    // stale-response guard: only the newest load() may install its rows
+// "loading" | "failed" | "idle" — client-side render() paths consult this so they never paint
+// over a Loading/error state with the (deliberately emptied) jobsData.
+let loadState = "idle";
+
+// The ONE "would the decided-filter hide this card?" predicate — render() and the toggle count
+// must agree or the button label lies. Suspended while a duplicate-link anchor is pinned: the
+// "↩ same role" target is often an already-decided row (e.g. a rule-rejected cross-post, which
+// exists in no view but Today), and hiding it would strand the linking workflow.
+function wouldHide(j) {
+  return view === "today" && !linkAnchor
+      && !!effectiveStatus(j) && !decidedThisSession.has(j.job_url);
+}
+function isHiddenDecided(j) { return hideDecided && wouldHide(j); }
+
+function renderToggle() {
+  // Count cards the filter *would* hide (independent of the current on/off state, so the button
+  // doesn't vanish the moment it's toggled to "show"). Zero while linking — filter suspended.
+  const decided = jobsData.filter(j => wouldHide(j)).length;
+  toggleDecidedBtn.style.display = decided ? "" : "none";
+  toggleDecidedBtn.textContent = (hideDecided ? "Show " : "Hide ") + decided + " decided";
+}
+
+function render() {
+  const visible = jobsData.filter(j => !isHiddenDecided(j));
+  const hidden = jobsData.length - visible.length;
+  setCount(visible.length, hidden);
+  renderToggle();
+  list.innerHTML = "";
+  if (!visible.length) {
+    list.innerHTML = `<div class="empty">${hidden
+      ? `All ${hidden} posting${hidden === 1 ? "" : "s"} decided — hidden.` : "Nothing here."}</div>`;
+    return;
+  }
+  visible.forEach(j => list.appendChild(card(j)));
+}
+
+// Returns true when THIS load's rows reached the screen (false if superseded or failed), so a
+// caller that wants to restore scroll knows whether the render it awaited actually happened.
 async function load() {
+  const seq = ++loadSeq;
+  loadState = "loading";
+  // Disarm the toggle and drop the outgoing view's rows and count: they are not valid for the
+  // incoming view/date, and a client-side render() mid-fetch — or after a failed fetch — must
+  // not repaint them under the new tab. render()/renderToggle() restore all three on success.
+  toggleDecidedBtn.style.display = "none";
+  jobsData = [];
+  countEl.textContent = "";
   list.innerHTML = `<div class="empty">Loading…</div>`;
   const params = new URLSearchParams({view});
   if (view === "today") params.set("date", dateInput.value);
-  const res = await fetch("/api/jobs?" + params);
-  const jobs = await res.json();
-  setCount(jobs.length);
-  list.innerHTML = "";
-  if (!jobs.length) { list.innerHTML = `<div class="empty">Nothing here.</div>`; return; }
-  jobs.forEach(j => list.appendChild(card(j)));
+  let rows;
+  try {  // narrow: a render() bug must not masquerade as a network failure
+    const res = await fetch("/api/jobs?" + params, {
+      // Same wedged-server insurance as postJSON: a hung /api/jobs must fail into the catch
+      // below, not pin loadState at "loading" (eternal spinner, disarmed toggle) forever.
+      signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+        ? AbortSignal.timeout(30000) : undefined,
+    });
+    rows = await res.json();
+  } catch (e) {
+    if (seq === loadSeq) {  // a superseded load's failure isn't this view's state
+      loadState = "failed";
+      list.innerHTML = `<div class="empty">Failed to load: ${esc(String(e))}</div>`;
+    }
+    return false;
+  }
+  if (seq !== loadSeq) return false;  // a newer load() superseded this response — drop it
+  loadState = "idle";
+  jobsData = rows;
+  render();
+  return true;
 }
 
 load();

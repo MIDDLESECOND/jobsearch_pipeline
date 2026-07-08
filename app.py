@@ -258,18 +258,22 @@ def api_decision():
         # repost chain — the client uses it to update sibling cards, not just the one clicked.
         row, err = resolve_posting(conn, job_url)
         if err:
-            return jsonify({"ok": False, "message": err, "affected": []})
+            return jsonify({"ok": False, "message": err, "affected": [], "exempt": []})
         if action in ("applied", "passed"):
-            ok, message, affected = mark_posting(conn, row, action)
+            ok, message, affected, exempt = mark_posting(conn, row, action)
         elif action == "undo_app":
-            ok, message, affected = mark_posting(conn, row, None)
+            ok, message, affected, exempt = mark_posting(conn, row, None)
         elif action == "reject":
-            ok, message, affected = reject_posting(conn, row, gate)
+            ok, message, affected, exempt = reject_posting(conn, row, gate)
         else:  # undo_reject
-            ok, message, affected = reject_posting(conn, row, "other", undo=True)
+            ok, message, affected, exempt = reject_posting(conn, row, "other", undo=True)
     finally:
         conn.close()
-    return jsonify({"ok": bool(ok), "message": message, "affected": affected if ok else []})
+    # `exempt` is chain.py's authoritative "keep these visible past the hide-decided filter"
+    # list — the rows whose DISPLAYED decision this operation changed (see the service-core
+    # docstrings); the client applies it verbatim instead of re-deriving propagation rules.
+    return jsonify({"ok": bool(ok), "message": message,
+                    "affected": affected if ok else [], "exempt": exempt if ok else []})
 
 
 @app.route("/api/dupe", methods=["POST"])
@@ -283,28 +287,33 @@ def api_dupe():
     of_url = body.get("of")
     undo = bool(body.get("undo"))
     if not job_url or (not undo and not of_url):
-        return jsonify({"ok": False, "message": "bad request"}), 400
+        return jsonify({"ok": False, "message": "bad request", "affected": [], "exempt": []}), 400
 
     conn = connect_db(load_config())
+    affected, exempt = [], []
     try:
         if undo:
             row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
             if row is None:
-                return jsonify({"ok": False, "message": "no matching posting"}), 404
-            ok, message, _ = dupe_unlink(conn, row)
+                return jsonify({"ok": False, "message": "no matching posting",
+                                "affected": [], "exempt": []}), 404
+            ok, message, affected, exempt = dupe_unlink(conn, row)
         else:
             plan, err = dupe_resolve(conn, job_url, of_url)
             if err:
                 ok, message = False, err
             else:
-                dupe_commit(conn, plan)
+                affected, exempt = dupe_commit(conn, plan)
                 w = plan["winner"]
                 ok, message = True, f"linked under {w['title']} — {w['company']}"
     finally:
         conn.close()
     # The merge changes repost state across both chains; the client just reloads the view rather
-    # than patching repost_of/repost_source/chain fields card-by-card.
-    return jsonify({"ok": bool(ok), "message": message})
+    # than patching repost_of/repost_source/chain fields card-by-card. Same contract as
+    # /api/decision: `affected` = rows whose chain state changed, `exempt` = chain.py's
+    # authoritative keep-visible list for the hide-decided filter.
+    return jsonify({"ok": bool(ok), "message": message,
+                    "affected": list(affected), "exempt": list(exempt)})
 
 
 def serve(host="127.0.0.1", port=5000):

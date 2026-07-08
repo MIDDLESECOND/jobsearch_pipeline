@@ -107,7 +107,7 @@ def cmd_mark(conn, url, status):
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
-    _, msg, _ = mark_posting(conn, m, status)
+    _, msg, _, _ = mark_posting(conn, m, status)
     print(f"[{label}] {msg}")
     return True
 
@@ -122,7 +122,7 @@ def cmd_reject(conn, url, gate, pattern, note, undo):
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
-    ok, msg, _ = reject_posting(conn, m, gate, undo)
+    ok, msg, _, _ = reject_posting(conn, m, gate, undo)
     print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
     if ok and pattern and not undo:
         _add_filter_rule(conn, gate, pattern, note, m)
@@ -190,7 +190,7 @@ def cmd_dupe(conn, url, of_url, undo, assume_yes):
         if err:
             print(f"[{label}] {err}", file=sys.stderr)
             return False
-        ok, msg, _ = dupe_unlink(conn, a)
+        ok, msg, _, _ = dupe_unlink(conn, a)
         print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
         return ok
 

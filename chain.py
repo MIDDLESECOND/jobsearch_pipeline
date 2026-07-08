@@ -621,14 +621,58 @@ def clear_reject(conn, member_urls):
 # The one implementation of "apply this user decision to a resolved posting", shared by the
 # CLI (cmd_mark / cmd_reject print the message) and the web UI (api_decision returns it as
 # JSON) — the same single-core-two-front-ends shape as the dupe trio below. Both return
-# (ok, message, affected_urls); `affected` is the whole repost chain, which the UI uses to
-# update sibling cards. Callers resolve the row first (resolve_posting) so the CLI can keep
-# it for the filters.yaml rule promotion.
+# (ok, message, affected_urls, exempt_urls); `affected` is the whole repost chain, which the
+# UI uses to update sibling cards. `exempt` is the subset the UI's hide-decided filter must
+# keep visible — computed HERE because only the core knows which rows' *displayed* decision
+# state each operation actually changes (the UI briefly re-derived it from propagation
+# behavior and got every edge wrong: rule-vs-manual survivors, merge-stamped siblings,
+# whole-chain over-exemption). The CLI ignores it. Callers resolve the row first
+# (resolve_posting) so the CLI can keep it for the filters.yaml rule promotion.
+
+def _member_decisions(conn, urls):
+    """The per-row decision fields for a set of chain members — the inputs to the exempt
+    computation, read either before (forward ops) or after (undos) the mutation."""
+    urls = sorted(urls)
+    qs = ",".join("?" * len(urls))
+    return conn.execute(
+        f"SELECT job_url, app_status, filter_source FROM jobs WHERE job_url IN ({qs})",
+        tuple(urls),
+    ).fetchall()
+
+
+def _forward_exempt(conn, row, targets):
+    """Exempt list for a decision landing on `row`'s chain, computed BEFORE propagation.
+    The operative contract is rows whose displayed state flips undecided→decided — the only
+    transition the hide filter acts on — plus the named row as the interaction handle. (A
+    forward op can also REPLACE a displayed decision, e.g. applied outranking a sibling's
+    manual reject; that row stays unexempted on purpose — it was already displaying decided
+    and may be deliberately hidden.) So: the whole chain when it displayed undecided, else
+    just the named row."""
+    pre = _member_decisions(conn, targets)
+    if any(r["app_status"] or r["filter_source"] for r in pre):
+        return [row["job_url"]]
+    return sorted(targets)
+
+
+def _undo_exempt(conn, row, targets):
+    """Exempt list for an undo on `row`'s chain, computed AFTER the clear: empty when the
+    chain now displays undecided (nothing gets hidden), else the named row (the user's click
+    must not vanish the card) plus every member still carrying an app_status or MANUAL
+    reject — the handles for the next undo. Rule-stamped survivors stay unexempted:
+    display-only, correctly hidden."""
+    post = _member_decisions(conn, targets)
+    if not any(r["app_status"] or r["filter_source"] for r in post):
+        return []
+    keep = {r["job_url"] for r in post if r["app_status"] or r["filter_source"] == "manual"}
+    keep.add(row["job_url"])
+    return sorted(keep)
+
 
 def mark_posting(conn, row, status):
     """Set (status='applied'|'passed') or clear (status=None) the user's decision across
-    `row`'s whole repost chain. Returns (ok, message, affected_urls)."""
+    `row`'s whole repost chain. Returns (ok, message, affected_urls, exempt_urls)."""
     targets = _chain_targets(conn, row)
+    exempt = _forward_exempt(conn, row, targets) if status else None  # pre-state read
     stamp = date.today().isoformat() if status else None
     propagate_app_status(conn, targets, status, stamp)
     conn.commit()
@@ -638,16 +682,18 @@ def mark_posting(conn, row, status):
     # stale label. Chain-scoped: the global passes cost ~1s per call and every triage click
     # lands here (see _reconcile_chain_skips).
     _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
+    if exempt is None:
+        exempt = _undo_exempt(conn, row, targets)  # post-state read
     verb = f"marked {status}" if status else "cleared status"
     msg = f"{verb}: {row['title']} — {row['company']}" + (f" ({stamp})" if status else "")
-    return True, msg, sorted(targets)
+    return True, msg, sorted(targets), exempt
 
 
 def reject_posting(conn, row, gate, undo=False):
     """Apply (or with undo=True clear) the manual hard-fail override across `row`'s chain.
-    Returns (ok, message, affected_urls). The named row is always (re)stamped — the user is
-    overruling it, possibly re-attributing a filters.yaml auto-fail; siblings are stamped too
-    but never clobber a rule:<name> attribution (see propagate_reject)."""
+    Returns (ok, message, affected_urls, exempt_urls). The named row is always (re)stamped —
+    the user is overruling it, possibly re-attributing a filters.yaml auto-fail; siblings are
+    stamped too but never clobber a rule:<name> attribution (see propagate_reject)."""
     targets = _chain_targets(conn, row)
     if undo:
         clear_reject(conn, targets)
@@ -655,14 +701,16 @@ def reject_posting(conn, row, gate, undo=False):
         # Reconcile this chain now (see mark_posting): an undone reject may release skipped
         # siblings back to 'new' (they re-face the filters in the next run, before any eval).
         _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
-        return True, f"cleared override: {row['title']} — {row['company']}", sorted(targets)
+        exempt = _undo_exempt(conn, row, targets)
+        return True, f"cleared override: {row['title']} — {row['company']}", sorted(targets), exempt
     if gate not in GATE_NAMES + ["other"]:
-        return False, f"gate must be one of {GATE_NAMES + ['other']}", []
+        return False, f"gate must be one of {GATE_NAMES + ['other']}", [], []
+    exempt = _forward_exempt(conn, row, targets)  # pre-state read
     today = date.today().isoformat()
     propagate_reject(conn, targets, gate, today, force_url=row["job_url"], overwrite_manual=True)
     conn.commit()
     _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
-    return True, f"rejected (gate: {gate}): {row['title']} — {row['company']} ({today})", sorted(targets)
+    return True, f"rejected (gate: {gate}): {row['title']} — {row['company']} ({today})", sorted(targets), exempt
 
 
 # ------------------------------------------------------- manual repost linking
@@ -729,6 +777,13 @@ def dupe_resolve(conn, url, of_url):
         "winner": winner, "loser": loser,
         "winner_members": winner_members, "loser_members": loser_members,
         "dec": w_dec or l_dec,  # the surviving decision (only one set, or both equal)
+        # Per-side decisions, kept so dupe_commit can tell WHICH side the merge flips: the
+        # side with no decision of its own inherits the other's (its members' displayed state
+        # changes); the decided side's members already displayed it — stamped or not.
+        "w_dec": w_dec, "l_dec": l_dec,
+        # The two rows the user actually named — the UI's interaction handles, which its
+        # hide-decided filter must keep visible whatever the merge stamps on them.
+        "named": sorted({a["job_url"], b["job_url"]}),
     }
     return plan, None
 
@@ -736,9 +791,20 @@ def dupe_resolve(conn, url, of_url):
 def dupe_commit(conn, plan):
     """Apply a merge plan from `dupe_resolve`: repoint the loser chain under the winner canonical,
     propagate the surviving decision (preserving original dates), eval-skip still-`new` members.
-    Returns the affected job_url list. Caller is responsible for any preview/confirmation."""
+    Returns (affected_urls, exempt_urls) — exempt is the named pair plus every member whose
+    displayed state the merge flips undecided→decided: the members of the side that had no
+    decision of its own. Judged PER SIDE, not per row — displayed state is chain-level, so a
+    decided side's unstamped members (a relisting fetched after the decision is deliberately
+    never stamped) already displayed the decision and stay unexempted; the user may have
+    deliberately hidden them. Caller is responsible for any preview/confirmation."""
     winner, loser = plan["winner"], plan["loser"]
     winner_members, loser_members, dec = plan["winner_members"], plan["loser_members"], plan["dec"]
+    exempt = set(plan["named"])
+    if dec:
+        if not plan["w_dec"]:
+            exempt |= winner_members
+        if not plan["l_dec"]:
+            exempt |= loser_members
 
     # Repoint the loser canonical AND every relisting it owned onto the winner canonical (the flat
     # model breaks if a child is left pointing at the now-demoted loser). Encode each row's prior
@@ -766,14 +832,18 @@ def dupe_commit(conn, plan):
     # run's post-filter forward pass (they must re-face the current rules before any label
     # spares them the eval — see _reconcile_chain_skips).
     _reconcile_chain_skips(conn, winner["job_url"])
-    return sorted(winner_members | loser_members)
+    return sorted(winner_members | loser_members), sorted(exempt)
 
 
 def dupe_unlink(conn, a):
     """Core of `dupe --undo`: detach the manually-linked relisting `a` (and the sub-chain it
     originally headed) from its canonical, restoring the two independent chains. Structure only — a
-    decision that propagated across the merge is left as-is. Returns `(ok, message, affected)`.
-    Shared by the CLI and the web UI."""
+    decision that propagated across the merge is left as-is. Returns
+    `(ok, message, affected, exempt)`: exempt is just the interaction handles — the clicked
+    row, the restored loser canonical (the detached chain's head, where a merge-propagated
+    decision naturally gets undone), and the old winner canonical (which kept the decision on
+    its side of the split) — since the split changes no member's displayed decision, the rest
+    of the detached sub-chain stays deliberately unexempted. Shared by the CLI and the web UI."""
     src = a["repost_source"]
     # Identify the loser canonical L: the original head of the merged-in sub-chain. `a` may BE it
     # ('manual') or be one of its relistings ('manual:<L>').
@@ -782,7 +852,7 @@ def dupe_unlink(conn, a):
     elif src and src.startswith("manual:"):
         loser_canon_url = src.split(":", 1)[1]
     else:
-        return False, f"'{a['title']} — {a['company']}' is not a manually-linked relisting", []
+        return False, f"'{a['title']} — {a['company']}' is not a manually-linked relisting", [], []
 
     # Resolve the canonical row up front and bail BEFORE mutating if it's gone — else the detach
     # loop would repoint children at a non-existent canonical (orphan) and commit before the final
@@ -791,7 +861,7 @@ def dupe_unlink(conn, a):
         "SELECT title, company FROM jobs WHERE job_url=?", (loser_canon_url,)
     ).fetchone()
     if loser_canon is None:
-        return False, f"encoded original {loser_canon_url!r} no longer exists; cannot undo", []
+        return False, f"encoded original {loser_canon_url!r} no longer exists; cannot undo", [], []
 
     # The sub-chain to detach: the loser canonical plus every row encoded as its former child.
     rows = conn.execute(
@@ -814,4 +884,6 @@ def dupe_unlink(conn, a):
     msg = (f"unlinked: {loser_canon['title']} — {loser_canon['company']} "
            f"({len(rows)} row(s) restored to their own chain); any decision propagated by the merge "
            f"was left as-is — undo it separately (passed/applied/reject) if it shouldn't carry over")
-    return True, msg, [r["job_url"] for r in rows]
+    exempt = sorted({a["job_url"], loser_canon_url}
+                    | ({a["repost_of"]} if a["repost_of"] else set()))
+    return True, msg, [r["job_url"] for r in rows], exempt

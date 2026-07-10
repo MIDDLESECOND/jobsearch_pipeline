@@ -2,7 +2,10 @@
 
 The load-bearing rule (the '50/0 fix'): a role that clears the gates but whose
 ai_artifact_depth is 0 (or unparseable) is capped to RECRUITER_ONLY / bucket 1,
-even at a perfect score. Enforced in code so it can't depend on the model complying.
+even at a perfect score. Its sibling (the 'application-conversion fix'): a required
+formal-leadership tenure (`formal_leadership_required: true`) caps the same way,
+but fails OPEN on absence — pre-cap eval_json rows lack the key. Both enforced in
+code so they can't depend on the model complying.
 """
 
 import chain
@@ -78,6 +81,56 @@ def test_recruiter_only_input_with_depth0_stays_bucket1():
     r = _norm(verdict="RECRUITER_ONLY", fit_score=14, score_breakdown=_bd(0))
     assert r["verdict"] == "RECRUITER_ONLY"
     assert r["bucket"] == 1
+
+
+def test_leadership_requirement_caps_pass_to_recruiter_even_at_perfect_score():
+    # The application-conversion sibling of the 50/0 fix (the [redacted] 17/18 case): a required
+    # formal-leadership tenure is a cold-screen wall the fit total must not outvote.
+    r = _norm(verdict="PASS", fit_score=18, bucket=3, score_breakdown=_bd(3),
+              formal_leadership_required=True)
+    assert r["verdict"] == "RECRUITER_ONLY"
+    assert r["bucket"] == 1
+
+
+def test_leadership_string_true_still_caps():
+    # A model quoting the boolean must not dodge the cap.
+    r = _norm(verdict="PASS", fit_score=17, score_breakdown=_bd(3),
+              formal_leadership_required="true")
+    assert r["verdict"] == "RECRUITER_ONLY"
+    assert r["bucket"] == 1
+
+
+def test_leadership_noncanonical_affirmatives_still_cap():
+    # The cap is judged on the normalized VALUE, not the JSON type: 1 and "yes" are
+    # affirmative answers a weaker model plausibly emits, and each must cap — a silent
+    # fail-open on an affirmative is the [redacted] cold-apply miss the cap exists to prevent.
+    for aff in (1, "yes", "Yes", " TRUE "):
+        r = _norm(verdict="PASS", fit_score=17, score_breakdown=_bd(3),
+                  formal_leadership_required=aff)
+        assert r["verdict"] == "RECRUITER_ONLY", aff
+        assert r["bucket"] == 1
+
+
+def test_leadership_unrecognized_value_fails_open_but_warns(capsys):
+    # Neither a recognized affirmative nor a recognized negative: still fail open (the
+    # cap's polarity), but no longer silently — the bypass is logged to stderr.
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              formal_leadership_required="preferred")
+    assert r["verdict"] == "PASS"
+    assert r["bucket"] == 3
+    err = capsys.readouterr().err
+    assert "formal_leadership_required" in err and "preferred" in err
+
+
+def test_leadership_absent_or_false_fails_open():
+    # Opposite polarity from the depth cap: most roles require no leadership and pre-cap
+    # eval_json rows lack the key (backtest re-runs) — absence must NOT bucket-1 the feed.
+    for kw in ({}, {"formal_leadership_required": False},
+               {"formal_leadership_required": None},
+               {"formal_leadership_required": "no"}):
+        r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), **kw)
+        assert r["verdict"] == "PASS"
+        assert r["bucket"] == 3
 
 
 def test_gate_fail_nulls_bucket_and_score():

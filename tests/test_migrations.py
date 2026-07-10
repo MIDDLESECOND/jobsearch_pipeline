@@ -194,10 +194,11 @@ def test_outcome_columns_and_events_table_added_additively(tmp_path):
     conn = core.get_db({"settings": {"db_path": path}})
     try:
         row = conn.execute(
-            "SELECT app_status, status_date, outcome_status, outcome_date, resume_variant "
-            "FROM jobs WHERE job_url='ap'").fetchone()
+            "SELECT app_status, status_date, outcome_status, outcome_date, resume_variant, "
+            "channel FROM jobs WHERE job_url='ap'").fetchone()
         assert row["app_status"] == "applied" and row["status_date"] == "2026-06-01"
         assert row["outcome_status"] is None and row["resume_variant"] is None
+        assert row["channel"] is None
         # The events table + its index exist and accept the service core's write.
         import chain
         ok, _, _, _ = chain.record_event(conn, conn.execute(

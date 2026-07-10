@@ -405,6 +405,7 @@ def _jobs_table_sql(name, if_not_exists=False):
             outcome_status TEXT,  -- chain's latest post-apply event_type (cache — chain._recompute_outcome; no CHECK, see states.py)
             outcome_date TEXT,    -- that event's event_date
             resume_variant TEXT,  -- free text: which resume variant went out
+            channel      TEXT,    -- how the application went out: states.ALL_CHANNELS (applied-only, code-side enforced, no CHECK — see states.py)
             filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
             filter_gate  TEXT,    -- which gate the override represents
             filter_date  TEXT,    -- date the override was set
@@ -477,6 +478,7 @@ def _migrate(conn):
         ("outcome_status", "TEXT"),   # latest non-note event_type across the chain, or NULL
         ("outcome_date", "TEXT"),     # that event's event_date
         ("resume_variant", "TEXT"),   # free text: which resume went out (set at apply time)
+        ("channel", "TEXT"),          # states.ALL_CHANNELS: direct | agency | referral (applied-only)
     ]
     added = False
     for col, decl in new_cols:

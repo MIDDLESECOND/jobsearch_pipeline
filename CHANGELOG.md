@@ -7,6 +7,69 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-09 — recruiter-screen realism: tenure split, formal-leadership cap, cold-apply bar
+
+### Why
+A application-conversion audit (details in the private notes) showed the evaluator scoring conceptual fit correctly while talking past
+three cold-screen walls. Canonical miss: [redacted] "AI Enablement & Engineering Manager" —
+required "Minimum of 5 years… AI enablement" + "Minimum of 3 years of leadership", scored
+17/18 PASS Bucket 3, cold-applied, silence. Root cause was partly the evaluator's own
+input: `profile.md` stated one total years figure with no title-tenure split, so
+architect-function years requirements were scored against total tenure when the tenure
+actually held **in the current title is a small fraction of it** (the exact figures live in the gitignored profile.md, deliberately not here).
+
+### Changes
+- **`profile.md`** (input correction): experience split by function — years requirements
+  measure against the MATCHING tenure ("N yrs architecture/AI enablement" vs. the short
+  current-title tenure, not the total); explicit formal-people-leadership line (none held);
+  previous title corrected against the resume sources.
+- **Guide — formal-leadership check (new starred-line CAP, code-enforced):** a *required*
+  N+ years of formal people-leadership/management → `formal_leadership_required: true` →
+  verdict capped at **RECRUITER_ONLY / bucket 1** regardless of total. Enforced in
+  `evaluation.normalize_result` beside the 50/0 depth cap, with opposite polarity: it fails
+  **OPEN** on a missing/negative field (most roles require no leadership; pre-cap eval_json
+  rows lack the key), where the depth cap fails CLOSED. Recognized affirmatives
+  (`true`/`"true"`/`"yes"`/`1`, any case) count; unrecognized values warn to stderr and
+  fail open.
+- **Guide — `years_vs_stated` scores against function-matched tenure**, and the years-floor
+  gate note calls out "N yrs in <function>" walls dressed as floors.
+- **Guide — cold-apply bar:** PASS + cold-apply now requires the resume as written to
+  directly prove every requirement in the required column; anything needing *explanation*
+  (title change, depth gap, years split) routes RECRUITER_ONLY.
+- New model-output field `formal_leadership_required` (prompt JSON contract). No
+  re-evaluation of existing rows — the cap applies to future evals; old eval_json lacking
+  the key normalizes exactly as before.
+
+### Expected effect
+Bucket 3 / PASS shrinks to roles that can actually convert cold (fewer, better-routed cold
+applications); manager-titled and architect-years-walled roles surface as RECRUITER_ONLY
+instead of high-scoring cold PASSes.
+
+---
+
+## 2026-07-09 — application channel tracking (schema: `jobs.channel`)
+
+### Why
+A application-conversion conversion audit found the funnel unreadable in aggregate: direct
+cold-applies, staffing-agency submissions, and referrals convert at very different rates,
+and the DB couldn't say which was which — the response-rate question the outcome tracking
+below exists to answer needs the channel axis to mean anything.
+
+### Schema
+- **One additive `jobs` column**: `channel` (`direct | agency | referral`,
+  `states.ALL_CHANNELS`). Contract mirrors `resume_variant` exactly — **applied-only**,
+  recorded at apply time (`applied --channel C` / the UI's apply flow) or edited later via
+  `chain.set_channel` (UI select / API `set_channel` action), written uniformly chain-wide,
+  inherited on a re-assert without a value, coalesced across a dupe merge (winner's
+  preferred), and cleared whenever the chain leaves `applied`. No history, NOT restored on
+  re-apply. No backfill: NULL means "not recorded".
+- **No CHECK**, same policy as `outcome_status` — but unlike `resume_variant`'s free text
+  the vocabulary is CLOSED, enforced code-side in `chain.mark_posting`/`set_channel`
+  (a per-user spelling like "staffing" would split the funnel counts the field exists to
+  make comparable).
+
+---
+
 ## 2026-07-09 — post-application outcome tracking (schema: `app_events` table + 3 `jobs` columns)
 
 ### Why

@@ -46,9 +46,20 @@ platform with years attached* that is genuinely non-rampable and disqualifying (
 Salesforce Apex"), NOT for "the required AI depth is ahead of what I've shipped." A role that \
 is built ON agentic systems is the canonical Bucket-1 / RECRUITER_ONLY case, not a gate fail.
 
+FORMAL-LEADERSHIP CHECK (the second code-enforced cap):
+Set "formal_leadership_required": true when the posting's REQUIRED qualifications state N+ \
+years of formal people leadership / management / technical program management (direct reports, \
+"leading technical teams", managing engineers) that the candidate's profile does not cover — \
+judge against the profile's formal-people-leadership line below; when the profile states none, \
+any such requirement is a cold-screen wall regardless of fit total. Required only — a \
+preferred/plus leadership line stays false; so does "stakeholder leadership", "leads \
+projects", mentoring, or cross-functional coordination.
+
 VERDICT + BUCKET ROUTING (after all gates pass):
 - ai_artifact_depth == 0  -> verdict "RECRUITER_ONLY", bucket 1. This is a HARD CAP: it holds \
 even if the total is 16-18 and every other line is strong. Never "PASS" a depth-0 role.
+- formal_leadership_required == true -> verdict "RECRUITER_ONLY", bucket 1. Same hard cap: a \
+17/18 with a required "3 years of leadership" is still a role the resume cannot screen into cold.
 - Acceptable-tier BI/BA with a small title gap -> verdict "PASS", bucket 2.
 - Clean low-code / Power Platform AI delivery (ai_artifact_depth == 3) -> verdict "PASS", bucket 3.
 - A gate failed -> verdict "GATE_FAIL", bucket null, fit_score null.
@@ -67,6 +78,7 @@ Respond with ONLY a JSON object, no markdown fences, no preamble:
   "gate_notes": "one short sentence on the decisive gate finding",
   "fit_score": null or integer 0-18 (set whenever gates pass — i.e. for PASS and RECRUITER_ONLY),
   "score_breakdown": null or {{"ai_applied_vs_research": 0-3, "ai_artifact_depth": 0-3, "learning_value": 0-3, "technical_skill_match": 0-3, "title_trajectory": 0-3, "years_vs_stated": 0-3}},
+  "formal_leadership_required": true or false (true ONLY when required — not preferred — formal people-leadership/management years are stated),
   "bucket": null or 1 or 2 or 3,
   "one_line": "one-line summary a human reads in the report",
   "flags": ["anything needing human judgment, e.g. ambiguous seniority, possible research-coding, recruiter posting with unnamed client"]
@@ -89,10 +101,12 @@ def parse_eval_json(text):
 
 def normalize_result(result):
     """Apply the guide's hard routing rules deterministically, regardless of what
-    the model returned. The artifact-depth cap is the load-bearing 50/0 fix, so it
-    is enforced in code, not left to the model: any role that passes the gates but
-    scores ai_artifact_depth == 0 is RECRUITER_ONLY / bucket 1, even at 18/18.
-    Mutates and returns `result`."""
+    the model returned. The artifact-depth cap is the load-bearing 50/0 fix, and the
+    formal-leadership cap is its application-conversion sibling (a required "N yrs of
+    leadership" is a cold-screen wall the fit total talked past — the [redacted] 17/18
+    case), so both are enforced in code, not left to the model: any role that passes
+    the gates but scores ai_artifact_depth == 0 OR states a required formal-leadership
+    tenure is RECRUITER_ONLY / bucket 1, even at 18/18. Mutates and returns `result`."""
     verdict = result.get("verdict", VERDICT_GATE_FAIL)
     if verdict not in VERDICTS:
         verdict = VERDICT_GATE_FAIL
@@ -111,7 +125,21 @@ def normalize_result(result):
         # parses bare NaN/Infinity tokens) must fail closed, not slip through to bucket 2.
         valid = (isinstance(depth, (int, float)) and not isinstance(depth, bool)
                  and math.isfinite(depth))
-        if not valid or depth == 0:
+        # The leadership cap fails OPEN on a missing/negative field, opposite of the depth
+        # cap's fail-closed: most roles require no leadership and pre-cap eval_json rows
+        # lack the key entirely (backtest re-runs) — capping on absence would bucket-1 the
+        # whole feed. But "affirmative" is judged on the normalized VALUE, not the JSON
+        # type, so a model quoting the boolean ("true"), emitting 1, or answering "yes"
+        # cannot dodge the cap; and a value that is neither a recognized affirmative nor a
+        # recognized negative still fails open but is logged — a silent bypass here is the
+        # [redacted] cold-apply miss this cap exists to prevent.
+        raw = result.get("formal_leadership_required")
+        norm = str(raw).strip().lower()
+        leadership = norm in ("true", "yes", "1")
+        if not leadership and norm not in ("none", "false", "no", "0", ""):
+            print(f"[eval] warning: unrecognized formal_leadership_required value "
+                  f"{raw!r} — treating as no-requirement (fail-open)", file=sys.stderr)
+        if not valid or depth == 0 or leadership:
             verdict = VERDICT_RECRUITER_ONLY
             result["bucket"] = 1
         if not result.get("bucket"):

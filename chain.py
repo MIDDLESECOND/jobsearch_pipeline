@@ -9,7 +9,7 @@ This module owns everything about treating multiple postings as one role:
     chain, and propagation/reconcile (skip_decided_reposts),
   * the manual dupe-link cores (dupe_resolve / dupe_commit / dupe_unlink),
   * the post-application outcome cores (record_event / undo_event / chain_events /
-    set_resume, plus _recompute_outcome — the one writer of the cached
+    set_resume / set_channel, plus _recompute_outcome — the one writer of the cached
     outcome_status/outcome_date columns).
 
 It was extracted from pipeline.py so the "what is this chain's decision?" question has
@@ -24,7 +24,7 @@ import re
 import sys
 from datetime import date, datetime
 
-from states import (GATE_NAMES, APP_EVENTS, ALL_EVENTS, EVENT_NOTE,
+from states import (GATE_NAMES, APP_EVENTS, ALL_EVENTS, EVENT_NOTE, ALL_CHANNELS,
                     STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_FAVOR, sql_list)
 
@@ -409,6 +409,7 @@ def _decide(rows):
         "outcome_status": app_row["outcome_status"] if app_row else None,
         "outcome_date": app_row["outcome_date"] if app_row else None,
         "resume_variant": app_row["resume_variant"] if app_row else None,
+        "channel": app_row["channel"] if app_row else None,
         "reject": rej is not None,
         "filter_gate": rej["filter_gate"] if rej else None,
         "filter_date": rej["filter_date"] if rej else None,
@@ -425,7 +426,7 @@ def _chain_decision(conn, member_urls):
     qs = ",".join("?" * len(member_urls))
     rows = conn.execute(
         f"SELECT app_status, status_date, outcome_status, outcome_date, resume_variant, "
-        f"filter_source, filter_gate, filter_date "
+        f"channel, filter_source, filter_gate, filter_date "
         f"FROM jobs WHERE job_url IN ({qs})",
         tuple(member_urls),
     ).fetchall()
@@ -455,7 +456,7 @@ def _fmt_decision(dec):
 # the batched variant can group members back to their canonical. Both queries share this list so
 # their column shapes can't drift.
 _MEMBER_COLS = ("job_url, repost_of, first_seen, verdict, status, fit_score, app_status, "
-                "status_date, outcome_status, outcome_date, resume_variant, "
+                "status_date, outcome_status, outcome_date, resume_variant, channel, "
                 "filter_source, filter_gate, filter_date")
 
 
@@ -473,6 +474,9 @@ def effective_decision(conn, row):
                             follow-up bucket)
       outcome_date          that event's event_date, or None
       resume_variant        free text recorded at apply time (or via set_resume), or None
+      channel               how the application went out (states.ALL_CHANNELS: direct |
+                            agency | referral), recorded at apply time or via set_channel,
+                            or None — same applied-only propagation as resume_variant
       reject                bool — any chain member is a hard-fail override
       filter_gate, filter_date  the surviving reject's attribution, or None
       is_repost             True if `row` itself is a relisting (repost_of set)
@@ -524,6 +528,7 @@ def _effective_from_members(row, members):
         "outcome_status": dec.get("outcome_status"),
         "outcome_date": dec.get("outcome_date"),
         "resume_variant": dec.get("resume_variant"),
+        "channel": dec.get("channel"),
         "reject": dec.get("reject", False),
         "filter_gate": dec.get("filter_gate"),
         "filter_date": dec.get("filter_date"),
@@ -583,36 +588,48 @@ _REJECT_SET = ("filter_source='manual', filter_gate=?, filter_date=?, "
                f"THEN '{STATUS_RULE_FILTERED}' ELSE status END")
 
 
-def propagate_app_status(conn, member_urls, status, status_date, resume_variant=None):
+def propagate_app_status(conn, member_urls, status, status_date, resume_variant=None,
+                         channel=None):
     """Set the user's applied/passed decision (or clear it, status=None) across every member of a
     repost chain, so the decision follows the role across all relistings. Shared by cmd_mark and
-    the dupe merge. `resume_variant` is an APPLIED-ONLY field: with status='applied' it is
-    written when given, INHERITED from the chain's stored value when not (a re-assert without one
-    can't blank a stored variant — and must not strand a late-fetched, never-stamped relisting at
-    applied-with-NULL beside it, since _decide reads the field off an arbitrary applied member),
-    and any other status — undo OR a switch to 'passed' — clears it chain-wide, so a variant can
-    never sit invisibly on a non-applied chain (set_resume refuses those and the UI only renders
-    the field on applied cards). Empty/whitespace input reads as "not given", never as "blank
-    it" — set_resume is the explicit clear path. The write is ONE statement over all three
-    columns so every member always ends identical — the "any member's copy is authoritative"
-    premise is enforced here, not assumed. The outcome CACHE columns are deliberately not
-    touched — _recompute_outcome is their one writer, called right after this."""
+    the dupe merge. `resume_variant` and `channel` are APPLIED-ONLY fields with identical
+    propagation: with status='applied' each is written when given, INHERITED from the chain's
+    stored value when not (a re-assert without one can't blank a stored value — and must not
+    strand a late-fetched, never-stamped relisting at applied-with-NULL beside it, since _decide
+    reads the fields off an arbitrary applied member), and any other status — undo OR a switch
+    to 'passed' — clears them chain-wide, so neither can sit invisibly on a non-applied chain
+    (set_resume/set_channel refuse those and the UI only renders the fields on applied cards).
+    Empty/whitespace input reads as "not given", never as "blank it" — set_resume/set_channel
+    are the explicit clear paths. Channel's ALL_CHANNELS validation lives in the callers
+    (mark_posting / set_channel), not here — the dupe merge feeds back already-stored values.
+    The write is ONE statement over all four columns so every member always ends identical —
+    the "any member's copy is authoritative" premise is enforced here, not assumed. The outcome
+    CACHE columns are deliberately not touched — _recompute_outcome is their one writer, called
+    right after this."""
     members = set(member_urls)
     if not members:
         return
     qs = ",".join("?" * len(members))
     resume_variant = (resume_variant or "").strip() or None
-    if status == "applied" and resume_variant is None:
-        row = conn.execute(
-            f"SELECT resume_variant FROM jobs WHERE job_url IN ({qs}) "
-            f"AND resume_variant IS NOT NULL LIMIT 1",
+    channel = (channel or "").strip() or None
+    if status == "applied" and (resume_variant is None or channel is None):
+        # ONE aggregate read covers both inherits: MAX() skips NULLs, and the single-UPDATE
+        # uniform-write rule below means every non-NULL copy within a chain is identical,
+        # so "MAX over the members" == "any member's stored value". (Mixed non-NULL values
+        # only exist across two chains at merge time, and dupe_commit pre-coalesces those
+        # before calling here — they never reach this read.)
+        stored = conn.execute(
+            f"SELECT MAX(resume_variant), MAX(channel) FROM jobs WHERE job_url IN ({qs})",
             tuple(members),
         ).fetchone()
-        resume_variant = row[0] if row else None
+        resume_variant = resume_variant or stored[0]
+        channel = channel or stored[1]
     conn.execute(
-        f"UPDATE jobs SET app_status=?, status_date=?, resume_variant=? "
+        f"UPDATE jobs SET app_status=?, status_date=?, resume_variant=?, channel=? "
         f"WHERE job_url IN ({qs})",
-        (status, status_date, resume_variant if status == "applied" else None, *members),
+        (status, status_date,
+         resume_variant if status == "applied" else None,
+         channel if status == "applied" else None, *members),
     )
 
 
@@ -707,14 +724,18 @@ def _undo_exempt(conn, row, targets):
     return sorted(keep)
 
 
-def mark_posting(conn, row, status, resume_variant=None):
+def mark_posting(conn, row, status, resume_variant=None, channel=None):
     """Set (status='applied'|'passed') or clear (status=None) the user's decision across
-    `row`'s whole repost chain. `resume_variant` (optional, applied only) records which
-    resume went out. Returns (ok, message, affected_urls, exempt_urls)."""
+    `row`'s whole repost chain. `resume_variant` and `channel` (optional, applied only)
+    record which resume went out and through which channel (states.ALL_CHANNELS).
+    Returns (ok, message, affected_urls, exempt_urls)."""
+    channel, err = _norm_channel(channel)
+    if err:
+        return False, err, [], []
     targets = _chain_targets(conn, row)
     exempt = _forward_exempt(conn, row, targets) if status else None  # pre-state read
     stamp = date.today().isoformat() if status else None
-    propagate_app_status(conn, targets, status, stamp, resume_variant)
+    propagate_app_status(conn, targets, status, stamp, resume_variant, channel)
     # Sync the outcome cache with the decision: re-applying restores the outcome from any
     # surviving event history; an undo (or a switch to 'passed') clears the cached columns
     # chain-wide while the app_events rows themselves are KEPT — history is never destroyed
@@ -915,24 +936,61 @@ def chain_events(conn, row):
     ).fetchall()
 
 
-def set_resume(conn, row, text):
-    """Set (or with empty text clear) the resume_variant on an already-applied chain — the
-    edit-after-the-fact path; at apply time pass it to mark_posting instead. Propagated
-    chain-wide like the other decision fields. Returns (ok, message, affected, exempt)."""
+def _norm_channel(value):
+    """The ONE copy of channel normalization + vocabulary validation, shared by every entry
+    point to the column (mark_posting at apply time, set_channel after the fact) so the two
+    paths can never drift into accepting different spellings — a per-path split in
+    jobs.channel is exactly the funnel-count corruption the closed vocabulary prevents.
+    Case-insensitive ("Direct" → "direct"): the case rule lives HERE, not in a front-end,
+    so any client's raw input behaves identically through every surface. Returns
+    (normalized_value_or_None, error_or_None); empty/whitespace reads as not-given."""
+    value = (value or "").strip().lower() or None
+    if value is not None and value not in ALL_CHANNELS:
+        return None, f"channel must be one of {list(ALL_CHANNELS)}"
+    return value, None
+
+
+def _set_applied_field(conn, row, col, label, value):
+    """The one implementation of "edit an applied-only field after the fact": applied-chain
+    guard, strip-to-None (empty clears), chain-wide single-column write, commit, and the
+    set/cleared message — shared by set_resume and set_channel so their docstrings' "same
+    contract" promise is enforced by construction, not by keeping two copies in sync.
+    Validation (where a field has a closed vocabulary) happens in the wrappers, before this.
+    Returns (ok, message, affected, exempt)."""
     dec = effective_decision(conn, row)
     if dec["app_status"] != "applied":
-        return False, "resume variant is recorded on applied roles — mark it applied first", [], []
-    text = (text or "").strip() or None
+        return False, f"{label} is recorded on applied roles — mark it applied first", [], []
+    value = (value or "").strip() or None
     targets = _chain_targets(conn, row)
     qs = ",".join("?" * len(targets))
     conn.execute(
-        f"UPDATE jobs SET resume_variant=? WHERE job_url IN ({qs})",
-        (text, *sorted(targets)),
+        f"UPDATE jobs SET {col}=? WHERE job_url IN ({qs})",
+        (value, *sorted(targets)),
     )
     conn.commit()
-    msg = (f"resume variant {'set to ' + repr(text) if text else 'cleared'}: "
+    msg = (f"{label} {'set to ' + repr(value) if value else 'cleared'}: "
            f"{row['title']} — {row['company']}")
     return True, msg, sorted(targets), [row["job_url"]]
+
+
+def set_resume(conn, row, text):
+    """Set (or with empty text clear) the resume_variant on an already-applied chain — the
+    edit-after-the-fact path; at apply time pass it to mark_posting instead. Free text;
+    propagated chain-wide like the other decision fields (see _set_applied_field).
+    Returns (ok, message, affected, exempt)."""
+    return _set_applied_field(conn, row, "resume_variant", "resume variant", text)
+
+
+def set_channel(conn, row, value):
+    """Set (or with empty value clear) the application channel on an already-applied chain —
+    set_resume's sibling (same core: _set_applied_field); at apply time pass it to
+    mark_posting instead. Unlike the resume's free text, the value is validated against
+    states.ALL_CHANNELS (_norm_channel — a closed vocabulary; per-user spellings would split
+    the funnel counts). Returns (ok, message, affected, exempt)."""
+    value, err = _norm_channel(value)
+    if err:
+        return False, err, [], []
+    return _set_applied_field(conn, row, "channel", "channel", value)
 
 
 # ------------------------------------------------------- manual repost linking
@@ -1042,16 +1100,18 @@ def dupe_commit(conn, plan):
     if dec:
         all_members = winner_members | loser_members
         if dec["app_status"]:
-            # Coalesce the resume variant across BOTH sides (winner's preferred): the chain
-            # model holds one variant, and _decision_sig deliberately ignores it (outcome
-            # metadata must not block a merge), so without the coalesce a NULL surviving side
-            # would either blank the other side's recorded variant or leave a mixed chain
-            # whose _decide read is SQL-row-order-dependent. When both sides recorded
-            # DIFFERENT variants the winner's wins — an accepted loss, same-role-twice.
+            # Coalesce the resume variant and channel across BOTH sides (winner's preferred):
+            # the chain model holds one of each, and _decision_sig deliberately ignores them
+            # (outcome metadata must not block a merge), so without the coalesce a NULL
+            # surviving side would either blank the other side's recorded value or leave a
+            # mixed chain whose _decide read is SQL-row-order-dependent. When both sides
+            # recorded DIFFERENT values the winner's wins — an accepted loss, same-role-twice.
             resume = ((plan["w_dec"] or {}).get("resume_variant")
                       or (plan["l_dec"] or {}).get("resume_variant"))
+            channel = ((plan["w_dec"] or {}).get("channel")
+                       or (plan["l_dec"] or {}).get("channel"))
             propagate_app_status(conn, all_members, dec["app_status"], dec["status_date"],
-                                 resume)
+                                 resume, channel)
         if dec["reject"]:
             # Merge: fill in only members with no attribution yet (overwrite_manual=False) — leave
             # any existing manual/rule attribution intact.

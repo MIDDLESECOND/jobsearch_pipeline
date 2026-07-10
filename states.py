@@ -97,6 +97,19 @@ APP_EVENTS = (EVENT_RECRUITER_SCREEN, EVENT_INTERVIEW, EVENT_OFFER,
               EVENT_REJECTED_BY_EMPLOYER, EVENT_GHOSTED, EVENT_WITHDREW)
 EVENT_NOTE = "note"
 ALL_EVENTS = APP_EVENTS + (EVENT_NOTE,)
+
+# Application channel (jobs.channel): HOW the application went out — the conversion-analysis
+# axis (direct cold-apply vs staffing agency vs referral convert at very different rates, so
+# an aggregate response rate over all three is meaningless). Applied-only, propagated
+# chain-wide exactly like resume_variant (chain.propagate_app_status / set_channel). Closed
+# vocabulary, unlike resume_variant's free text — per-user spellings ("agent", "recruiter",
+# "staffing") would split the funnel counts this field exists to make comparable. No schema
+# CHECK — same user-decision-vocabulary policy as ALL_EVENTS above; enforced code-side in
+# chain (mark_posting / set_channel).
+CHANNEL_DIRECT = "direct"
+CHANNEL_AGENCY = "agency"
+CHANNEL_REFERRAL = "referral"
+ALL_CHANNELS = (CHANNEL_DIRECT, CHANNEL_AGENCY, CHANNEL_REFERRAL)
 # (No SCORE_DIMS constant: the score dimensions live in the eval prompt's output spec and
 # the stored eval_json; the report/UI render whatever keys exist, so a code-side list would
 # only drift.)

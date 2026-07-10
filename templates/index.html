@@ -76,9 +76,10 @@
   .tag.out-ghosted { background: #f3f4f6; color: #6b7280; }
   .tag.out-withdrew { background: #e5e7eb; color: #374151; }
   .tag.noresp { background: #fff7ed; color: #9a3412; }
-  input.note-in, input.resume-in { padding: .3rem .4rem; border: 1px solid #d0d4da;
+  input.note-in, input.resume-in, select.channel-in { padding: .3rem .4rem; border: 1px solid #d0d4da;
                 border-radius: 6px; font-size: .8rem; }
   input.resume-in { width: 11rem; }
+  select.channel-in { background: #fff; }
   input.note-in { width: 9rem; }
   button.record { background: #0891b2; color: #fff; border-color: #0891b2; }
   .history { font-size: .8rem; color: #445; background: #f8fafc; border: 1px solid #e3e6ea;
@@ -104,6 +105,7 @@
 <script>
 const GATES = {{ gates | tojson }};
 const EVENTS = {{ events | tojson }};  // states.ALL_EVENTS — lifecycle outcomes + 'note'
+const CHANNELS = {{ channels | tojson }};  // states.ALL_CHANNELS — how the application went out
 const FEEDBACK_URL = (() => {
   let u = String({{ feedback_url | tojson }});
   if (!u) return "";
@@ -317,14 +319,26 @@ function card(j) {
       // button — bypasses .busy's pointer-events, the documented gap the busyUrls set
       // exists for). Refusing up front means no doomed prompt ever opens.
       if (linkBusy || busyUrls.has(j.job_url)) return;
-      // One optional prompt for the resume variant. Blank = apply without one (zero-friction
-      // default; edit later via the inline field). Cancel/Escape ABORTS the whole action —
-      // an accidental Applied click must have a way out, and a dialog dismissal reading as
-      // "commit anyway" is the wrong side of that trade (worst case with dialogs suppressed
-      // the button visibly does nothing, which beats silently deciding chain-wide).
+      // Two optional prompts — resume variant, then channel. Blank = apply without one
+      // (zero-friction default; edit later via the inline fields). Cancel/Escape ABORTS the
+      // whole action — an accidental Applied click must have a way out, and a dialog
+      // dismissal reading as "commit anyway" is the wrong side of that trade (worst case
+      // with dialogs suppressed the button visibly does nothing, which beats silently
+      // deciding chain-wide).
       const rv = prompt("Resume variant used (blank = none, Cancel = don't mark applied):", "");
       if (rv === null) return;
-      decide(div, j, "applied", undefined, rv.trim() || undefined);
+      const ch = prompt(`Channel — ${CHANNELS.join(" / ")} (blank = none, Cancel = don't mark applied):`, "");
+      if (ch === null) return;
+      const chv = ch.trim().toLowerCase();
+      if (chv && !CHANNELS.includes(chv)) {
+        // A typo'd channel must not abort the apply (the server would refuse the WHOLE
+        // decision) nor be sent raw — record without it; the card's select fixes it later.
+        // "Applied tab": outside the today view the apply removes the card from the
+        // current view, so that is where the fix-up select actually lives.
+        alert(`channel must be one of: ${CHANNELS.join(", ")} — applying without a channel (set it on the card in the Applied tab afterwards)`);
+      }
+      decide(div, j, "applied", undefined, rv.trim() || undefined,
+             CHANNELS.includes(chv) ? chv : undefined);
     }));
     actions.appendChild(btn("Passed", "pass", () => decide(div, j, "passed")));
     const sel = document.createElement("select");
@@ -340,7 +354,10 @@ function card(j) {
     // Outcome tracking controls. The event lands on the chain server-side (canonical-keyed,
     // read chain-wide), so recording from a relisting's card is fine.
     const orow = div.querySelector(".outcome");
-    if (orow) orow.appendChild(resumeField(div, j));
+    if (orow) {
+      orow.appendChild(resumeField(div, j));
+      orow.appendChild(channelField(div, j));
+    }
     const esel = document.createElement("select");
     esel.innerHTML = `<option value="">event…</option>`
       + EVENTS.map(e => `<option value="${e}">${e.replace(/_/g, " ")}</option>`).join("");
@@ -459,7 +476,7 @@ function releaseBusy(url, div) {
 
 // Mirror server-side cmd_mark / cmd_reject on the local job object so we can update the card
 // without refetching the whole list.
-function patchJob(j, action, gate, resume) {
+function patchJob(j, action, gate, resume, channel) {
   if (action === "applied" || action === "passed") { j.app_status = action; j.status_date = TODAY; }
   else if (action === "undo_app") { j.app_status = null; j.status_date = null; }
   else if (action === "reject") { j.filter_source = "manual"; j.filter_gate = gate || "other"; }
@@ -468,9 +485,13 @@ function patchJob(j, action, gate, resume) {
   // variant; an undo (or a 'passed') clears the cached outcome fields chain-wide. (Server-side
   // the event HISTORY survives an undo and a re-apply recomputes the outcome back — the next
   // reload shows it; this mirror only needs to keep the card honest until then.)
-  if (action === "applied") { j.resume_variant = resume || null; j.chain_resume_variant = resume || null; }
+  if (action === "applied") {
+    j.resume_variant = resume || null; j.chain_resume_variant = resume || null;
+    j.channel = channel || null; j.chain_channel = channel || null;
+  }
   if (action === "undo_app" || action === "passed") {
     j.resume_variant = null; j.chain_resume_variant = null;
+    j.channel = null; j.chain_channel = null;
     j.outcome_status = null; j.outcome_date = null;
     j.chain_outcome_status = null; j.chain_outcome_date = null;
   }
@@ -483,7 +504,7 @@ function patchJob(j, action, gate, resume) {
   j.chain_filter_source = j.filter_source || null;
 }
 
-async function decide(div, j, action, gate, resume) {
+async function decide(div, j, action, gate, resume, channel) {
   // linkBusy: a chain merge/unlink is committing — don't race a decision against it.
   // busyUrls: this url already has a POST in flight — .busy's pointer-events:none stops mouse
   // re-clicks but NOT keyboard activation (Enter on the still-focused button), so guard by url.
@@ -493,7 +514,7 @@ async function decide(div, j, action, gate, resume) {
   busyUrls.add(j.job_url);
   mutBusy++;
   try {
-    const data = await postJSON("/api/decision", {job_url: j.job_url, action, gate, resume});
+    const data = await postJSON("/api/decision", {job_url: j.job_url, action, gate, resume, channel});
     if (!data.ok) { alert(data.message || "failed"); return; }
     // The decision propagates across the repost chain, so more than the clicked card may change.
     const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
@@ -508,7 +529,7 @@ async function decide(div, j, action, gate, resume) {
       affected.forEach(u => decidedThisSession.delete(u));
     }
     exemptFromHide(data.exempt);
-    patchJob(j, action, gate, resume);
+    patchJob(j, action, gate, resume, channel);
     // Overwrite the mirror's guesses with the server's post-mutation chain truth: a
     // re-apply RESTORES the outcome from kept event history and may inherit a stored
     // resume variant — neither is derivable client-side, and rendering the stale mirror
@@ -519,12 +540,15 @@ async function decide(div, j, action, gate, resume) {
           r.chain_outcome_status = data.outcome_status;
           r.chain_outcome_date = data.outcome_date;
           r.chain_resume_variant = data.resume_variant;
+          r.chain_channel = data.channel;
         }
       }
       j.chain_outcome_status = data.outcome_status;
       j.chain_outcome_date = data.outcome_date;
       j.chain_resume_variant = data.resume_variant;
       j.resume_variant = data.resume_variant;
+      j.chain_channel = data.channel;
+      j.channel = data.channel;
     }
     // A load() raced this decision (tab/date change mid-flight — the only rebuild sources the
     // entry guards don't block, and each bumps loadSeq): its rows may have been read before the
@@ -657,12 +681,65 @@ async function toggleHistory(div, j, btnEl) {
   btnEl.textContent = "History ▾";
 }
 
+// The ONE copy of the applied-field save-on-change machinery — shared by resumeField and
+// channelField so a race/busy fix can never land in one field and not the other. It runs
+// under the SAME in-flight discipline as decide()/postEvent (these saves were the one
+// mutating path outside it, and the blur that triggers a save fires exactly when the user
+// clicks another button on the card — i.e. exactly when a concurrent mutation on the same
+// chain is about to start). Returns the change handler. `opts`:
+//   action      /api/decision action (set_resume | set_channel)
+//   payloadKey  request-body key carrying the value (resume | channel)
+//   localKey    this row's own field to mirror        (resume_variant | channel)
+//   chainKey    the chain-wide field mirrored on affected rows (chain_resume_variant | …)
+//   selector    sibling control selector, synced in place
+//   control     the input/select element (read + reverted via .value)
+//   readValue   () => the normalized value to save; empty string clears server-side
+function saveAppliedField(div, j, {action, payloadKey, localKey, chainKey, selector,
+                                   control, readValue}) {
+  const revert = () => { control.value = j[chainKey] || ""; };
+  return async () => {
+    const v = readValue();
+    if (v === (j[chainKey] || "")) return;  // no-op change — don't lock the card
+    if (linkBusy || busyUrls.has(j.job_url)) {
+      revert();  // a mutation is in flight — revert, retry after
+      return;
+    }
+    const seq0 = loadSeq;
+    div.classList.add("busy");
+    busyUrls.add(j.job_url);
+    mutBusy++;
+    try {
+      const data = await postJSON("/api/decision",
+        {job_url: j.job_url, action, [payloadKey]: v});
+      if (!data.ok) { alert(data.message || "failed"); revert(); return; }
+      if (loadSeq !== seq0) { await load(); return; }  // superseded — refetch (see postEvent)
+      j[localKey] = v || null;
+      j[chainKey] = v || null;
+      const affected = new Set(data.affected || []);
+      for (const r of jobsData) {
+        if (affected.has(r.job_url)) r[chainKey] = v || null;
+      }
+      // Sync sibling cards' controls IN PLACE (no rebuild — that would wipe their other
+      // in-progress input, see postEvent's guard): a same-chain card on screen must not
+      // keep displaying the old value beside the one just saved.
+      list.querySelectorAll(".card").forEach(el => {
+        if (el !== div && affected.has(el.dataset.url)) {
+          const sib = el.querySelector(selector);
+          if (sib) sib.value = v;
+        }
+      });
+    } catch (e) {
+      alert("error: " + e);
+      revert();
+    } finally {
+      mutBusy--;
+      releaseBusy(j.job_url, div);
+    }
+  };
+}
+
 // Inline resume-variant field on applied cards. Saves on change (blur after an edit) or
-// Enter; empty clears. Server-side it propagates chain-wide (chain.set_resume). The save
-// runs under the SAME in-flight discipline as decide()/postEvent — this was the one
-// mutating path outside it, and the blur that triggers the save fires exactly when the
-// user clicks another button on the card (Undo, a dupe control), i.e. exactly when a
-// concurrent mutation on the same chain is about to start.
+// Enter; empty clears. Server-side it propagates chain-wide (chain.set_resume).
 function resumeField(div, j) {
   const wrap = document.createElement("span");
   wrap.className = "outcome";
@@ -674,45 +751,33 @@ function resumeField(div, j) {
   inp.title = "resume variant sent (Enter or click away to save)";
   wrap.appendChild(inp);
   inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
-  inp.addEventListener("change", async () => {
-    const v = inp.value.trim();
-    if (v === (j.chain_resume_variant || "")) return;  // no-op blur — don't lock the card
-    if (linkBusy || busyUrls.has(j.job_url)) {
-      inp.value = j.chain_resume_variant || "";  // a mutation is in flight — revert, retry after
-      return;
-    }
-    const seq0 = loadSeq;
-    div.classList.add("busy");
-    busyUrls.add(j.job_url);
-    mutBusy++;
-    try {
-      const data = await postJSON("/api/decision",
-        {job_url: j.job_url, action: "set_resume", resume: v});
-      if (!data.ok) { alert(data.message || "failed"); inp.value = j.chain_resume_variant || ""; return; }
-      if (loadSeq !== seq0) { await load(); return; }  // superseded — refetch (see postEvent)
-      j.resume_variant = v || null;
-      j.chain_resume_variant = v || null;
-      const affected = new Set(data.affected || []);
-      for (const r of jobsData) {
-        if (affected.has(r.job_url)) r.chain_resume_variant = v || null;
-      }
-      // Sync sibling cards' inputs IN PLACE (no rebuild — that would wipe their other
-      // in-progress input, see postEvent's guard): a same-chain card on screen must not
-      // keep displaying the old variant beside the one just saved.
-      list.querySelectorAll(".card").forEach(el => {
-        if (el !== div && affected.has(el.dataset.url)) {
-          const sib = el.querySelector(".resume-in");
-          if (sib) sib.value = v;
-        }
-      });
-    } catch (e) {
-      alert("error: " + e);
-      inp.value = j.chain_resume_variant || "";
-    } finally {
-      mutBusy--;
-      releaseBusy(j.job_url, div);
-    }
-  });
+  inp.addEventListener("change", saveAppliedField(div, j, {
+    action: "set_resume", payloadKey: "resume", localKey: "resume_variant",
+    chainKey: "chain_resume_variant", selector: ".resume-in", control: inp,
+    readValue: () => inp.value.trim(),
+  }));
+  return wrap;
+}
+
+// Inline channel select on applied cards — resumeField's sibling, same shared save core
+// (saveAppliedField); server-side chain.set_channel propagates chain-wide and validates
+// against states.ALL_CHANNELS. Blank clears.
+function channelField(div, j) {
+  const wrap = document.createElement("span");
+  wrap.className = "outcome";
+  wrap.innerHTML = `📨`;
+  const sel = document.createElement("select");
+  sel.className = "channel-in";
+  sel.title = "application channel (how it went out)";
+  sel.innerHTML = `<option value="">channel…</option>`
+    + CHANNELS.map(c => `<option value="${c}">${c}</option>`).join("");
+  sel.value = j.chain_channel || "";
+  wrap.appendChild(sel);
+  sel.addEventListener("change", saveAppliedField(div, j, {
+    action: "set_channel", payloadKey: "channel", localKey: "channel",
+    chainKey: "chain_channel", selector: ".channel-in", control: sel,
+    readValue: () => sel.value,
+  }));
   return wrap;
 }
 

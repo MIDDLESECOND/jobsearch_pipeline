@@ -46,7 +46,7 @@ def make_job(conn, *, job_url=None, title="Data Analyst", company="Acme Corp",
              source="linkedin", repost_of=None, repost_source=None,
              app_status=None, status_date=None, filter_source=None,
              filter_gate=None, filter_date=None, norm_title=None, fingerprint=None,
-             outcome_status=None, outcome_date=None, resume_variant=None):
+             outcome_status=None, outcome_date=None, resume_variant=None, channel=None):
     """Insert one jobs row, deriving the normalized/fingerprint columns from
     company/title/location exactly as the real fetchers do (override-able). Returns
     the inserted sqlite3.Row."""
@@ -65,14 +65,14 @@ def make_job(conn, *, job_url=None, title="Data Analyst", company="Acme Corp",
             salary_min, salary_max, description, source, repost_of, repost_source,
             app_status, status_date, filter_source, filter_gate, filter_date,
             norm_company, norm_title, fingerprint,
-            outcome_status, outcome_date, resume_variant)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            outcome_status, outcome_date, resume_variant, channel)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (job_url, title, company, location, search_name, tier, first_seen, date_posted,
          status, verdict, failed_gate, fit_score, bucket, eval_json,
          salary_min, salary_max, description, source, repost_of, repost_source,
          app_status, status_date, filter_source, filter_gate, filter_date,
          norm_company, norm_title, fingerprint,
-         outcome_status, outcome_date, resume_variant),
+         outcome_status, outcome_date, resume_variant, channel),
     )
     conn.commit()
     return conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()

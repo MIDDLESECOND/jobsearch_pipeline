@@ -64,7 +64,7 @@ python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB o
 python pipeline.py stats                  # DB counts
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
-python pipeline.py applied --url <id> [--resume V] [--undo]   # --resume records the variant sent
+python pipeline.py applied --url <id> [--resume V] [--channel C] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral)
 python pipeline.py passed  --url <id> [--undo]
 python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
 
@@ -154,10 +154,12 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
   `chain._recompute_outcome` is the ONE writer of those two cache columns, and the cache is
   always a pure function of (chain applied?, events) — latest non-note event wins, cleared while
   not applied, restored on re-apply (undoing `applied` never deletes history).
-  `jobs.resume_variant` is separate: an applied-only field written uniformly chain-wide by
-  `propagate_app_status`/`set_resume` (given → written; absent on a re-assert → inherited from
-  the chain's stored value; chain leaves applied → cleared), with no history — it is NOT
-  restored on re-apply. Lifecycle events require the
+  `jobs.resume_variant` and `jobs.channel` are separate: applied-only fields written uniformly
+  chain-wide by `propagate_app_status`/`set_resume`/`set_channel` (given → written; absent on a
+  re-assert → inherited from the chain's stored value; chain leaves applied → cleared), with no
+  history — NOT restored on re-apply. `channel` is a closed vocabulary (`states.ALL_CHANNELS`:
+  direct | agency | referral, validated in chain, no CHECK); `resume_variant` is free text.
+  Lifecycle events require the
   chain applied; `note` events attach anywhere. `app_events.event_type`/`jobs.outcome_status`
   carry **no schema CHECK** on purpose (user-decision vocabulary, enforced in
   `chain.record_event` against `states.ALL_EVENTS` — see states.py's docstring); don't add one.
@@ -167,9 +169,11 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system
   prompt. To change *how postings are judged*, edit those markdown files — do not hardcode judgment
-  in Python. The one exception: the guide's load-bearing routing rule (the "50/0 fix":
-  `ai_artifact_depth == 0` caps a PASS to RECRUITER_ONLY) is enforced in code so it can't depend on
-  the model complying.
+  in Python. The exceptions: the guide's load-bearing routing rules — the "50/0 fix"
+  (`ai_artifact_depth == 0` caps a PASS to RECRUITER_ONLY; fails CLOSED on a missing score) and
+  the formal-leadership cap (`formal_leadership_required: true` caps the same way; fails OPEN on
+  a missing field, since pre-cap eval_json rows lack the key) — are enforced in code
+  (`evaluation.normalize_result`) so they can't depend on the model complying.
 
 - **Provider default is DeepSeek** (cheap, but deliberately under-filters — which is why the
   hard-filter / `reject` override layer exists). `filters.yaml` holds user-maintained deterministic

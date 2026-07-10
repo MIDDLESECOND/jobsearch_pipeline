@@ -24,11 +24,12 @@ from flask import Flask, jsonify, render_template, request
 
 from chain import (resolve_posting, mark_posting, reject_posting, effective_decisions,
                    effective_decision, dupe_resolve, dupe_commit, dupe_unlink,
-                   record_event, undo_event, chain_events, set_resume)
+                   record_event, undo_event, chain_events, set_resume, set_channel)
 from core import connect_db, get_db, load_config
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
-from states import (GATE_NAMES, ALL_EVENTS, STATUS_EVALUATED, STATUS_REPOST_DECIDED,
-                    STATUS_REPOST_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY)
+from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
+                    STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
+                    VERDICT_RECRUITER_ONLY)
 
 app = Flask(__name__)
 
@@ -88,6 +89,7 @@ def row_to_dict(row, cap, dec):
         "outcome_status": row["outcome_status"],
         "outcome_date": row["outcome_date"],
         "resume_variant": row["resume_variant"],
+        "channel": row["channel"],
         "date_posted": row["date_posted"],
         "first_seen": row["first_seen"],
         # Server-computed (report.posting_age) so the label wording can't drift from the report.
@@ -114,6 +116,7 @@ def row_to_dict(row, cap, dec):
         "chain_outcome_status": dec["outcome_status"],
         "chain_outcome_date": dec["outcome_date"],
         "chain_resume_variant": dec["resume_variant"],
+        "chain_channel": dec["channel"],
         # The ROLE's verdict read through the chain (most favorable member — states.VERDICT_FAVOR).
         # For a 'repost_evaluated' row (eval skipped, own verdict NULL) this is the one to show;
         # for an evaluated row it normally equals row.verdict.
@@ -195,6 +198,7 @@ def index():
         "index.html",
         gates=GATE_OPTIONS,
         events=list(ALL_EVENTS),
+        channels=list(ALL_CHANNELS),
         today=date.today().isoformat(),
         feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
     )
@@ -267,13 +271,14 @@ def api_decision():
     action = body.get("action")
     gate = body.get("gate") or "other"
     resume = body.get("resume")
+    channel = body.get("channel")
     if not job_url or action not in ("applied", "passed", "reject", "undo_app", "undo_reject",
-                                     "set_resume"):
+                                     "set_resume", "set_channel"):
         return jsonify({"ok": False, "message": "bad request"}), 400
-    if not _opt_str(resume):
+    if not (_opt_str(resume) and _opt_str(channel)):
         # A non-string here would AttributeError inside the cores (`.strip()`) — a Flask HTML
         # 500 instead of this route's JSON error contract — or be stored as a raw number.
-        return jsonify({"ok": False, "message": "resume must be a string"}), 400
+        return jsonify({"ok": False, "message": "resume/channel must be strings"}), 400
 
     conn = connect_db(load_config())
     try:
@@ -284,7 +289,7 @@ def api_decision():
         if err:
             return jsonify({"ok": False, "message": err, "affected": [], "exempt": []})
         if action == "applied":
-            ok, message, affected, exempt = mark_posting(conn, row, action, resume)
+            ok, message, affected, exempt = mark_posting(conn, row, action, resume, channel)
         elif action == "passed":
             ok, message, affected, exempt = mark_posting(conn, row, action)
         elif action == "undo_app":
@@ -295,6 +300,10 @@ def api_decision():
             # Edit-after-the-fact for the resume variant (chain.set_resume requires the
             # chain applied); never flips decided/undecided, so exempt stays the handle.
             ok, message, affected, exempt = set_resume(conn, row, resume)
+        elif action == "set_channel":
+            # Same edit-after-the-fact contract as set_resume; the core validates the
+            # value against states.ALL_CHANNELS.
+            ok, message, affected, exempt = set_channel(conn, row, channel)
         else:  # undo_reject
             ok, message, affected, exempt = reject_posting(conn, row, "other", undo=True)
         # Post-mutation chain truth for the client to patch from — the outcome cache is
@@ -313,7 +322,8 @@ def api_decision():
     if dec is not None:
         resp.update({"outcome_status": dec["outcome_status"],
                      "outcome_date": dec["outcome_date"],
-                     "resume_variant": dec["resume_variant"]})
+                     "resume_variant": dec["resume_variant"],
+                     "channel": dec["channel"]})
     return jsonify(resp)
 
 

@@ -10,8 +10,9 @@ Usage:
   python pipeline.py report                     # regenerate today's report only (no fetch, no API calls)
   python pipeline.py stats                      # quick database stats
   python pipeline.py ui                         # local web UI to triage postings (applied/passed/reject)
-  python pipeline.py applied --url X [--resume V]  # mark a posting (full URL or unique substring)
-                                                #   as applied-to; --resume records the variant sent
+  python pipeline.py applied --url X [--resume V] [--channel C]  # mark a posting (full URL or unique
+                                                #   substring) as applied-to; --resume records the variant
+                                                #   sent, --channel how it went out (direct|agency|referral)
   python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
   python pipeline.py reject  --url X --gate G   # override the model: mark a hard-fail it missed
                                                 #   (--pattern P also writes a reusable rule to filters.yaml)
@@ -35,7 +36,8 @@ from datetime import date, timedelta
 # wrappers call. Consumers (app.py, the tests, backtest_v2 / compare_models) import the real
 # modules directly — do not re-export names here for them.
 from core import load_config, get_db, run_log
-from states import GATE_NAMES, ALL_EVENTS, VERDICT_GATE_FAIL, STATUS_SALARY_FILTERED
+from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
+                    STATUS_SALARY_FILTERED)
 from chain import (
     skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
     mark_posting, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
@@ -113,24 +115,27 @@ def cmd_prune(conn, days, vacuum):
         print("[prune] done — file compacted")
 
 
-def cmd_mark(conn, url, status, resume=None):
+def cmd_mark(conn, url, status, resume=None, channel=None):
     """CLI wrapper over chain.mark_posting: record the user's decision on a posting
-    (`status` is 'applied', 'passed', or None for undo; `resume` optionally records the
-    resume variant sent with an 'applied'). `url` may be a unique substring of the
-    job_url. The decision propagates across the whole repost chain."""
+    (`status` is 'applied', 'passed', or None for undo; `resume` and `channel` optionally
+    record the resume variant sent / the application channel with an 'applied'). `url` may
+    be a unique substring of the job_url. The decision propagates across the whole repost
+    chain."""
     label = status or "undo"
-    if resume and status != "applied":
-        # propagate_app_status would drop it anyway (resume rides 'applied' only) — say so
-        # instead of silently ignoring a flag the user typed.
-        print(f"[{label}] --resume only applies with `applied` — ignored", file=sys.stderr)
-        resume = None
+    for flag, val in (("--resume", resume), ("--channel", channel)):
+        if val and status != "applied":
+            # propagate_app_status would drop it anyway (these ride 'applied' only) — say so
+            # instead of silently ignoring a flag the user typed.
+            print(f"[{label}] {flag} only applies with `applied` — ignored", file=sys.stderr)
+    if status != "applied":
+        resume = channel = None
     m, err = resolve_posting(conn, url)
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
-    _, msg, _, _ = mark_posting(conn, m, status, resume)
-    print(f"[{label}] {msg}")
-    return True
+    ok, msg, _, _ = mark_posting(conn, m, status, resume, channel)
+    print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
+    return ok
 
 
 def cmd_event(conn, url, event_type, event_date, note, undo):
@@ -321,6 +326,8 @@ def main():
     ap.add_argument("--type", dest="event_type", choices=list(ALL_EVENTS),
                     help="`event`: what happened — a lifecycle outcome, or `note` for a bare note")
     ap.add_argument("--resume", help="`applied`: resume variant sent (free text, stored on the chain)")
+    ap.add_argument("--channel", choices=list(ALL_CHANNELS),
+                    help="`applied`: how the application went out (stored on the chain)")
     ap.add_argument("--days", type=int, default=90,
                     help="`prune`: age floor in days — only rows first seen before this are touched (default 90)")
     ap.add_argument("--vacuum", action="store_true",
@@ -425,7 +432,7 @@ def main():
     elif args.command == "stats":
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):
-        cmd_mark(conn, args.url, None if args.undo else args.command, args.resume)
+        cmd_mark(conn, args.url, None if args.undo else args.command, args.resume, args.channel)
     elif args.command == "reject":
         cmd_reject(conn, args.url, args.gate, args.pattern, args.note, args.undo)
     elif args.command == "event":

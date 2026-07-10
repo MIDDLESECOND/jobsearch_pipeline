@@ -74,13 +74,14 @@ reason a high-scoring role still won't convert cold.
 | **Learning value** (`learning_value`) | Does the role *grow* AI capability — a step beyond current depth? Note: a role can be high learning value AND score 0 on artifact-depth — that's the Bucket 1 trap. High learning value is a reason to *want* the role, not evidence you can *land* it cold. | | |
 | **Technical skill match** (`technical_skill_match`) | Core skills map to required (not "plus") skills — OR gaps are ramp-able, not stated core requirements. | | |
 | **Title trajectory** (`title_trajectory`) | Lateral or modest step up; not a de-level, not a 2-rung reach. | | |
-| **Years vs. stated req** (`years_vs_stated`) | Comfortably inside the band (vs. just clearing the floor). | | |
+| **Years vs. stated req** (`years_vs_stated`) | Comfortably inside the band (vs. just clearing the floor) — **against the FUNCTION-MATCHED tenure** from the profile's by-function split, not the total (a recent title change means "N yrs as [new title]" measures against the short tenure). | | |
 
 **Total: ___ / 18.**  14–18 = strong, tailor and apply. 10–13 = acceptable-tier, apply only if friction is low. <10 = likely pass.
 
 **⭐ Starred-line rules (these override the total):**
 - If *applied-vs-research* (`ai_applied_vs_research`) scores 0–1 → near-disqualifying regardless of total (a research role wearing an architect title).
 - **If *artifact-evidences-required-depth* (`ai_artifact_depth`) scores 0 → the verdict is CAPPED at "RECRUITER_ONLY," regardless of total.** A 16/18 with this line at 0 is NOT the same role as a 16/18 with it at 3. Cold-applying the former is the "50/0" pattern. It does not become a PASS just because every other line is strong.
+- **Formal-leadership check (code-enforced cap, like the artifact-depth line).** If the posting's *required* qualifications state N+ years of formal **people leadership / management / technical program management** the candidate lacks (per the profile's leadership line), set `formal_leadership_required: true` in the output — the verdict is CAPPED at RECRUITER_ONLY regardless of total. Boundaries: (a) *required*, not preferred; (b) formal authority over people, not stakeholder/project leadership or mentoring; (c) if the leadership requirement makes the whole role management-of-delivery, the years-floor or role-substance gate may fail it first.
 
 **Enablement-cluster (assistive flag, not a cap).** The pure-enablement false positive: a role whose *entire* responsibility set is awareness campaigns, workshops/training, evangelism, adoption playbooks, and tool-selection guidance, with **no build/own/ship verbs anywhere** (strongest tell: self-declared "not hands-on" language in the posting itself). It still passes the gates — it IS applied-AI work, not research — so do not gate-fail it: emit an `enablement-cluster` flag, score `title_trajectory` honestly (0–1), and route it as deadline insurance (below Bucket 3 priority; see Part 2.5). Enablement-in-title with real build content (enablement *engineer/developer* roles) gets no flag — read the responsibilities, not the title. Decide deliberately whether this cluster should harden into a role-substance gate fail once your deadline pressure lifts (e.g., after an offer lands).
 
@@ -117,9 +118,15 @@ where the required bar is "you've shipped a working AI workflow," not "you've bu
 cold-apply OK as deadline insurance, always below Bucket 3 in priority.
 
 **Routing summary:** Cold applications (verdict **PASS**) → Bucket 3 first, small-gap Bucket 2
-second, flagged `enablement-cluster` roles as insurance behind both. Bucket 1 → verdict
-**RECRUITER_ONLY**, recruiters and referrals only. The fix for a 50/0 is routing, not
-de-prioritizing AI.
+second, flagged `enablement-cluster` roles as insurance behind both. Bucket 1 and
+`formal_leadership_required` roles → verdict **RECRUITER_ONLY**, recruiters and referrals only.
+The fix for a 50/0 is routing, not de-prioritizing AI.
+
+**Cold-apply bar:** a PASS means more than "conceptual fit" — cold-apply only when the resume
+as written **directly proves every requirement in the posting's required column** (tools used
+in production, function-matched years met, no unheld leadership requirement, no title reach).
+A role that needs any *explaining* goes through a human channel that can carry the
+explanation; an ATS screen cannot. When in doubt, that's what RECRUITER_ONLY is for.
 
 ---
 

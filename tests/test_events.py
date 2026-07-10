@@ -1,5 +1,5 @@
 """Post-application outcome tracking — the chain.record_event / undo_event / chain_events /
-set_resume cores and the _recompute_outcome cache they maintain.
+set_resume / set_channel cores and the _recompute_outcome cache they maintain.
 
 The invariants pinned here:
   * an event is written ONCE, keyed to the chain's canonical at write time, and read
@@ -304,3 +304,96 @@ def test_vocabulary_shape(conn):
     # lifecycle set (it never sets an outcome) but inside the recordable set.
     assert EVENT_NOTE not in APP_EVENTS
     assert set(APP_EVENTS) | {EVENT_NOTE} == set(ALL_EVENTS)
+
+
+# --------------------------------------------------------------- channel (set_channel &
+# propagation) — resume_variant's sibling field, same applied-only chain-wide contract,
+# plus the closed-vocabulary validation resume's free text doesn't have.
+
+def test_channel_set_at_apply_time_and_edited_after(conn):
+    make_job(conn, job_url="canon", company="Chain Co")
+    relist = make_job(conn, job_url="relist", company="Chain Co", repost_of="canon")
+    chain.mark_posting(conn, relist, "applied", channel="direct")
+    got = {r["job_url"]: r["channel"]
+           for r in conn.execute("SELECT job_url, channel FROM jobs")}
+    assert got == {"canon": "direct", "relist": "direct"}   # propagated chain-wide
+    # Edit after the fact; empty clears.
+    ok, _, _, _ = chain.set_channel(conn, relist, "agency")
+    assert ok
+    assert chain.effective_decision(conn, relist)["channel"] == "agency"
+    chain.set_channel(conn, relist, "  ")
+    assert chain.effective_decision(conn, relist)["channel"] is None
+    # Undo clears it with the decision; a decision-less chain refuses set_channel.
+    chain.mark_posting(conn, relist, None)
+    assert chain.effective_decision(conn, relist)["channel"] is None
+    ok, msg, _, _ = chain.set_channel(conn, relist, "referral")
+    assert not ok and "applied" in msg
+
+
+def test_channel_validated_against_closed_vocabulary(conn):
+    # Unlike resume's free text, channel is a closed vocabulary — a misspelling would split
+    # the funnel counts the field exists to make comparable. Refused at apply time (nothing
+    # written, not even the app_status) and at edit time.
+    row = make_job(conn, job_url="u1")
+    ok, msg, _, _ = chain.mark_posting(conn, row, "applied", channel="staffing")
+    assert not ok and "channel" in msg
+    got = conn.execute("SELECT app_status, channel FROM jobs WHERE job_url='u1'").fetchone()
+    assert tuple(got) == (None, None)
+    chain.mark_posting(conn, row, "applied", channel="direct")
+    ok, msg, _, _ = chain.set_channel(conn, row, "recruiter")
+    assert not ok and "channel" in msg
+    assert chain.effective_decision(conn, row)["channel"] == "direct"
+
+
+def test_channel_case_folds_at_every_entry_point(conn):
+    # _norm_channel owns the case rule (server-side, not per-front-end): "Direct" through
+    # apply time and " REFERRAL " through the edit path both store the canonical spelling —
+    # a raw API caller must get the same behavior the UI's lowercasing gives its users.
+    row = make_job(conn, job_url="u1")
+    ok, _, _, _ = chain.mark_posting(conn, row, "applied", channel="Direct")
+    assert ok
+    assert chain.effective_decision(conn, row)["channel"] == "direct"
+    ok, _, _, _ = chain.set_channel(conn, row, " REFERRAL ")
+    assert ok
+    assert chain.effective_decision(conn, row)["channel"] == "referral"
+
+
+def test_reassert_applied_without_channel_keeps_stored_value(conn):
+    # Same inherit-on-reassert contract as resume_variant: a re-run of `applied` without
+    # --channel must not blank the stored value, and must stamp a late-fetched relisting
+    # with the chain's value rather than applied-with-NULL beside it.
+    make_job(conn, job_url="canon", company="Chain Co")
+    canon = conn.execute("SELECT * FROM jobs WHERE job_url='canon'").fetchone()
+    chain.mark_posting(conn, canon, "applied", channel="referral")
+    relist = make_job(conn, job_url="late", company="Chain Co", repost_of="canon")
+    chain.mark_posting(conn, relist, "applied")             # re-assert, no --channel
+    got = {r["job_url"]: r["channel"]
+           for r in conn.execute("SELECT job_url, channel FROM jobs")}
+    assert got == {"canon": "referral", "late": "referral"}
+
+
+def test_channel_never_rides_a_non_applied_chain(conn):
+    # Applied-only, like resume_variant: a 'passed' mark with a channel must not store it,
+    # and an applied→passed switch clears a stored one (matching the UI mirror).
+    row = make_job(conn, job_url="u1")
+    chain.mark_posting(conn, row, "passed", channel="direct")
+    assert conn.execute("SELECT channel FROM jobs WHERE job_url='u1'").fetchone()[0] is None
+    row2 = make_job(conn, job_url="u2")
+    chain.mark_posting(conn, row2, "applied", channel="direct")
+    chain.mark_posting(conn, row2, "passed")
+    assert conn.execute("SELECT channel FROM jobs WHERE job_url='u2'").fetchone()[0] is None
+
+
+def test_dupe_merge_coalesces_channel_across_sides(conn):
+    # Same coalesce as the resume variant: winner's preferred, loser's as fallback, written
+    # chain-wide — never a mixed chain whose _decide read is SQL-row-order-dependent.
+    make_job(conn, job_url="a", company="A Co", first_seen="2026-05-01T09:00:00",
+             app_status="applied", status_date="2026-06-01")            # winner: no channel
+    make_job(conn, job_url="b", company="B Co", first_seen="2026-06-01T09:00:00",
+             app_status="applied", status_date="2026-06-01", channel="agency")
+    plan, err = chain.dupe_resolve(conn, "a", "b")
+    assert err is None
+    chain.dupe_commit(conn, plan)
+    got = {r["job_url"]: r["channel"]
+           for r in conn.execute("SELECT job_url, channel FROM jobs")}
+    assert got == {"a": "agency", "b": "agency"}    # uniform, loser's channel survived

@@ -1011,11 +1011,13 @@ def dupe_resolve(conn, url, of_url):
     a, err = resolve_posting(conn, url)
     if err:
         return None, err
+    assert a is not None  # resolve_posting returns row when err is None
     if not of_url:
         return None, "provide the other posting (--of <id or unique substring of its job_url>)"
     b, err = resolve_posting(conn, of_url)
     if err:
         return None, err
+    assert b is not None
 
     # Resolve each side to its chain's canonical, so we link canonical-to-canonical (never build
     # a 2-level chain the flat _chain_targets can't traverse).

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportAttributeAccessIssue=false
 """Head-to-head: run the SAME gate-eval prompt through Claude + DeepSeek V4 on a
 sample of real postings, then diff the verdicts. Quality test, not production.
 

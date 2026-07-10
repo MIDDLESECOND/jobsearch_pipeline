@@ -1,0 +1,14 @@
+{
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "warning",
+  "reportOptionalSubscript": "error",
+  "reportArgumentType": "error",
+  "reportAttributeAccessIssue": "warning",
+  "reportUnknownMemberType": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportMissingTypeStubs": false,
+  "reportPrivateUsage": false
+}

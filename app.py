@@ -410,6 +410,7 @@ def api_dupe():
             if err:
                 ok, message = False, err
             else:
+                assert plan is not None  # dupe_resolve returns plan when err is None
                 affected, exempt = dupe_commit(conn, plan)
                 w = plan["winner"]
                 ok, message = True, f"linked under {w['title']} — {w['company']}"

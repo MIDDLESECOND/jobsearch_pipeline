@@ -13,7 +13,7 @@ import json
 import re
 import sys
 import time
-import urllib.parse
+from urllib import parse
 from datetime import datetime
 
 from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
@@ -192,7 +192,7 @@ def _adzuna_job_url(r):
     if not isinstance(redirect, str) or not redirect:
         return None
     try:
-        parts = urllib.parse.urlsplit(redirect)
+        parts = parse.urlsplit(redirect)
     except ValueError:
         # Malformed authority (e.g. an unclosed IPv6 bracket) — one bad row must not abort
         # the whole Adzuna batch via _run_fetch_stage.
@@ -240,7 +240,7 @@ def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
     # API's requirement, not a choice. The key therefore lives in this URL string, so it must
     # never be logged; the caller's error path runs the exception message through _redact() as a
     # safety net in case a future exception type embeds the URL.
-    url = ADZUNA_SEARCH_URL.format(country=country) + "?" + urllib.parse.urlencode(params)
+    url = ADZUNA_SEARCH_URL.format(country=country) + "?" + parse.urlencode(params)
     with urllib.request.urlopen(url, timeout=30) as resp:
         return json.load(resp).get("results", [])
 

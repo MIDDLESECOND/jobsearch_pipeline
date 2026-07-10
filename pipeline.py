@@ -251,6 +251,7 @@ def cmd_dupe(conn, url, of_url, undo, assume_yes):
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
+    assert plan is not None  # dupe_resolve returns plan when err is None
     winner, loser, dec = plan["winner"], plan["loser"], plan["dec"]
 
     # Preview + confirm: a wrong merge buries a real job under another role's decision.

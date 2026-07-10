@@ -28,6 +28,7 @@ def test_chain_decision_applied_outranks_passed(conn):
     make_job(conn, job_url="r1", repost_of="c", app_status="applied",
              status_date="2026-06-03")
     dec = chain._chain_decision(conn, {"c", "r1"})
+    assert dec is not None
     assert dec["app_status"] == "applied"
 
 
@@ -370,6 +371,7 @@ def test_dupe_resolve_picks_earliest_first_seen_as_canonical(conn):
     make_job(conn, job_url="early", first_seen="2026-06-01T00:00:00")
     plan, err = chain.dupe_resolve(conn, "late", "early")
     assert err is None
+    assert plan is not None
     assert plan["winner"]["job_url"] == "early"
     assert plan["loser"]["job_url"] == "late"
 
@@ -379,6 +381,7 @@ def test_dupe_resolve_rejects_same_role(conn):
     make_job(conn, job_url="r1", repost_of="c")
     plan, err = chain.dupe_resolve(conn, "c", "r1")
     assert plan is None
+    assert err is not None
     assert "already the same role" in err
 
 
@@ -387,6 +390,7 @@ def test_dupe_resolve_blocks_conflicting_decisions(conn):
     make_job(conn, job_url="b", app_status="passed", status_date="2026-06-02")
     plan, err = chain.dupe_resolve(conn, "a", "b")
     assert plan is None
+    assert err is not None
     assert "decided differently" in err
 
 

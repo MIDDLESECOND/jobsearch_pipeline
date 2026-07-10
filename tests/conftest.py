@@ -40,9 +40,10 @@ _n = [0]
 
 def make_job(conn, *, job_url=None, title="Data Analyst", company="Acme Corp",
              location="New York, NY", search_name="s1", tier="primary",
-             first_seen="2026-06-01T00:00:00", date_posted="", status="evaluated", verdict="PASS",
-             failed_gate=None, fit_score=12, bucket=2, eval_json=None,
-             salary_min=None, salary_max=None, description="a job description",
+             first_seen="2026-06-01T00:00:00", date_posted="", status="evaluated",
+             verdict: str | None = "PASS",
+             failed_gate=None, fit_score: int | None = 12, bucket: int | None = 2, eval_json=None,
+             salary_min=None, salary_max=None, description: str | None = "a job description",
              source="linkedin", repost_of=None, repost_source=None,
              app_status=None, status_date=None, filter_source=None,
              filter_gate=None, filter_date=None, norm_title=None, fingerprint=None,

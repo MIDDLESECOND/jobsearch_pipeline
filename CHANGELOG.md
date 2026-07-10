@@ -7,6 +7,53 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-09 — post-application outcome tracking (schema: `app_events` table + 3 `jobs` columns)
+
+### Why
+`applied` was a terminal state: no record of interviews/offers/employer
+rejections/ghosting, no notes, no resume-variant memory — so no feedback loop (does
+fit_score predict responses? which search converts?) and no way to surface "applied N
+days ago, no response". This is the foundation; the follow-up/funnel view and outcome
+analytics are fast-follows on this schema.
+
+### Schema
+- **New `app_events` table** (append-only history): `id, job_url, event_type, event_date,
+  note, created_at` + `idx_app_events_job_url`. A row is written ONCE, keyed to the
+  chain's **canonical url at write time**, and always read chain-wide — a dupe merge
+  unions both sides' histories with no data migration; unlink leaves rows where they sit.
+- **Three additive `jobs` columns**: `outcome_status`/`outcome_date` (cache of the chain's
+  latest non-note event, propagated to every member like `app_status`;
+  `chain._recompute_outcome` is the ONE writer) and `resume_variant` (free text; **applied-
+  only**: recorded at apply time or edited later via `set_resume`, always written uniformly
+  chain-wide, and cleared whenever the chain leaves `applied` — undo or a switch to
+  `passed`. Unlike the outcome cache it has no history, so it is NOT restored on re-apply).
+  No backfill: NULL outcome on an applied row *means* "no response recorded" — the
+  follow-up bucket, pure SQL:
+  `app_status='applied' AND outcome_status IS NULL AND status_date < cutoff`.
+- **Deliberately NO CHECK** on `app_events.event_type`/`jobs.outcome_status`: user-decision
+  vocabulary (like `app_status`), enforced code-side in `chain.record_event` against
+  `states.ALL_EVENTS` — a CHECK would be a second frozen-CHECK liability outside
+  `_rebuild_for_stale_checks`' jobs-only scope.
+
+### Vocabulary & rules (states.py)
+- Lifecycle events `recruiter_screen | interview (repeatable = rounds) | offer |
+  rejected_by_employer | ghosted | withdrew` require the chain applied; `note` attaches
+  free text to any posting and never sets the outcome.
+- Latest event wins the cache (`event_date`, insertion-order tiebreak). Undoing `applied`
+  clears the cache but KEEPS history; re-applying recomputes it back. `event --undo`
+  deletes the chain's most recently *recorded* event.
+
+### Surfaces
+- CLI: `pipeline.py event --url X --type T [--date D] [--note N] [--undo]`;
+  `applied --resume V`; `stats` gains a per-role outcome funnel.
+- UI: applied cards get an outcome tag (or "no response — applied Nd ago"), record
+  controls, lazy History timeline, Undo last, inline resume-variant field; the Applied
+  button asks (optionally) for the variant. New `POST /api/event` + `GET /api/events`.
+- Report: the ALREADY APPLIED banner appends the outcome
+  (`2026-06-20 · interview 2026-07-01`).
+
+---
+
 ## 2026-07-06 — `enablement-cluster` flag + deadline-insurance routing (guide only, no code)
 
 ### Why

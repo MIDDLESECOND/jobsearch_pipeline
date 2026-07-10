@@ -23,10 +23,11 @@ from datetime import date
 from flask import Flask, jsonify, render_template, request
 
 from chain import (resolve_posting, mark_posting, reject_posting, effective_decisions,
-                   dupe_resolve, dupe_commit, dupe_unlink)
+                   effective_decision, dupe_resolve, dupe_commit, dupe_unlink,
+                   record_event, undo_event, chain_events, set_resume)
 from core import connect_db, get_db, load_config
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
-from states import (GATE_NAMES, STATUS_EVALUATED, STATUS_REPOST_DECIDED,
+from states import (GATE_NAMES, ALL_EVENTS, STATUS_EVALUATED, STATUS_REPOST_DECIDED,
                     STATUS_REPOST_EVALUATED, VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 
 app = Flask(__name__)
@@ -84,6 +85,9 @@ def row_to_dict(row, cap, dec):
         "flags": ev.get("flags") or [],
         "app_status": row["app_status"],
         "status_date": row["status_date"],
+        "outcome_status": row["outcome_status"],
+        "outcome_date": row["outcome_date"],
+        "resume_variant": row["resume_variant"],
         "date_posted": row["date_posted"],
         "first_seen": row["first_seen"],
         # Server-computed (report.posting_age) so the label wording can't drift from the report.
@@ -104,6 +108,12 @@ def row_to_dict(row, cap, dec):
         "chain_app_status": dec["app_status"],
         "chain_filter_source": "manual" if dec["reject"] else None,
         "chain_status_date": dec["status_date"],
+        # Chain-level outcome fields (same effective_decision source): what the Applied view
+        # renders — the cache is propagated to every member, but reading it through dec keeps
+        # a not-yet-synced relisting honest, exactly like chain_app_status above.
+        "chain_outcome_status": dec["outcome_status"],
+        "chain_outcome_date": dec["outcome_date"],
+        "chain_resume_variant": dec["resume_variant"],
         # The ROLE's verdict read through the chain (most favorable member — states.VERDICT_FAVOR).
         # For a 'repost_evaluated' row (eval skipped, own verdict NULL) this is the one to show;
         # for an evaluated row it normally equals row.verdict.
@@ -184,6 +194,7 @@ def index():
     return render_template(
         "index.html",
         gates=GATE_OPTIONS,
+        events=list(ALL_EVENTS),
         today=date.today().isoformat(),
         feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
     )
@@ -230,6 +241,13 @@ def api_clip():
     return jsonify({"text": text, "truncated": len(row["description"]) >= cap})
 
 
+def _opt_str(v):
+    """Body-field guard: optional string. The cores call .strip() on these — a number/list
+    from a malformed JSON body would AttributeError into a Flask HTML 500 instead of the
+    routes' JSON error shape, or be stored as a raw non-string."""
+    return v is None or isinstance(v, str)
+
+
 def _origin_ok():
     # CSRF guard for the state-changing routes. The browser sends an Origin header on any
     # cross-site POST; refuse it unless it matches our own origin. (Same-origin requests from the
@@ -248,8 +266,14 @@ def api_decision():
     job_url = body.get("job_url")
     action = body.get("action")
     gate = body.get("gate") or "other"
-    if not job_url or action not in ("applied", "passed", "reject", "undo_app", "undo_reject"):
+    resume = body.get("resume")
+    if not job_url or action not in ("applied", "passed", "reject", "undo_app", "undo_reject",
+                                     "set_resume"):
         return jsonify({"ok": False, "message": "bad request"}), 400
+    if not _opt_str(resume):
+        # A non-string here would AttributeError inside the cores (`.strip()`) — a Flask HTML
+        # 500 instead of this route's JSON error contract — or be stored as a raw number.
+        return jsonify({"ok": False, "message": "resume must be a string"}), 400
 
     conn = connect_db(load_config())
     try:
@@ -259,21 +283,94 @@ def api_decision():
         row, err = resolve_posting(conn, job_url)
         if err:
             return jsonify({"ok": False, "message": err, "affected": [], "exempt": []})
-        if action in ("applied", "passed"):
+        if action == "applied":
+            ok, message, affected, exempt = mark_posting(conn, row, action, resume)
+        elif action == "passed":
             ok, message, affected, exempt = mark_posting(conn, row, action)
         elif action == "undo_app":
             ok, message, affected, exempt = mark_posting(conn, row, None)
         elif action == "reject":
             ok, message, affected, exempt = reject_posting(conn, row, gate)
+        elif action == "set_resume":
+            # Edit-after-the-fact for the resume variant (chain.set_resume requires the
+            # chain applied); never flips decided/undecided, so exempt stays the handle.
+            ok, message, affected, exempt = set_resume(conn, row, resume)
         else:  # undo_reject
             ok, message, affected, exempt = reject_posting(conn, row, "other", undo=True)
+        # Post-mutation chain truth for the client to patch from — the outcome cache is
+        # server-derived state the client CANNOT mirror by rule (a re-apply restores it from
+        # event history; the prompted variant may be superseded by the chain's inherited
+        # one), so hand it the answer instead of letting patchJob guess. Same contract as
+        # /api/event's echo.
+        dec = effective_decision(conn, row) if ok else None
     finally:
         conn.close()
     # `exempt` is chain.py's authoritative "keep these visible past the hide-decided filter"
     # list — the rows whose DISPLAYED decision this operation changed (see the service-core
     # docstrings); the client applies it verbatim instead of re-deriving propagation rules.
-    return jsonify({"ok": bool(ok), "message": message,
-                    "affected": affected if ok else [], "exempt": exempt if ok else []})
+    resp = {"ok": bool(ok), "message": message,
+            "affected": affected if ok else [], "exempt": exempt if ok else []}
+    if dec is not None:
+        resp.update({"outcome_status": dec["outcome_status"],
+                     "outcome_date": dec["outcome_date"],
+                     "resume_variant": dec["resume_variant"]})
+    return jsonify(resp)
+
+
+@app.route("/api/event", methods=["POST"])
+def api_event():
+    """Record (or with undo=true remove the last) post-application outcome event on a chain —
+    thin layer over chain.record_event / undo_event, same request/response contract as
+    /api/decision. An event never flips a card decided<->undecided, so `exempt` is just the
+    clicked row (the interaction handle) and the hide-decided filter is unaffected."""
+    if not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True) or {}
+    job_url = body.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "bad request", "affected": [], "exempt": []}), 400
+    if not (_opt_str(body.get("note")) and _opt_str(body.get("date"))):
+        return jsonify({"ok": False, "message": "note/date must be strings",
+                        "affected": [], "exempt": []}), 400
+    conn = connect_db(load_config())
+    try:
+        row, err = resolve_posting(conn, job_url)
+        if err:
+            return jsonify({"ok": False, "message": err, "affected": [], "exempt": []})
+        if body.get("undo"):
+            ok, message, affected, exempt = undo_event(conn, row)
+        else:
+            ok, message, affected, exempt = record_event(
+                conn, row, body.get("type"), body.get("date") or None, body.get("note"))
+        # The card patches its outcome tag from these (chain-wide cache, one truth source).
+        dec = effective_decision(conn, row) if ok else None
+    finally:
+        conn.close()
+    return jsonify({
+        "ok": bool(ok), "message": message,
+        "affected": affected if ok else [], "exempt": exempt if ok else [],
+        "outcome_status": dec["outcome_status"] if dec else None,
+        "outcome_date": dec["outcome_date"] if dec else None,
+    })
+
+
+@app.route("/api/events")
+def api_events():
+    """The chain's full event timeline for one posting — lazy-fetched by the card's
+    History toggle, kept off the list payload like /api/clip."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify([]), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify([]), 404
+        events = chain_events(conn, row)
+    finally:
+        conn.close()
+    return jsonify([{"event_type": e["event_type"], "event_date": e["event_date"],
+                     "note": e["note"]} for e in events])
 
 
 @app.route("/api/dupe", methods=["POST"])

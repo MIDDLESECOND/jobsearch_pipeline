@@ -226,6 +226,105 @@ def test_unrecognized_host_refused(client, seed):
     assert seed.execute("SELECT app_status FROM jobs").fetchone()["app_status"] is None
 
 
+def test_decision_applied_with_resume_lands_chainwide(client, seed):
+    make_job(seed, job_url="c1", company="Chain Co")
+    make_job(seed, job_url="r1", company="Chain Co", repost_of="c1")
+    resp = _post(client, "/api/decision",
+                 {"job_url": "r1", "action": "applied", "resume": "variant-B"}).get_json()
+    assert resp["ok"] is True
+    got = {r["job_url"]: r["resume_variant"]
+           for r in seed.execute("SELECT job_url, resume_variant FROM jobs")}
+    assert got == {"c1": "variant-B", "r1": "variant-B"}
+    # set_resume edits it after the fact through the same endpoint.
+    resp = _post(client, "/api/decision",
+                 {"job_url": "c1", "action": "set_resume", "resume": "variant-C"}).get_json()
+    assert resp["ok"] is True
+    row = seed.execute("SELECT resume_variant FROM jobs WHERE job_url='r1'").fetchone()
+    assert row["resume_variant"] == "variant-C"
+
+
+# ----------------------------------------------------------------- /api/event
+
+def test_event_records_and_returns_chain_outcome(client, seed):
+    make_job(seed, job_url="c1", company="Chain Co", app_status="applied",
+             status_date="2026-06-01")
+    make_job(seed, job_url="r1", company="Chain Co", repost_of="c1",
+             app_status="applied", status_date="2026-06-01")
+    resp = _post(client, "/api/event",
+                 {"job_url": "r1", "type": "interview", "date": "2026-06-12",
+                  "note": "panel round"}).get_json()
+    assert resp["ok"] is True
+    assert set(resp["affected"]) == {"c1", "r1"} and resp["exempt"] == ["r1"]
+    # The card patches its tag from the response (chain-wide cache, one truth source).
+    assert resp["outcome_status"] == "interview" and resp["outcome_date"] == "2026-06-12"
+    rows = {r["job_url"]: r["outcome_status"]
+            for r in seed.execute("SELECT job_url, outcome_status FROM jobs")}
+    assert rows == {"c1": "interview", "r1": "interview"}
+    # ...and /api/jobs exposes the chain fields the Applied view renders.
+    j = next(x for x in client.get("/api/jobs?view=applied").get_json()
+             if x["job_url"] == "r1")
+    assert j["chain_outcome_status"] == "interview"
+    assert j["chain_outcome_date"] == "2026-06-12"
+
+    # Undo removes the last event and the response reflects the stepped-back cache.
+    resp = _post(client, "/api/event", {"job_url": "r1", "undo": True}).get_json()
+    assert resp["ok"] is True and resp["outcome_status"] is None
+
+
+def test_decision_response_carries_post_mutation_outcome_truth(client, seed):
+    # The client patches outcome/resume from the response instead of mirroring rules: a
+    # re-apply RESTORES the outcome from kept event history server-side, which no client
+    # mirror can derive — without these fields the card showed "no response" over a DB
+    # that said "interview", inviting a duplicate event record.
+    make_job(seed, job_url="c1", app_status="applied", status_date="2026-06-01",
+             resume_variant="variant-B")
+    _post(client, "/api/event", {"job_url": "c1", "type": "interview", "date": "2026-06-12"})
+    resp = _post(client, "/api/decision", {"job_url": "c1", "action": "undo_app"}).get_json()
+    assert resp["outcome_status"] is None and resp["resume_variant"] is None
+    resp = _post(client, "/api/decision", {"job_url": "c1", "action": "applied"}).get_json()
+    assert resp["outcome_status"] == "interview"    # restored from kept history
+    assert resp["outcome_date"] == "2026-06-12"
+
+
+def test_non_string_body_values_get_json_error_not_500(client, seed):
+    # The cores call .strip() on these — without the endpoint guard a number/list would
+    # AttributeError into a Flask HTML 500 instead of the routes' JSON error contract.
+    make_job(seed, job_url="c1", app_status="applied", status_date="2026-06-01")
+    r = _post(client, "/api/decision",
+              {"job_url": "c1", "action": "set_resume", "resume": 5})
+    assert r.status_code == 400 and r.get_json()["ok"] is False
+    r = _post(client, "/api/event",
+              {"job_url": "c1", "type": "interview", "note": {"text": "x"}})
+    assert r.status_code == 400 and r.get_json()["ok"] is False
+    r = _post(client, "/api/event",
+              {"job_url": "c1", "type": "interview", "date": 20260612})
+    assert r.status_code == 400 and r.get_json()["ok"] is False
+    assert seed.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 0
+
+
+def test_event_refused_on_unapplied_chain(client, seed):
+    make_job(seed, job_url="u1")
+    resp = _post(client, "/api/event", {"job_url": "u1", "type": "offer"}).get_json()
+    assert resp["ok"] is False and "applied" in resp["message"]
+    assert seed.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 0
+
+
+def test_events_timeline_and_guards(client, seed):
+    make_job(seed, job_url="c1", app_status="applied", status_date="2026-06-01")
+    _post(client, "/api/event", {"job_url": "c1", "type": "recruiter_screen",
+                                 "date": "2026-06-05"})
+    _post(client, "/api/event", {"job_url": "c1", "type": "note", "note": "pinged them"})
+    got = client.get("/api/events?job_url=c1").get_json()
+    assert [(e["event_type"], e["note"]) for e in got] == \
+        [("recruiter_screen", None), ("note", "pinged them")]
+    assert client.get("/api/events").status_code == 400
+    assert client.get("/api/events?job_url=ghost").status_code == 404
+    # State-changing route carries the same origin guard as /api/decision.
+    resp = _post(client, "/api/event", {"job_url": "c1", "type": "offer"},
+                 origin="http://evil.example")
+    assert resp.status_code == 403
+
+
 # ------------------------------------------------------------------ /api/dupe
 
 def test_dupe_links_earliest_as_canonical_and_undo_splits(client, seed):

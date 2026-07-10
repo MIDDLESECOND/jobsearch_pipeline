@@ -7,7 +7,10 @@ This module owns everything about treating multiple postings as one role:
   * fetch-time repost linking (_find_repost),
   * the repost *chain* abstraction — members, the user's effective decision across a
     chain, and propagation/reconcile (skip_decided_reposts),
-  * the manual dupe-link cores (dupe_resolve / dupe_commit / dupe_unlink).
+  * the manual dupe-link cores (dupe_resolve / dupe_commit / dupe_unlink),
+  * the post-application outcome cores (record_event / undo_event / chain_events /
+    set_resume, plus _recompute_outcome — the one writer of the cached
+    outcome_status/outcome_date columns).
 
 It was extracted from pipeline.py so the "what is this chain's decision?" question has
 ONE implementation. The report, the web UI, and the dupe conflict-guard all call
@@ -19,9 +22,10 @@ and the stdlib.
 
 import re
 import sys
-from datetime import date
+from datetime import date, datetime
 
-from states import (GATE_NAMES, STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
+from states import (GATE_NAMES, APP_EVENTS, ALL_EVENTS, EVENT_NOTE,
+                    STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_FAVOR, sql_list)
 
 
@@ -400,6 +404,11 @@ def _decide(rows):
     return {
         "app_status": app_row["app_status"] if app_row else None,
         "status_date": app_row["status_date"] if app_row else None,
+        # The outcome cache rides the applied/passed member — same propagation as app_status
+        # (_recompute_outcome writes it chain-wide), so any member's copy is authoritative.
+        "outcome_status": app_row["outcome_status"] if app_row else None,
+        "outcome_date": app_row["outcome_date"] if app_row else None,
+        "resume_variant": app_row["resume_variant"] if app_row else None,
         "reject": rej is not None,
         "filter_gate": rej["filter_gate"] if rej else None,
         "filter_date": rej["filter_date"] if rej else None,
@@ -415,7 +424,8 @@ def _chain_decision(conn, member_urls):
         return None
     qs = ",".join("?" * len(member_urls))
     rows = conn.execute(
-        f"SELECT app_status, status_date, filter_source, filter_gate, filter_date "
+        f"SELECT app_status, status_date, outcome_status, outcome_date, resume_variant, "
+        f"filter_source, filter_gate, filter_date "
         f"FROM jobs WHERE job_url IN ({qs})",
         tuple(member_urls),
     ).fetchall()
@@ -445,7 +455,8 @@ def _fmt_decision(dec):
 # the batched variant can group members back to their canonical. Both queries share this list so
 # their column shapes can't drift.
 _MEMBER_COLS = ("job_url, repost_of, first_seen, verdict, status, fit_score, app_status, "
-                "status_date, filter_source, filter_gate, filter_date")
+                "status_date, outcome_status, outcome_date, resume_variant, "
+                "filter_source, filter_gate, filter_date")
 
 
 def effective_decision(conn, row):
@@ -456,6 +467,12 @@ def effective_decision(conn, row):
     Returns a dict (never None):
       app_status            'applied' | 'passed' | None  (applied outranks, chain-wide)
       status_date           date the surviving app_status was set, or None
+      outcome_status        the chain's post-application state: latest non-note app_events
+                            type (the cache _recompute_outcome maintains), or None —
+                            None on an applied chain means "no response yet" (the
+                            follow-up bucket)
+      outcome_date          that event's event_date, or None
+      resume_variant        free text recorded at apply time (or via set_resume), or None
       reject                bool — any chain member is a hard-fail override
       filter_gate, filter_date  the surviving reject's attribution, or None
       is_repost             True if `row` itself is a relisting (repost_of set)
@@ -504,6 +521,9 @@ def _effective_from_members(row, members):
     return {
         "app_status": dec.get("app_status"),
         "status_date": dec.get("status_date"),
+        "outcome_status": dec.get("outcome_status"),
+        "outcome_date": dec.get("outcome_date"),
+        "resume_variant": dec.get("resume_variant"),
         "reject": dec.get("reject", False),
         "filter_gate": dec.get("filter_gate"),
         "filter_date": dec.get("filter_date"),
@@ -563,17 +583,36 @@ _REJECT_SET = ("filter_source='manual', filter_gate=?, filter_date=?, "
                f"THEN '{STATUS_RULE_FILTERED}' ELSE status END")
 
 
-def propagate_app_status(conn, member_urls, status, status_date):
+def propagate_app_status(conn, member_urls, status, status_date, resume_variant=None):
     """Set the user's applied/passed decision (or clear it, status=None) across every member of a
     repost chain, so the decision follows the role across all relistings. Shared by cmd_mark and
-    the dupe merge."""
+    the dupe merge. `resume_variant` is an APPLIED-ONLY field: with status='applied' it is
+    written when given, INHERITED from the chain's stored value when not (a re-assert without one
+    can't blank a stored variant — and must not strand a late-fetched, never-stamped relisting at
+    applied-with-NULL beside it, since _decide reads the field off an arbitrary applied member),
+    and any other status — undo OR a switch to 'passed' — clears it chain-wide, so a variant can
+    never sit invisibly on a non-applied chain (set_resume refuses those and the UI only renders
+    the field on applied cards). Empty/whitespace input reads as "not given", never as "blank
+    it" — set_resume is the explicit clear path. The write is ONE statement over all three
+    columns so every member always ends identical — the "any member's copy is authoritative"
+    premise is enforced here, not assumed. The outcome CACHE columns are deliberately not
+    touched — _recompute_outcome is their one writer, called right after this."""
     members = set(member_urls)
     if not members:
         return
     qs = ",".join("?" * len(members))
+    resume_variant = (resume_variant or "").strip() or None
+    if status == "applied" and resume_variant is None:
+        row = conn.execute(
+            f"SELECT resume_variant FROM jobs WHERE job_url IN ({qs}) "
+            f"AND resume_variant IS NOT NULL LIMIT 1",
+            tuple(members),
+        ).fetchone()
+        resume_variant = row[0] if row else None
     conn.execute(
-        f"UPDATE jobs SET app_status=?, status_date=? WHERE job_url IN ({qs})",
-        (status, status_date, *members),
+        f"UPDATE jobs SET app_status=?, status_date=?, resume_variant=? "
+        f"WHERE job_url IN ({qs})",
+        (status, status_date, resume_variant if status == "applied" else None, *members),
     )
 
 
@@ -668,13 +707,19 @@ def _undo_exempt(conn, row, targets):
     return sorted(keep)
 
 
-def mark_posting(conn, row, status):
+def mark_posting(conn, row, status, resume_variant=None):
     """Set (status='applied'|'passed') or clear (status=None) the user's decision across
-    `row`'s whole repost chain. Returns (ok, message, affected_urls, exempt_urls)."""
+    `row`'s whole repost chain. `resume_variant` (optional, applied only) records which
+    resume went out. Returns (ok, message, affected_urls, exempt_urls)."""
     targets = _chain_targets(conn, row)
     exempt = _forward_exempt(conn, row, targets) if status else None  # pre-state read
     stamp = date.today().isoformat() if status else None
-    propagate_app_status(conn, targets, status, stamp)
+    propagate_app_status(conn, targets, status, stamp, resume_variant)
+    # Sync the outcome cache with the decision: re-applying restores the outcome from any
+    # surviving event history; an undo (or a switch to 'passed') clears the cached columns
+    # chain-wide while the app_events rows themselves are KEPT — history is never destroyed
+    # by a decision toggle, and the next 'applied' recomputes it right back.
+    _recompute_outcome(conn, row["repost_of"] or row["job_url"], targets)
     conn.commit()
     # Reconcile this chain's skip labels immediately: a decision must upgrade any
     # 'repost_evaluated' sibling to 'repost_decided' (and an undo must release skipped rows)
@@ -686,6 +731,12 @@ def mark_posting(conn, row, status):
         exempt = _undo_exempt(conn, row, targets)  # post-state read
     verb = f"marked {status}" if status else "cleared status"
     msg = f"{verb}: {row['title']} — {row['company']}" + (f" ({stamp})" if status else "")
+    if not status:
+        # Lifecycle events only: a notes-only history restores no outcome, so the
+        # "re-applying restores it" promise must not be made for it.
+        kept = _count_events(conn, targets, exclude_notes=True)
+        if kept:
+            msg += f" — outcome history kept ({kept} event(s); re-applying restores it)"
     return True, msg, sorted(targets), exempt
 
 
@@ -711,6 +762,177 @@ def reject_posting(conn, row, gate, undo=False):
     conn.commit()
     _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
     return True, f"rejected (gate: {gate}): {row['title']} — {row['company']} ({today})", sorted(targets), exempt
+
+
+# ------------------------------------------------------- outcome events
+#
+# Post-application lifecycle tracking: what happened AFTER 'applied' (screen, interview
+# rounds, offer, employer rejection, ghosted, withdrew) plus free-text notes. History lives
+# in the append-only `app_events` table (core._events_table_sql); the chain's CURRENT
+# outcome is denormalized onto every member as jobs.outcome_status/outcome_date — the same
+# cached-decision pattern as app_status, with _recompute_outcome as the ONE writer, so the
+# follow-up query ("applied N days ago, no response") stays a pure-SQL predicate:
+#   app_status='applied' AND outcome_status IS NULL AND status_date < cutoff
+# An event row is written ONCE, keyed to the chain's canonical url AT WRITE TIME, and always
+# read chain-wide (via _chain_targets) — so a later dupe merge unions both sides' histories
+# with no data migration, and dupe_unlink leaves rows where they sit. Same
+# single-core-two-front-ends shape as the decision services above: cmd_event and
+# app.api_event are thin wrappers; event vocabulary is enforced HERE against
+# states.ALL_EVENTS (no schema CHECK — see states.py's docstring).
+
+def _count_events(conn, member_urls, exclude_notes=False):
+    """Event count across a member-url set. `exclude_notes=True` counts only lifecycle
+    events — what an outcome recompute can actually act on — for messages that promise
+    restoration (a notes-only history restores no outcome)."""
+    urls = sorted(member_urls)
+    qs = ",".join("?" * len(urls))
+    extra = " AND event_type != ?" if exclude_notes else ""
+    params = (*urls, EVENT_NOTE) if exclude_notes else tuple(urls)
+    return conn.execute(
+        f"SELECT COUNT(*) FROM app_events WHERE job_url IN ({qs}){extra}", params
+    ).fetchone()[0]
+
+
+def _recompute_outcome(conn, canonical_url, members=None):
+    """Re-derive the cached outcome columns for `canonical_url`'s whole chain from its stored
+    events — the ONE writer of jobs.outcome_status/outcome_date. The cache is a pure function
+    of (is the chain applied?, the chain's events): the latest non-note event wins (event_date
+    order, insertion-order tiebreak for same-day events), and a chain that doesn't read
+    'applied' gets NULLs — an outcome only means something for an application, and the events
+    themselves are kept so a re-apply restores it. Caller commits (service-write convention,
+    like propagate_app_status). `members` lets a caller that already holds the chain's member
+    set (they all do, except dupe_unlink's remaining-winner chain) skip the membership
+    re-query; when the answer is NULL and nothing is cached — every 'passed'/zero-event triage
+    click — the chain-wide UPDATE is skipped entirely rather than dirtying pages with a
+    NULL-over-NULL write."""
+    members = set(members) if members is not None else _chain_members(conn, canonical_url)
+    if not members:
+        return
+    urls = sorted(members)
+    qs = ",".join("?" * len(urls))
+    applied = conn.execute(
+        f"SELECT 1 FROM jobs WHERE job_url IN ({qs}) AND app_status='applied' LIMIT 1",
+        tuple(urls),
+    ).fetchone() is not None
+    latest = None
+    if applied:
+        latest = conn.execute(
+            f"SELECT event_type, event_date FROM app_events WHERE job_url IN ({qs}) "
+            f"AND event_type != ? ORDER BY event_date DESC, id DESC LIMIT 1",
+            (*urls, EVENT_NOTE),
+        ).fetchone()
+    if latest is None:
+        cached = conn.execute(
+            f"SELECT 1 FROM jobs WHERE job_url IN ({qs}) AND outcome_status IS NOT NULL "
+            f"LIMIT 1", tuple(urls),
+        ).fetchone()
+        if cached is None:
+            return  # nothing to write, nothing to clear
+    conn.execute(
+        f"UPDATE jobs SET outcome_status=?, outcome_date=? WHERE job_url IN ({qs})",
+        (latest["event_type"] if latest else None,
+         latest["event_date"] if latest else None, *urls),
+    )
+
+
+def record_event(conn, row, event_type, event_date=None, note=None):
+    """Record one outcome event on `row`'s chain. Lifecycle events (states.APP_EVENTS)
+    require the chain's effective decision to be 'applied' — an interview on a role you
+    never applied to is a data-entry error, not a state; bare 'note' events attach to any
+    posting. Returns (ok, message, affected_urls, exempt_urls) like the decision services
+    (exempt is just the interaction handle — an event never flips decided/undecided)."""
+    if event_type not in ALL_EVENTS:
+        return False, f"event type must be one of {list(ALL_EVENTS)}", [], []
+    if event_type == EVENT_NOTE and not (note or "").strip():
+        return False, "a 'note' event needs note text", [], []
+    event_date = event_date or date.today().isoformat()
+    try:
+        d = date.fromisoformat(event_date)
+    except (TypeError, ValueError):  # TypeError: a non-string from the JSON body
+        return False, f"event date must be YYYY-MM-DD (got {event_date!r})", [], []
+    # Sanity window, same rationale as core.parse_iso's (not importable here — core imports
+    # chain): an absurd-but-parseable date is a typo, not information. The FUTURE bound is the
+    # load-bearing one — _recompute_outcome is latest-event-date-wins, so one accepted
+    # future-dated typo would pin the chain's outcome past every later real event, and
+    # undo_event (insertion-order) couldn't reach it without unwinding everything after it.
+    if not (date(2000, 1, 1) <= d <= date.today()):
+        return False, (f"event date {d.isoformat()} is outside 2000-01-01..today — events "
+                       f"record what already happened (a future date would pin the outcome, "
+                       f"since the latest event wins)"), [], []
+    event_date = d.isoformat()
+    targets = _chain_targets(conn, row)
+    if event_type in APP_EVENTS:
+        dec = effective_decision(conn, row)
+        if dec["app_status"] != "applied":
+            state = _fmt_decision(_chain_decision(conn, targets))
+            return False, (f"'{event_type}' needs the role marked applied first "
+                           f"(currently: {state})"), [], []
+    canonical = row["repost_of"] or row["job_url"]
+    conn.execute(
+        "INSERT INTO app_events (job_url, event_type, event_date, note, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (canonical, event_type, event_date, (note or "").strip() or None,
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    _recompute_outcome(conn, canonical, targets)
+    conn.commit()
+    msg = f"recorded {event_type} ({event_date}): {row['title']} — {row['company']}"
+    return True, msg, sorted(targets), [row["job_url"]]
+
+
+def undo_event(conn, row):
+    """Delete the chain's most recently RECORDED event (insertion order, not event_date —
+    'undo' means the user's last entry, which may have been backdated) and recompute the
+    cache. Returns (ok, message, affected_urls, exempt_urls)."""
+    targets = _chain_targets(conn, row)
+    urls = sorted(targets)
+    qs = ",".join("?" * len(urls))
+    last = conn.execute(
+        f"SELECT id, event_type, event_date FROM app_events WHERE job_url IN ({qs}) "
+        f"ORDER BY id DESC LIMIT 1",
+        tuple(urls),
+    ).fetchone()
+    if last is None:
+        return False, f"no events recorded for: {row['title']} — {row['company']}", [], []
+    conn.execute("DELETE FROM app_events WHERE id=?", (last["id"],))
+    _recompute_outcome(conn, row["repost_of"] or row["job_url"], targets)
+    conn.commit()
+    msg = (f"removed last event — {last['event_type']} ({last['event_date']}): "
+           f"{row['title']} — {row['company']}")
+    return True, msg, sorted(targets), [row["job_url"]]
+
+
+def chain_events(conn, row):
+    """All events for `row`'s chain, chronological (event_date, insertion-order tiebreak) —
+    the read counterpart of record_event, spanning every member url so merged histories
+    union. Returns a list of app_events rows."""
+    urls = sorted(_chain_targets(conn, row))
+    qs = ",".join("?" * len(urls))
+    return conn.execute(
+        f"SELECT id, job_url, event_type, event_date, note, created_at "
+        f"FROM app_events WHERE job_url IN ({qs}) ORDER BY event_date ASC, id ASC",
+        tuple(urls),
+    ).fetchall()
+
+
+def set_resume(conn, row, text):
+    """Set (or with empty text clear) the resume_variant on an already-applied chain — the
+    edit-after-the-fact path; at apply time pass it to mark_posting instead. Propagated
+    chain-wide like the other decision fields. Returns (ok, message, affected, exempt)."""
+    dec = effective_decision(conn, row)
+    if dec["app_status"] != "applied":
+        return False, "resume variant is recorded on applied roles — mark it applied first", [], []
+    text = (text or "").strip() or None
+    targets = _chain_targets(conn, row)
+    qs = ",".join("?" * len(targets))
+    conn.execute(
+        f"UPDATE jobs SET resume_variant=? WHERE job_url IN ({qs})",
+        (text, *sorted(targets)),
+    )
+    conn.commit()
+    msg = (f"resume variant {'set to ' + repr(text) if text else 'cleared'}: "
+           f"{row['title']} — {row['company']}")
+    return True, msg, sorted(targets), [row["job_url"]]
 
 
 # ------------------------------------------------------- manual repost linking
@@ -820,12 +1042,26 @@ def dupe_commit(conn, plan):
     if dec:
         all_members = winner_members | loser_members
         if dec["app_status"]:
-            propagate_app_status(conn, all_members, dec["app_status"], dec["status_date"])
+            # Coalesce the resume variant across BOTH sides (winner's preferred): the chain
+            # model holds one variant, and _decision_sig deliberately ignores it (outcome
+            # metadata must not block a merge), so without the coalesce a NULL surviving side
+            # would either blank the other side's recorded variant or leave a mixed chain
+            # whose _decide read is SQL-row-order-dependent. When both sides recorded
+            # DIFFERENT variants the winner's wins — an accepted loss, same-role-twice.
+            resume = ((plan["w_dec"] or {}).get("resume_variant")
+                      or (plan["l_dec"] or {}).get("resume_variant"))
+            propagate_app_status(conn, all_members, dec["app_status"], dec["status_date"],
+                                 resume)
         if dec["reject"]:
             # Merge: fill in only members with no attribution yet (overwrite_manual=False) — leave
             # any existing manual/rule attribution intact.
             propagate_reject(conn, all_members, dec["filter_gate"], dec["filter_date"],
                              overwrite_manual=False)
+    # Union of the two sides' outcome histories: events stay keyed to whichever canonical they
+    # were written under (both urls are members of the merged chain now, so chain-wide reads
+    # find them all); the cache just needs one recompute over the unified chain. Outcome
+    # differences never block a merge (_decision_sig ignores them) — latest event wins here.
+    _recompute_outcome(conn, winner["job_url"], winner_members | loser_members)
     conn.commit()
     # Chain-scoped reconcile of the merged chain: a decided merge skips still-'new' members
     # now; an undecided-but-evaluated merge deliberately leaves 'new' members for the next
@@ -838,7 +1074,9 @@ def dupe_commit(conn, plan):
 def dupe_unlink(conn, a):
     """Core of `dupe --undo`: detach the manually-linked relisting `a` (and the sub-chain it
     originally headed) from its canonical, restoring the two independent chains. Structure only — a
-    decision that propagated across the merge is left as-is. Returns
+    decision that propagated across the merge is left as-is, and so are app_events rows (an event
+    recorded while merged stays keyed where it was written); only the outcome CACHE is recomputed
+    per resulting chain, since it must stay a pure function of each chain's own events. Returns
     `(ok, message, affected, exempt)`: exempt is just the interaction handles — the clicked
     row, the restored loser canonical (the detached chain's head, where a merge-propagated
     decision naturally gets undone), and the old winner canonical (which kept the decision on
@@ -874,6 +1112,13 @@ def dupe_unlink(conn, a):
             "UPDATE jobs SET repost_of=?, repost_source=NULL WHERE job_url=?",
             (restored_parent, r["job_url"]),
         )
+    # Event ROWS stay keyed where they were written (no data migration — the merge's
+    # chain-wide reads simply stop spanning them), but the outcome CACHE is recomputed for
+    # both resulting chains: it must always be a pure function of each chain's own events,
+    # and leaving the merged value would show one side the other side's outcome.
+    _recompute_outcome(conn, loser_canon_url, {r["job_url"] for r in rows})
+    if a["repost_of"]:
+        _recompute_outcome(conn, a["repost_of"])  # remaining winner chain — fresh membership
     conn.commit()
     # Reconcile BOTH resulting chains: the detached loser chain (skipped members whose new
     # chain lacks a decision/verdict are released) and the remaining winner chain (`a` still
@@ -884,6 +1129,15 @@ def dupe_unlink(conn, a):
     msg = (f"unlinked: {loser_canon['title']} — {loser_canon['company']} "
            f"({len(rows)} row(s) restored to their own chain); any decision propagated by the merge "
            f"was left as-is — undo it separately (passed/applied/reject) if it shouldn't carry over")
+    if a["repost_of"] and _count_events(conn, _chain_members(conn, a["repost_of"])):
+        # Events recorded while merged are keyed to their then-canonical, which after an
+        # earlier merge may be a mere MEMBER of the kept chain — so count over the kept
+        # chain's full post-detach membership, not just its canonical url, or the warning
+        # silently skips exactly the case it exists for. The detached chain's outcome cache
+        # was just recomputed WITHOUT those events: an offer recorded from the detached
+        # side's card reads "no response" now, and this message is the only notice.
+        msg += ("; outcome events recorded while linked stay with the kept role — this "
+                "chain's outcome was recomputed from its own events only")
     exempt = sorted({a["job_url"], loser_canon_url}
                     | ({a["repost_of"]} if a["repost_of"] else set()))
     return True, msg, [r["job_url"] for r in rows], exempt

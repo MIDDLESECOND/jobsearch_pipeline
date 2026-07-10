@@ -66,6 +66,23 @@
                 padding: .25rem .6rem; }
   button.dupe-target { background: #7c3aed; color: #fff; border-color: #7c3aed; }
   .card.anchor { outline: 2px solid #7c3aed; outline-offset: 1px; }
+  /* Post-application outcome (applied cards): current-state tag + record/history controls. */
+  .outcome { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
+  .outcome .tag { margin-left: 0; }
+  .tag.out-recruiter_screen { background: #dbeafe; color: #1e40af; }
+  .tag.out-interview { background: #fde68a; color: #78350f; }
+  .tag.out-offer { background: #bbf7d0; color: #14532d; font-weight: 700; }
+  .tag.out-rejected_by_employer { background: #fee2e2; color: #991b1b; }
+  .tag.out-ghosted { background: #f3f4f6; color: #6b7280; }
+  .tag.out-withdrew { background: #e5e7eb; color: #374151; }
+  .tag.noresp { background: #fff7ed; color: #9a3412; }
+  input.note-in, input.resume-in { padding: .3rem .4rem; border: 1px solid #d0d4da;
+                border-radius: 6px; font-size: .8rem; }
+  input.resume-in { width: 11rem; }
+  input.note-in { width: 9rem; }
+  button.record { background: #0891b2; color: #fff; border-color: #0891b2; }
+  .history { font-size: .8rem; color: #445; background: #f8fafc; border: 1px solid #e3e6ea;
+             border-radius: 6px; padding: .4rem .6rem; margin-top: .5rem; }
 </style>
 </head>
 <body>
@@ -86,6 +103,7 @@
 
 <script>
 const GATES = {{ gates | tojson }};
+const EVENTS = {{ events | tojson }};  // states.ALL_EVENTS — lifecycle outcomes + 'note'
 const FEEDBACK_URL = (() => {
   let u = String({{ feedback_url | tojson }});
   if (!u) return "";
@@ -214,6 +232,23 @@ function statusTag(j) {
   return "";
 }
 
+// Current post-application state for an applied card: the chain's cached outcome (from
+// chain._recompute_outcome, read through effective_decision server-side), or the honest
+// "no response" fallback aged from the apply date — the follow-up surfacing hook.
+function outcomeRowHTML(j) {
+  if (effectiveStatus(j) !== "applied") return "";
+  let tag;
+  if (j.chain_outcome_status) {
+    const label = esc(j.chain_outcome_status.replace(/_/g, " "));
+    tag = `<span class="tag out-${esc(j.chain_outcome_status)}">${label}${j.chain_outcome_date ? " · " + esc(j.chain_outcome_date) : ""}</span>`;
+  } else {
+    const d = effectiveDate(j);
+    const days = d ? Math.max(0, Math.floor((Date.parse(TODAY) - Date.parse(d)) / 86400000)) : null;
+    tag = `<span class="tag noresp">no response${days != null ? " — applied " + days + "d ago" : ""}</span>`;
+  }
+  return `<div class="outcome">${tag}</div>`;
+}
+
 function scoreLine(b) {
   // Render whatever dimensions the stored eval has (the schema has changed over time);
   // highlight any AI-related dimension. Mirrors the report's score line.
@@ -244,6 +279,7 @@ function card(j) {
 
   div.innerHTML = `
     <h2>${esc(j.title)} — ${esc(j.company)} ${statusTag(j)} ${repost}</h2>
+    ${outcomeRowHTML(j)}
     <div class="meta">${verdict}${score}</div>
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
@@ -275,7 +311,21 @@ function card(j) {
     actions.appendChild(btn("Undo reject", "undo", () => decide(div, j, "undo_reject")));
   }
   if (!decided) {
-    actions.appendChild(btn("Applied", "apply", () => decide(div, j, "applied")));
+    actions.appendChild(btn("Applied", "apply", () => {
+      // Busy guard BEFORE the modal: decide() would drop a re-activation silently AFTER the
+      // user typed into a second prompt (keyboard re-entry — Enter on the still-focused
+      // button — bypasses .busy's pointer-events, the documented gap the busyUrls set
+      // exists for). Refusing up front means no doomed prompt ever opens.
+      if (linkBusy || busyUrls.has(j.job_url)) return;
+      // One optional prompt for the resume variant. Blank = apply without one (zero-friction
+      // default; edit later via the inline field). Cancel/Escape ABORTS the whole action —
+      // an accidental Applied click must have a way out, and a dialog dismissal reading as
+      // "commit anyway" is the wrong side of that trade (worst case with dialogs suppressed
+      // the button visibly does nothing, which beats silently deciding chain-wide).
+      const rv = prompt("Resume variant used (blank = none, Cancel = don't mark applied):", "");
+      if (rv === null) return;
+      decide(div, j, "applied", undefined, rv.trim() || undefined);
+    }));
     actions.appendChild(btn("Passed", "pass", () => decide(div, j, "passed")));
     const sel = document.createElement("select");
     sel.innerHTML = `<option value="">gate…</option>` + gateOpts;
@@ -284,6 +334,28 @@ function card(j) {
       decide(div, j, "reject", g);
     }));
     actions.appendChild(sel);
+  }
+
+  if (decided === "applied") {
+    // Outcome tracking controls. The event lands on the chain server-side (canonical-keyed,
+    // read chain-wide), so recording from a relisting's card is fine.
+    const orow = div.querySelector(".outcome");
+    if (orow) orow.appendChild(resumeField(div, j));
+    const esel = document.createElement("select");
+    esel.innerHTML = `<option value="">event…</option>`
+      + EVENTS.map(e => `<option value="${e}">${e.replace(/_/g, " ")}</option>`).join("");
+    const enote = document.createElement("input");
+    enote.className = "note-in"; enote.placeholder = "note…";
+    actions.appendChild(esel);
+    actions.appendChild(enote);
+    actions.appendChild(btn("Record", "record", () => {
+      const t = esel.value;
+      if (!t) { alert("pick an event type first"); return; }
+      if (t === "note" && !enote.value.trim()) { alert("a note event needs note text"); return; }
+      postEvent(div, j, {type: t, note: enote.value.trim() || undefined});
+    }));
+    actions.appendChild(btn("History ▸", "undo", ev => toggleHistory(div, j, ev.currentTarget)));
+    actions.appendChild(btn("Undo last", "undo", () => postEvent(div, j, {undo: true})));
   }
 
   appendLinkControls(actions, div, j);
@@ -387,11 +459,21 @@ function releaseBusy(url, div) {
 
 // Mirror server-side cmd_mark / cmd_reject on the local job object so we can update the card
 // without refetching the whole list.
-function patchJob(j, action, gate) {
+function patchJob(j, action, gate, resume) {
   if (action === "applied" || action === "passed") { j.app_status = action; j.status_date = TODAY; }
   else if (action === "undo_app") { j.app_status = null; j.status_date = null; }
   else if (action === "reject") { j.filter_source = "manual"; j.filter_gate = gate || "other"; }
   else if (action === "undo_reject") { j.filter_source = null; j.filter_gate = null; }
+  // Mirror the server's outcome-cache handling: a fresh 'applied' carries the prompted resume
+  // variant; an undo (or a 'passed') clears the cached outcome fields chain-wide. (Server-side
+  // the event HISTORY survives an undo and a re-apply recomputes the outcome back — the next
+  // reload shows it; this mirror only needs to keep the card honest until then.)
+  if (action === "applied") { j.resume_variant = resume || null; j.chain_resume_variant = resume || null; }
+  if (action === "undo_app" || action === "passed") {
+    j.resume_variant = null; j.chain_resume_variant = null;
+    j.outcome_status = null; j.outcome_date = null;
+    j.chain_outcome_status = null; j.chain_outcome_date = null;
+  }
   // The decision propagates to the canonical original (server-side _chain_targets), so keep the
   // cached chain_* fields in sync with this row's new decision. Otherwise the today-view in-place
   // re-render would read a stale inherited decision (e.g. after Undo) and wrongly show the card as
@@ -401,7 +483,7 @@ function patchJob(j, action, gate) {
   j.chain_filter_source = j.filter_source || null;
 }
 
-async function decide(div, j, action, gate) {
+async function decide(div, j, action, gate, resume) {
   // linkBusy: a chain merge/unlink is committing — don't race a decision against it.
   // busyUrls: this url already has a POST in flight — .busy's pointer-events:none stops mouse
   // re-clicks but NOT keyboard activation (Enter on the still-focused button), so guard by url.
@@ -411,7 +493,7 @@ async function decide(div, j, action, gate) {
   busyUrls.add(j.job_url);
   mutBusy++;
   try {
-    const data = await postJSON("/api/decision", {job_url: j.job_url, action, gate});
+    const data = await postJSON("/api/decision", {job_url: j.job_url, action, gate, resume});
     if (!data.ok) { alert(data.message || "failed"); return; }
     // The decision propagates across the repost chain, so more than the clicked card may change.
     const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
@@ -426,7 +508,24 @@ async function decide(div, j, action, gate) {
       affected.forEach(u => decidedThisSession.delete(u));
     }
     exemptFromHide(data.exempt);
-    patchJob(j, action, gate);
+    patchJob(j, action, gate, resume);
+    // Overwrite the mirror's guesses with the server's post-mutation chain truth: a
+    // re-apply RESTORES the outcome from kept event history and may inherit a stored
+    // resume variant — neither is derivable client-side, and rendering the stale mirror
+    // invited re-recording an event that already exists (a permanent duplicate row).
+    if ("outcome_status" in data) {
+      for (const r of jobsData) {
+        if (affected.has(r.job_url)) {
+          r.chain_outcome_status = data.outcome_status;
+          r.chain_outcome_date = data.outcome_date;
+          r.chain_resume_variant = data.resume_variant;
+        }
+      }
+      j.chain_outcome_status = data.outcome_status;
+      j.chain_outcome_date = data.outcome_date;
+      j.chain_resume_variant = data.resume_variant;
+      j.resume_variant = data.resume_variant;
+    }
     // A load() raced this decision (tab/date change mid-flight — the only rebuild sources the
     // entry guards don't block, and each bumps loadSeq): its rows may have been read before the
     // commit — refetch rather than patch a snapshot that may not show it. Past this check,
@@ -478,6 +577,143 @@ async function decide(div, j, action, gate) {
     mutBusy--;
     releaseBusy(j.job_url, div);
   }
+}
+
+// Record (or undo the last) post-application outcome event. Same in-flight guards as
+// decide(); unlike a decision it never flips decided/undecided, so there is no hide-filter
+// or view-membership churn — patch the outcome cache on every affected chain member and
+// rebuild just those cards.
+async function postEvent(div, j, body) {
+  if (linkBusy || busyUrls.has(j.job_url)) return;
+  const seq0 = loadSeq;  // same race decide() guards: a load() mid-flight may read pre-commit rows
+  div.classList.add("busy");
+  busyUrls.add(j.job_url);
+  mutBusy++;
+  try {
+    const data = await postJSON("/api/event", Object.assign({job_url: j.job_url}, body));
+    if (!data.ok) { alert(data.message || "failed"); return; }
+    exemptFromHide(data.exempt);
+    // A tab/date switch raced this POST: its rows may pre-date the commit, and our jobsData
+    // patch would land on a swapped-out array — the recorded outcome tag would silently
+    // vanish (inviting a duplicate Record). Refetch the truth instead of patching.
+    if (loadSeq !== seq0) { await load(); return; }
+    const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
+    // ONE patch site: j is itself a jobsData row and affected always contains it, so the
+    // loop covers the clicked card too — a separate direct patch would just be a second
+    // copy of these fields for future edits to miss.
+    for (const r of jobsData) {
+      if (affected.has(r.job_url)) {
+        r.chain_outcome_status = data.outcome_status;
+        r.chain_outcome_date = data.outcome_date;
+      }
+    }
+    // Rebuild every affected card on screen (clicked one included) so outcome tags stay in
+    // sync across a repost chain. card() re-applies the .busy lock from busyUrls; releaseBusy
+    // in the finally unlocks the fresh nodes.
+    const byUrl = new Map(jobsData.map(r => [r.job_url, r]));
+    list.querySelectorAll(".card").forEach(el => {
+      const r = byUrl.get(el.dataset.url);
+      if (!r || !affected.has(el.dataset.url)) return;
+      // Never wipe a SIBLING card's in-progress input (typed note, chosen event type,
+      // focused field) — its stale outcome tag can wait for the next action/reload; lost
+      // user text cannot. The clicked card itself always rebuilds (its input was consumed).
+      if (el !== div && (el.querySelector(".note-in")?.value
+                         || el.querySelector(".actions select")?.value
+                         || el.contains(document.activeElement))) return;
+      el.replaceWith(card(r));
+    });
+  } catch (e) {
+    alert("error: " + e);
+  } finally {
+    mutBusy--;
+    releaseBusy(j.job_url, div);
+  }
+}
+
+// Lazy-loaded chain event timeline, toggled per card ("History ▸"/"▾"). Read-only fetch —
+// no busy locking; a re-render simply drops the open panel (state lives in the DOM).
+async function toggleHistory(div, j, btnEl) {
+  const open = div.querySelector(".history");
+  if (open) { open.remove(); btnEl.textContent = "History ▸"; return; }
+  btnEl.textContent = "History …";
+  let evs = null;  // null = fetch failed — must NOT render as the affirmative "no events"
+  try {
+    const res = await fetch("/api/events?job_url=" + encodeURIComponent(j.job_url));
+    if (res.ok) evs = await res.json();
+  } catch (e) { /* evs stays null */ }
+  // The card may have been rebuilt while the fetch was in flight (postEvent's replaceWith)
+  // — appending to the detached node would silently show nothing while flipping a dead
+  // button's label. Bail; the fresh card's button still reads "History ▸" and works.
+  if (!div.isConnected) return;
+  if (div.querySelector(".history")) { btnEl.textContent = "History ▾"; return; }  // double-click race
+  const p = document.createElement("div");
+  p.className = "history";
+  p.innerHTML = evs === null
+    ? "<div>⚠ Couldn't load history — close and retry.</div>"
+    : (evs.length
+      ? evs.map(e => `<div>${esc(e.event_date)} — <b>${esc(e.event_type.replace(/_/g, " "))}</b>${e.note ? " · " + esc(e.note) : ""}</div>`).join("")
+      : "<div>No events recorded yet.</div>");
+  div.appendChild(p);
+  btnEl.textContent = "History ▾";
+}
+
+// Inline resume-variant field on applied cards. Saves on change (blur after an edit) or
+// Enter; empty clears. Server-side it propagates chain-wide (chain.set_resume). The save
+// runs under the SAME in-flight discipline as decide()/postEvent — this was the one
+// mutating path outside it, and the blur that triggers the save fires exactly when the
+// user clicks another button on the card (Undo, a dupe control), i.e. exactly when a
+// concurrent mutation on the same chain is about to start.
+function resumeField(div, j) {
+  const wrap = document.createElement("span");
+  wrap.className = "outcome";
+  wrap.innerHTML = `📄`;
+  const inp = document.createElement("input");
+  inp.className = "resume-in";
+  inp.placeholder = "resume variant…";
+  inp.value = j.chain_resume_variant || "";
+  inp.title = "resume variant sent (Enter or click away to save)";
+  wrap.appendChild(inp);
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+  inp.addEventListener("change", async () => {
+    const v = inp.value.trim();
+    if (v === (j.chain_resume_variant || "")) return;  // no-op blur — don't lock the card
+    if (linkBusy || busyUrls.has(j.job_url)) {
+      inp.value = j.chain_resume_variant || "";  // a mutation is in flight — revert, retry after
+      return;
+    }
+    const seq0 = loadSeq;
+    div.classList.add("busy");
+    busyUrls.add(j.job_url);
+    mutBusy++;
+    try {
+      const data = await postJSON("/api/decision",
+        {job_url: j.job_url, action: "set_resume", resume: v});
+      if (!data.ok) { alert(data.message || "failed"); inp.value = j.chain_resume_variant || ""; return; }
+      if (loadSeq !== seq0) { await load(); return; }  // superseded — refetch (see postEvent)
+      j.resume_variant = v || null;
+      j.chain_resume_variant = v || null;
+      const affected = new Set(data.affected || []);
+      for (const r of jobsData) {
+        if (affected.has(r.job_url)) r.chain_resume_variant = v || null;
+      }
+      // Sync sibling cards' inputs IN PLACE (no rebuild — that would wipe their other
+      // in-progress input, see postEvent's guard): a same-chain card on screen must not
+      // keep displaying the old variant beside the one just saved.
+      list.querySelectorAll(".card").forEach(el => {
+        if (el !== div && affected.has(el.dataset.url)) {
+          const sib = el.querySelector(".resume-in");
+          if (sib) sib.value = v;
+        }
+      });
+    } catch (e) {
+      alert("error: " + e);
+      inp.value = j.chain_resume_variant || "";
+    } finally {
+      mutBusy--;
+      releaseBusy(j.job_url, div);
+    }
+  });
+  return wrap;
 }
 
 function renderLinkbar() {

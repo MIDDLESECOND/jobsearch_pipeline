@@ -35,7 +35,13 @@ skips the row. Imports nothing — the leaf under chain.py in the module DAG.
 
 Two adjacent columns are deliberately NOT constant-ized: `app_status` (NULL | 'applied' |
 'passed' — the user's decision, also spelled out in the UI's JS) and `filter_source`
-(NULL | 'manual' | 'rule:<name>' — a tagged value, not an enum).
+(NULL | 'manual' | 'rule:<name>' — a tagged value, not an enum). The same policy extends
+to the post-application outcome vocabulary below (`app_events.event_type` and its cached
+`jobs.outcome_status`): they are user-decision values no `run` stage gates on, so they get
+NO schema CHECK — a CHECK there would be a second frozen-CHECK liability that
+core._rebuild_for_stale_checks (jobs-only) doesn't cover. Enforcement is code-side, in
+chain.record_event's validation against ALL_EVENTS (the same shape as reject_posting
+validating against GATE_NAMES).
 """
 
 STATUS_NEW = "new"
@@ -73,6 +79,24 @@ def sql_list(values):
 
 GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requirement",
               "work_auth", "employment_type"]
+
+# Post-application outcome events (app_events.event_type). APP_EVENTS are the lifecycle
+# transitions — recording one requires the chain to be applied, and the LATEST one (by
+# event_date, insertion-order tiebreak) is cached chain-wide as jobs.outcome_status /
+# outcome_date (chain._recompute_outcome, the one cache writer). 'interview' is repeatable
+# (rounds). EVENT_NOTE is deliberately outside APP_EVENTS: it attaches free text to any
+# posting without asserting an application outcome, so it never sets the cache.
+# No schema CHECK on any of these — see the module docstring.
+EVENT_RECRUITER_SCREEN = "recruiter_screen"
+EVENT_INTERVIEW = "interview"
+EVENT_OFFER = "offer"
+EVENT_REJECTED_BY_EMPLOYER = "rejected_by_employer"
+EVENT_GHOSTED = "ghosted"
+EVENT_WITHDREW = "withdrew"
+APP_EVENTS = (EVENT_RECRUITER_SCREEN, EVENT_INTERVIEW, EVENT_OFFER,
+              EVENT_REJECTED_BY_EMPLOYER, EVENT_GHOSTED, EVENT_WITHDREW)
+EVENT_NOTE = "note"
+ALL_EVENTS = APP_EVENTS + (EVENT_NOTE,)
 # (No SCORE_DIMS constant: the score dimensions live in the eval prompt's output spec and
 # the stored eval_json; the report/UI render whatever keys exist, so a code-side list would
 # only drift.)

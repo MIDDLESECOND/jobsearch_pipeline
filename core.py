@@ -402,6 +402,9 @@ def _jobs_table_sql(name, if_not_exists=False):
                                   -- 'manual:<prev_url>' = user-linked relisting (prev parent encoded for undo)
             app_status   TEXT,    -- NULL (backlog) | applied | passed  (user's decision)
             status_date  TEXT,    -- date app_status was set
+            outcome_status TEXT,  -- chain's latest post-apply event_type (cache — chain._recompute_outcome; no CHECK, see states.py)
+            outcome_date TEXT,    -- that event's event_date
+            resume_variant TEXT,  -- free text: which resume variant went out
             filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
             filter_gate  TEXT,    -- which gate the override represents
             filter_date  TEXT,    -- date the override was set
@@ -410,9 +413,31 @@ def _jobs_table_sql(name, if_not_exists=False):
     """
 
 
+def _events_table_sql():
+    """Post-application outcome history: one row per user-recorded event (interview, offer,
+    ghosted, a bare note, …). Append-only; keyed to the chain's CANONICAL url at write time
+    and read chain-wide via chain.chain_events, so a later dupe merge unions both sides'
+    histories with no data migration. event_type carries NO CHECK deliberately — it is
+    user-decision vocabulary enforced code-side in chain.record_event (see states.py's
+    docstring); a CHECK here would be a frozen-CHECK liability outside
+    _rebuild_for_stale_checks' jobs-only scope."""
+    return """
+        CREATE TABLE IF NOT EXISTS app_events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url    TEXT NOT NULL,   -- chain canonical at write time (see chain.record_event)
+            event_type TEXT NOT NULL,   -- states.ALL_EVENTS (code-side enforced, no CHECK)
+            event_date TEXT NOT NULL,   -- YYYY-MM-DD, user-supplied (defaults to today)
+            note       TEXT,
+            created_at TEXT NOT NULL    -- ISO timestamp; insertion-order tiebreak for undo
+        )
+    """
+
+
 def get_db(cfg):
     conn = connect_db(cfg)
     conn.execute(_jobs_table_sql("jobs", if_not_exists=True))
+    conn.execute(_events_table_sql())
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_events_job_url ON app_events(job_url)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;
@@ -445,6 +470,13 @@ def _migrate(conn):
         ("filter_gate", "TEXT"),
         ("filter_date", "TEXT"),
         ("source", "TEXT"),  # 'linkedin' | 'adzuna' | 'greenhouse' | 'lever' | 'ashby' — multi-source provenance
+        # Outcome-tracking cache (v4): the chain's post-application state, denormalized onto
+        # every member like app_status so readers/SQL need no join. Always a pure recompute
+        # of (chain applied?, app_events) — chain._recompute_outcome is the ONE writer.
+        # NULL on an applied row = "no outcome recorded" (the follow-up bucket). No backfill.
+        ("outcome_status", "TEXT"),   # latest non-note event_type across the chain, or NULL
+        ("outcome_date", "TEXT"),     # that event's event_date
+        ("resume_variant", "TEXT"),   # free text: which resume went out (set at apply time)
     ]
     added = False
     for col, decl in new_cols:

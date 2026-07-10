@@ -10,10 +10,14 @@ Usage:
   python pipeline.py report                     # regenerate today's report only (no fetch, no API calls)
   python pipeline.py stats                      # quick database stats
   python pipeline.py ui                         # local web UI to triage postings (applied/passed/reject)
-  python pipeline.py applied --url X            # mark a posting (full URL or unique substring) as applied-to
+  python pipeline.py applied --url X [--resume V]  # mark a posting (full URL or unique substring)
+                                                #   as applied-to; --resume records the variant sent
   python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
   python pipeline.py reject  --url X --gate G   # override the model: mark a hard-fail it missed
                                                 #   (--pattern P also writes a reusable rule to filters.yaml)
+  python pipeline.py event   --url X --type T   # record what happened after applying (interview, offer,
+                                                #   ghosted, …; --type note = bare note) [--date D] [--note N]
+                                                #   --undo removes the chain's last recorded event
   python pipeline.py prune [--days 90] [--vacuum]  # clear old rejected postings' descriptions; shrink jobs.db
   # add --undo to applied / passed / reject to clear what you set
 
@@ -31,10 +35,11 @@ from datetime import date, timedelta
 # wrappers call. Consumers (app.py, the tests, backtest_v2 / compare_models) import the real
 # modules directly — do not re-export names here for them.
 from core import load_config, get_db, run_log
-from states import GATE_NAMES, VERDICT_GATE_FAIL, STATUS_SALARY_FILTERED
+from states import GATE_NAMES, ALL_EVENTS, VERDICT_GATE_FAIL, STATUS_SALARY_FILTERED
 from chain import (
     skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
     mark_posting, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
+    record_event, undo_event, chain_events,
 )
 from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats
 from filters import (
@@ -57,6 +62,16 @@ def cmd_stats(conn):
         "SELECT COALESCE(app_status,'(backlog)') s, COUNT(*) n FROM jobs GROUP BY app_status ORDER BY n DESC"
     ):
         print(f"{row['s']:>16} {row['n']:>16}")
+    # Outcome funnel over the applied roles, counted per CHAIN (canonical), not per row —
+    # the cache is propagated to every member, so a per-row count would inflate reposted roles.
+    outcomes = conn.execute(
+        "SELECT COALESCE(outcome_status,'(no response)') s, COUNT(DISTINCT COALESCE(repost_of, job_url)) n "
+        "FROM jobs WHERE app_status='applied' GROUP BY outcome_status ORDER BY n DESC"
+    ).fetchall()
+    if outcomes:
+        print("  -- applied: outcomes (roles) --")
+        for row in outcomes:
+            print(f"{row['s']:>20} {row['n']:>12}")
     fsrc = conn.execute(
         "SELECT COUNT(*) n FROM jobs WHERE filter_source IS NOT NULL"
     ).fetchone()["n"]
@@ -98,18 +113,51 @@ def cmd_prune(conn, days, vacuum):
         print("[prune] done — file compacted")
 
 
-def cmd_mark(conn, url, status):
+def cmd_mark(conn, url, status, resume=None):
     """CLI wrapper over chain.mark_posting: record the user's decision on a posting
-    (`status` is 'applied', 'passed', or None for undo). `url` may be a unique substring
-    of the job_url. The decision propagates across the whole repost chain."""
+    (`status` is 'applied', 'passed', or None for undo; `resume` optionally records the
+    resume variant sent with an 'applied'). `url` may be a unique substring of the
+    job_url. The decision propagates across the whole repost chain."""
     label = status or "undo"
+    if resume and status != "applied":
+        # propagate_app_status would drop it anyway (resume rides 'applied' only) — say so
+        # instead of silently ignoring a flag the user typed.
+        print(f"[{label}] --resume only applies with `applied` — ignored", file=sys.stderr)
+        resume = None
     m, err = resolve_posting(conn, url)
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
-    _, msg, _, _ = mark_posting(conn, m, status)
+    _, msg, _, _ = mark_posting(conn, m, status, resume)
     print(f"[{label}] {msg}")
     return True
+
+
+def cmd_event(conn, url, event_type, event_date, note, undo):
+    """CLI wrapper over chain.record_event / undo_event: track what happened after applying
+    (recruiter screen, interview rounds, offer, employer rejection, ghosted, withdrew — or a
+    bare `--type note`). The event lands on the chain's canonical and the derived outcome
+    propagates chain-wide; `--undo` deletes the chain's last recorded event. Prints the
+    chain's full timeline after each mutation so the state is always visible."""
+    label = "event"
+    m, err = resolve_posting(conn, url)
+    if err:
+        print(f"[{label}] {err}", file=sys.stderr)
+        return False
+    if undo:
+        ok, msg, _, _ = undo_event(conn, m)
+    else:
+        if not event_type:
+            print(f"[{label}] --type is required — one of: {', '.join(ALL_EVENTS)}",
+                  file=sys.stderr)
+            return False
+        ok, msg, _, _ = record_event(conn, m, event_type, event_date, note)
+    print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
+    if ok:
+        for ev in chain_events(conn, m):
+            note_part = f" — {ev['note']}" if ev["note"] else ""
+            print(f"    {ev['event_date']}  {ev['event_type']}{note_part}")
+    return ok
 
 
 def cmd_reject(conn, url, gate, pattern, note, undo):
@@ -258,16 +306,21 @@ def _run_fetch_stage(fn, cfg, conn, label):
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
-                                        "reject", "dupe", "prune", "ui"])
-    ap.add_argument("--date", help="report date YYYY-MM-DD (default today)")
-    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject` / `dupe`")
+                                        "reject", "event", "dupe", "prune", "ui"])
+    ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
+                                   "`event`: the date the event happened (default today)")
+    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject` / `event` / `dupe`")
     ap.add_argument("--of", help="`dupe`: job_url (or unique substring) of the other posting this duplicates")
     ap.add_argument("--yes", action="store_true", help="`dupe`: skip the confirmation prompt")
     ap.add_argument("--undo", action="store_true", help="clear the status/override/link instead of setting it")
     ap.add_argument("--gate", default="other",
                     help="hard gate a `reject` represents — one of: " + ", ".join(GATE_NAMES + ["other"]))
     ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
-    ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule")
+    ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule; "
+                                   "`event`: free text stored with the event")
+    ap.add_argument("--type", dest="event_type", choices=list(ALL_EVENTS),
+                    help="`event`: what happened — a lifecycle outcome, or `note` for a bare note")
+    ap.add_argument("--resume", help="`applied`: resume variant sent (free text, stored on the chain)")
     ap.add_argument("--days", type=int, default=90,
                     help="`prune`: age floor in days — only rows first seen before this are touched (default 90)")
     ap.add_argument("--vacuum", action="store_true",
@@ -372,9 +425,11 @@ def main():
     elif args.command == "stats":
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):
-        cmd_mark(conn, args.url, None if args.undo else args.command)
+        cmd_mark(conn, args.url, None if args.undo else args.command, args.resume)
     elif args.command == "reject":
         cmd_reject(conn, args.url, args.gate, args.pattern, args.note, args.undo)
+    elif args.command == "event":
+        cmd_event(conn, args.url, args.event_type, args.date, args.note, args.undo)
     elif args.command == "dupe":
         cmd_dupe(conn, args.url, args.of, args.undo, args.yes)
     elif args.command == "prune":

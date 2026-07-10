@@ -179,6 +179,55 @@ def test_rebuild_refuses_off_vocabulary_values_loudly(tmp_path):
         core.get_db({"settings": {"db_path": path}}).close()
 
 
+def test_outcome_columns_and_events_table_added_additively(tmp_path):
+    # A pre-outcome-tracking DB (the full historical column set, no CHECKs) must gain the
+    # three cache columns and the app_events table on open, with existing applied rows left
+    # untouched: outcome_status NULL on an applied row MEANS "no response recorded" — the
+    # follow-up bucket — so there is deliberately no backfill.
+    path = str(tmp_path / "preoutcome.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_jobs_ddl())
+    conn.execute("INSERT INTO jobs (job_url, title, status, app_status, status_date) "
+                 "VALUES ('ap', 'T', 'evaluated', 'applied', '2026-06-01')")
+    conn.commit()
+    conn.close()
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        row = conn.execute(
+            "SELECT app_status, status_date, outcome_status, outcome_date, resume_variant "
+            "FROM jobs WHERE job_url='ap'").fetchone()
+        assert row["app_status"] == "applied" and row["status_date"] == "2026-06-01"
+        assert row["outcome_status"] is None and row["resume_variant"] is None
+        # The events table + its index exist and accept the service core's write.
+        import chain
+        ok, _, _, _ = chain.record_event(conn, conn.execute(
+            "SELECT * FROM jobs WHERE job_url='ap'").fetchone(), "interview", "2026-06-12")
+        assert ok
+        assert conn.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 1
+        idx = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='app_events'")}
+        assert "idx_app_events_job_url" in idx
+    finally:
+        conn.close()
+
+
+def test_stale_check_rebuild_carries_outcome_columns(tmp_path):
+    # The stale-CHECK table swap runs AFTER the column migrations, so a 479b3b1-era DB must
+    # come out of the rebuild with the outcome columns present and writable (they ride the
+    # same hand-added-column carry as any post-DDL ALTER).
+    path = str(tmp_path / "oldcheck.db")
+    _make_old_check_db(path)
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        conn.execute("UPDATE jobs SET outcome_status='offer', outcome_date='2026-07-01', "
+                     "resume_variant='v1' WHERE job_url='c'")
+        row = conn.execute("SELECT outcome_status, resume_variant FROM jobs "
+                           "WHERE job_url='c'").fetchone()
+        assert row["outcome_status"] == "offer" and row["resume_variant"] == "v1"
+    finally:
+        conn.close()
+
+
 def test_connections_run_in_wal_mode(tmp_path):
     # connect_db switches the DB to WAL so a slow concurrent reader (the UI's full-table
     # view scan) can never block an eval write past the busy timeout — the failure mode

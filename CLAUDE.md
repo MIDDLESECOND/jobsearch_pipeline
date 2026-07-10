@@ -17,8 +17,10 @@ re-export hub):
   imports nothing.
 - `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
   `effective_decision`, propagation), plus the decision service cores both front-ends share:
-  `resolve_posting`, `mark_posting`, `reject_posting`, and `dupe_resolve`/`dupe_commit`/
-  `dupe_unlink`. Imports only `states` + stdlib.
+  `resolve_posting`, `mark_posting`, `reject_posting`, `dupe_resolve`/`dupe_commit`/
+  `dupe_unlink`, and the post-application outcome cores (`record_event`/`undo_event`/
+  `chain_events`/`set_resume` over the `app_events` table; `_recompute_outcome` is the ONE
+  writer of the cached `outcome_status`/`outcome_date` columns). Imports only `states` + stdlib.
 - `core.py` — paths, `load_config` (+ shape validation), the SQLite open/schema/**migrations**,
   `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
   normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
@@ -62,9 +64,13 @@ python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB o
 python pipeline.py stats                  # DB counts
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
-python pipeline.py applied --url <id> [--undo]
+python pipeline.py applied --url <id> [--resume V] [--undo]   # --resume records the variant sent
 python pipeline.py passed  --url <id> [--undo]
 python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
+
+# Post-application outcome tracking (what happened AFTER applying — interview rounds, offer,
+# ghosted, …; --type note = bare note on any posting; --undo removes the chain's last event):
+python pipeline.py event   --url <id> --type <recruiter_screen|interview|offer|rejected_by_employer|ghosted|withdrew|note> [--date YYYY-MM-DD] [--note N] [--undo]
 
 # Manually link a duplicate the fingerprint missed (drifted title, or a cross-source cross-post,
 # e.g. LinkedIn<->Adzuna or LinkedIn<->an ATS board).
@@ -138,6 +144,25 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
   favorable JUDGE verdict, `status='evaluated'` rows only — a filters.yaml GATE_FAIL stamp is not a
   judgment); `chain.skip_evaluated_reposts`' SQL subquery mirrors that predicate, and the two carry
   cross-referencing comments — change one, change both.
+
+- **Outcome tracking is history + cache, both chain-scoped.** What happened after `applied`
+  (screen/interview/offer/ghosted/… + notes) lives in the append-only `app_events` table: an
+  event is written ONCE, keyed to the chain's **canonical url at write time**, and always read
+  chain-wide (`chain.chain_events`) — so a dupe merge unions both sides' histories with no data
+  migration and unlink leaves rows where they sit. The chain's *current* outcome is denormalized
+  onto every member (`jobs.outcome_status`/`outcome_date`) exactly like `app_status`;
+  `chain._recompute_outcome` is the ONE writer of those two cache columns, and the cache is
+  always a pure function of (chain applied?, events) — latest non-note event wins, cleared while
+  not applied, restored on re-apply (undoing `applied` never deletes history).
+  `jobs.resume_variant` is separate: an applied-only field written uniformly chain-wide by
+  `propagate_app_status`/`set_resume` (given → written; absent on a re-assert → inherited from
+  the chain's stored value; chain leaves applied → cleared), with no history — it is NOT
+  restored on re-apply. Lifecycle events require the
+  chain applied; `note` events attach anywhere. `app_events.event_type`/`jobs.outcome_status`
+  carry **no schema CHECK** on purpose (user-decision vocabulary, enforced in
+  `chain.record_event` against `states.ALL_EVENTS` — see states.py's docstring); don't add one.
+  The follow-up predicate is pure SQL and pinned by a test:
+  `app_status='applied' AND outcome_status IS NULL AND status_date < cutoff`.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

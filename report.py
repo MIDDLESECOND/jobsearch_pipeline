@@ -215,7 +215,12 @@ def _repost_info(dec):
     status = dec["app_status"]
     lines = []
     if status == "applied":
-        lines.append(f"- 🚫 **ALREADY APPLIED** ({dec['status_date']}) — do not re-apply")
+        # Append the chain's recorded outcome when one exists (the cached latest app_event —
+        # chain._recompute_outcome), so the banner says not just "applied" but where the
+        # application stands: (2026-06-20 · interview 2026-07-01).
+        out = (f" · {dec['outcome_status'].replace('_', ' ')} {dec['outcome_date']}"
+               if dec["outcome_status"] else "")
+        lines.append(f"- 🚫 **ALREADY APPLIED** ({dec['status_date']}{out}) — do not re-apply")
     elif status == "passed":
         lines.append(f"- ↩ You reviewed & passed on {dec['status_date']} — skip unless reconsidering")
     elif dec["reject"]:

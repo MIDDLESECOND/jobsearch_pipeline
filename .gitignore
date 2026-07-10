@@ -47,3 +47,6 @@ tests/validation/investigate_adzuna_churn.py
 !profile.example.md
 !evaluation_guide.example.md
 !filters.example.yaml
+
+# ignore resume_variant folder
+docs/resume_variant/

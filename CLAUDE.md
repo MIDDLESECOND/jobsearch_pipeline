@@ -66,6 +66,7 @@ python pipeline.py stats                  # DB counts
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
 python pipeline.py applied --url <id> [--resume V] [--channel C] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral)
 python pipeline.py passed  --url <id> [--undo]
+python pipeline.py expired --url <id> [--undo]   # posting is dead/delisted (Adzuna lists stale ads): fixed note event + chain-wide passed, so relistings auto-skip; refused on applied chains — record an outcome event instead
 python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
 
 # Post-application outcome tracking (what happened AFTER applying — interview rounds, offer,

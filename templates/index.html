@@ -285,7 +285,7 @@ function card(j) {
     <div class="meta">${verdict}${score}</div>
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
-    <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}${j.age_label ? ` · 🕐 ${esc(j.age_label)}` : ""}</div>
+    <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet — may be stale; verify on employer site</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}${j.age_label ? ` · 🕐 ${esc(j.age_label)}` : ""}</div>
     ${j.one_line ? `<div class="oneline">${esc(j.one_line)}</div>` : ""}
     ${j.fit_score != null ? `<div class="scores">${scoreLine(j.score_breakdown||{})}</div>` : ""}
     ${flags}
@@ -341,6 +341,11 @@ function card(j) {
              CHANNELS.includes(chv) ? chv : undefined);
     }));
     actions.appendChild(btn("Passed", "pass", () => decide(div, j, "passed")));
+    // Dead/delisted posting (Adzuna especially lists expired jobs): chain-wide passed plus a
+    // fixed note event server-side, so relistings auto-skip and the WHY survives in the
+    // event history. Forward-only here — the card's regular Undo clears the passed mark
+    // (the note stays, harmless); full reversal is the CLI's `expired --undo`.
+    actions.appendChild(btn("Expired", "pass", () => decide(div, j, "expired")));
     const sel = document.createElement("select");
     sel.innerHTML = `<option value="">gate…</option>` + gateOpts;
     actions.appendChild(btn("Reject", "reject", () => {
@@ -477,6 +482,9 @@ function releaseBusy(url, div) {
 // Mirror server-side cmd_mark / cmd_reject on the local job object so we can update the card
 // without refetching the whole list.
 function patchJob(j, action, gate, resume, channel) {
+  // 'expired' is server-side passed + a note event; the note isn't rendered on cards, so the
+  // client mirror is exactly the passed one.
+  if (action === "expired") action = "passed";
   if (action === "applied" || action === "passed") { j.app_status = action; j.status_date = TODAY; }
   else if (action === "undo_app") { j.app_status = null; j.status_date = null; }
   else if (action === "reject") { j.filter_source = "manual"; j.filter_gate = gate || "other"; }

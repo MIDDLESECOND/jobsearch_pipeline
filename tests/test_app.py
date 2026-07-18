@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 import app as webapp
+import chain
 import core
 from conftest import make_job
 
@@ -195,6 +196,34 @@ def test_decision_undo_reject_clears_manual_only(client, seed):
     rows = {r["job_url"]: r for r in seed.execute("SELECT * FROM jobs").fetchall()}
     assert rows["m1"]["filter_source"] is None
     assert rows["ruley"]["filter_source"] == "rule:clearance"  # rule attribution survives
+
+
+def test_decision_expired_marks_chain_and_writes_marker(client, seed):
+    make_job(seed, job_url="c1", company="Chain Co")
+    make_job(seed, job_url="r1", company="Chain Co", repost_of="c1")
+    resp = _post(client, "/api/decision", {"job_url": "r1", "action": "expired"}).get_json()
+    assert resp["ok"] is True
+    assert set(resp["affected"]) == {"c1", "r1"}
+    assert set(resp["exempt"]) == {"c1", "r1"}  # chain was undecided → whole chain exempt
+    rows = {r["job_url"]: r for r in seed.execute("SELECT * FROM jobs").fetchall()}
+    assert rows["c1"]["app_status"] == "passed" and rows["r1"]["app_status"] == "passed"
+    events = seed.execute("SELECT job_url, event_type, note FROM app_events").fetchall()
+    assert [(e["job_url"], e["event_type"], e["note"]) for e in events] == \
+        [("c1", "note", chain.EXPIRED_NOTE)]
+    # undo_expired through the same endpoint reverses both halves.
+    resp = _post(client, "/api/decision", {"job_url": "r1", "action": "undo_expired"}).get_json()
+    assert resp["ok"] is True
+    rows = {r["job_url"]: r for r in seed.execute("SELECT * FROM jobs").fetchall()}
+    assert rows["c1"]["app_status"] is None and rows["r1"]["app_status"] is None
+    assert seed.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 0
+
+
+def test_decision_expired_refused_on_applied_chain(client, seed):
+    make_job(seed, job_url="c1", app_status="applied", status_date="2026-06-01")
+    resp = _post(client, "/api/decision", {"job_url": "c1", "action": "expired"}).get_json()
+    assert resp["ok"] is False and "applied" in resp["message"]
+    assert seed.execute("SELECT app_status FROM jobs").fetchone()["app_status"] == "applied"
+    assert seed.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 0
 
 
 def test_decision_bad_request(client, seed):

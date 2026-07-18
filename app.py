@@ -22,9 +22,10 @@ from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-from chain import (resolve_posting, mark_posting, reject_posting, effective_decisions,
-                   effective_decision, dupe_resolve, dupe_commit, dupe_unlink,
-                   record_event, undo_event, chain_events, set_resume, set_channel)
+from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
+                   effective_decisions, effective_decision, dupe_resolve, dupe_commit,
+                   dupe_unlink, record_event, undo_event, chain_events, set_resume,
+                   set_channel)
 from core import connect_db, get_db, load_config
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
@@ -272,8 +273,8 @@ def api_decision():
     gate = body.get("gate") or "other"
     resume = body.get("resume")
     channel = body.get("channel")
-    if not job_url or action not in ("applied", "passed", "reject", "undo_app", "undo_reject",
-                                     "set_resume", "set_channel"):
+    if not job_url or action not in ("applied", "passed", "expired", "reject", "undo_app",
+                                     "undo_reject", "undo_expired", "set_resume", "set_channel"):
         return jsonify({"ok": False, "message": "bad request"}), 400
     if not (_opt_str(resume) and _opt_str(channel)):
         # A non-string here would AttributeError inside the cores (`.strip()`) — a Flask HTML
@@ -294,6 +295,12 @@ def api_decision():
             ok, message, affected, exempt = mark_posting(conn, row, action)
         elif action == "undo_app":
             ok, message, affected, exempt = mark_posting(conn, row, None)
+        elif action == "expired":
+            # Dead/delisted posting: chain-wide passed + the fixed note, one core with the
+            # CLI's `expired` (chain.mark_expired) — refused on applied chains.
+            ok, message, affected, exempt = mark_expired(conn, row)
+        elif action == "undo_expired":
+            ok, message, affected, exempt = mark_expired(conn, row, undo=True)
         elif action == "reject":
             ok, message, affected, exempt = reject_posting(conn, row, gate)
         elif action == "set_resume":

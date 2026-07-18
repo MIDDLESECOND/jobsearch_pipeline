@@ -258,13 +258,17 @@ def _repost_tag(dec, row=None):
 
 
 def _source_tag(r):
-    """Source-provenance tag. Adzuna's carries a thin-text warning — it only gives a 500-char
-    snippet, so its evals are made on far less text than a LinkedIn JD. ATS-board sources get a
-    plain provenance tag: their descriptions are full text, so there is no caveat to flag."""
+    """Source-provenance tag. Adzuna's carries two caveats: it only gives a 500-char snippet
+    (so its evals are made on far less text than a LinkedIn JD), and Adzuna keeps listing
+    delisted jobs — verified empirically; the details page of a dead ad says "no longer
+    available", so opening the link before applying IS the liveness check (automated
+    verification was rejected: the web side 403s scripts and the volume is thousands of rows
+    per run). ATS-board sources get a plain provenance tag: their descriptions are full text
+    and a board only returns open roles, so there is no caveat to flag."""
     # Tolerate rows from a SELECT that omits `source` (this file mixes Row and dict rows).
     source = r["source"] if "source" in r.keys() else None
     if source == "adzuna":
-        return " · 📋 adzuna (500-char snippet — verdict on thin text)"
+        return " · 📋 adzuna (500-char snippet — may be stale; verify on employer site)"
     # Same rule as the UI's meta line (index.html): any non-LinkedIn source gets a plain
     # provenance tag, so a future board added in fetch.py can't drift out of the report.
     if source and source != "linkedin":

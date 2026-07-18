@@ -993,6 +993,68 @@ def set_channel(conn, row, value):
     return _set_applied_field(conn, row, "channel", "channel", value)
 
 
+# The fixed note text mark_expired writes and its undo verifies. Deliberately a plain
+# 'note' payload, not a new ALL_EVENTS type: it asserts nothing about an application
+# (no outcome cache), and the closed event vocabulary stays outcome-only.
+EXPIRED_NOTE = "posting expired"
+
+
+def mark_expired(conn, row, undo=False):
+    """Mark `row`'s chain as a dead/expired posting (or with undo=True reverse it): a fixed
+    'note' event (EXPIRED_NOTE) records WHY the chain left the queue, plus a chain-wide
+    'passed' mark so relistings auto-skip (skip_decided_reposts keys on app_status). One
+    core for the CLI (cmd_expired) and the web UI (api_decision). Composed from the
+    propagation primitives rather than record_event+mark_posting so the note and the mark
+    land in ONE commit (each service commits internally). Refused in BOTH directions on an
+    applied chain: a dead posting you applied to is an outcome (rejected_by_employer /
+    ghosted), not a triage disposition — and after expired→applied the marker is still the
+    latest event, so an unguarded undo would clear the applied mark. Accepted loss, same
+    class as re-asserting 'passed': marking an already-passed chain overwrites status_date,
+    and undo returns the chain to undecided, not to the prior passed (app_status has no
+    history). Returns (ok, message, affected_urls, exempt_urls)."""
+    targets = _chain_targets(conn, row)
+    canonical = row["repost_of"] or row["job_url"]
+    if effective_decision(conn, row)["app_status"] == "applied":
+        return False, (f"can't {'un' if undo else ''}mark expired on an applied chain — "
+                       f"record what happened instead "
+                       f"(event --type rejected_by_employer|ghosted|withdrew)"), [], []
+    if undo:
+        urls = sorted(targets)
+        qs = ",".join("?" * len(urls))
+        # By id, not undo_event: that deletes the last event UNCONDITIONALLY — this undo
+        # must verify it is unwinding its own marker, not some later note.
+        last = conn.execute(
+            f"SELECT id, event_type, note FROM app_events WHERE job_url IN ({qs}) "
+            f"ORDER BY id DESC LIMIT 1", tuple(urls),
+        ).fetchone()
+        if last is None or last["event_type"] != EVENT_NOTE or last["note"] != EXPIRED_NOTE:
+            return False, (f"the chain's last event isn't the expired marker — remove later "
+                           f"events first (event --undo), or just clear the mark "
+                           f"(passed --undo): {row['title']} — {row['company']}"), [], []
+        conn.execute("DELETE FROM app_events WHERE id=?", (last["id"],))
+        propagate_app_status(conn, targets, None, None)
+        _recompute_outcome(conn, canonical, targets)
+        conn.commit()
+        _reconcile_chain_skips(conn, canonical)
+        exempt = _undo_exempt(conn, row, targets)
+        return (True, f"unmarked expired: {row['title']} — {row['company']}",
+                sorted(targets), exempt)
+    exempt = _forward_exempt(conn, row, targets)  # pre-state read
+    today = date.today().isoformat()
+    conn.execute(
+        "INSERT INTO app_events (job_url, event_type, event_date, note, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (canonical, EVENT_NOTE, today, EXPIRED_NOTE,
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    propagate_app_status(conn, targets, "passed", today)
+    _recompute_outcome(conn, canonical, targets)
+    conn.commit()
+    _reconcile_chain_skips(conn, canonical)
+    return (True, f"marked expired (passed + note): {row['title']} — {row['company']} ({today})",
+            sorted(targets), exempt)
+
+
 # ------------------------------------------------------- manual repost linking
 #
 # `_find_repost` only links reposts at fetch time, and only when normalized

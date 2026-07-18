@@ -14,6 +14,9 @@ Usage:
                                                 #   substring) as applied-to; --resume records the variant
                                                 #   sent, --channel how it went out (direct|agency|referral)
   python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
+  python pipeline.py expired --url X            # posting is dead/expired: chain-wide passed + a fixed
+                                                #   note event, so relistings auto-skip (refused on an
+                                                #   applied chain — record an outcome event instead)
   python pipeline.py reject  --url X --gate G   # override the model: mark a hard-fail it missed
                                                 #   (--pattern P also writes a reusable rule to filters.yaml)
   python pipeline.py event   --url X --type T   # record what happened after applying (interview, offer,
@@ -40,7 +43,7 @@ from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
                     STATUS_SALARY_FILTERED)
 from chain import (
     skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
-    mark_posting, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
+    mark_posting, mark_expired, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
     record_event, undo_event, chain_events,
 )
 from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats
@@ -134,6 +137,21 @@ def cmd_mark(conn, url, status, resume=None, channel=None):
         print(f"[{label}] {err}", file=sys.stderr)
         return False
     ok, msg, _, _ = mark_posting(conn, m, status, resume, channel)
+    print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
+    return ok
+
+
+def cmd_expired(conn, url, undo):
+    """CLI wrapper over chain.mark_expired: the posting is dead/expired (delisted, req
+    closed) — a triage disposition, not a fit judgment. Marks the chain passed and records
+    the fixed expired note; `--undo` removes both. Refused on applied chains (record an
+    outcome event instead)."""
+    label = "expired"
+    m, err = resolve_posting(conn, url)
+    if err:
+        print(f"[{label}] {err}", file=sys.stderr)
+        return False
+    ok, msg, _, _ = mark_expired(conn, m, undo)
     print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
     return ok
 
@@ -312,10 +330,11 @@ def _run_fetch_stage(fn, cfg, conn, label):
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
-                                        "reject", "event", "dupe", "prune", "ui"])
+                                        "expired", "reject", "event", "dupe", "prune", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
                                    "`event`: the date the event happened (default today)")
-    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / `reject` / `event` / `dupe`")
+    ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / "
+                                  "`expired` / `reject` / `event` / `dupe`")
     ap.add_argument("--of", help="`dupe`: job_url (or unique substring) of the other posting this duplicates")
     ap.add_argument("--yes", action="store_true", help="`dupe`: skip the confirmation prompt")
     ap.add_argument("--undo", action="store_true", help="clear the status/override/link instead of setting it")
@@ -434,6 +453,8 @@ def main():
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):
         cmd_mark(conn, args.url, None if args.undo else args.command, args.resume, args.channel)
+    elif args.command == "expired":
+        cmd_expired(conn, args.url, args.undo)
     elif args.command == "reject":
         cmd_reject(conn, args.url, args.gate, args.pattern, args.note, args.undo)
     elif args.command == "event":

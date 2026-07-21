@@ -60,8 +60,9 @@ convenience layer). High-scoring pipeline PASSes were routinely being vetoed at 
 - **Part 2 — convenience-layer scoring rule** on the `ai_applied_vs_research` starred line:
   score the SEAT's responsibilities, not the company's branding; "use/explore AI tools to work
   faster" as the only AI content → 0–1 (near-disqualifying), with `learning_value` 0–1 and
-  `ai_artifact_depth`'s 3 explicitly vacuous. New worked **Example E** — the KPMG
-  case's inverse. This is the fix for the 18/18-vs-SKIP class: the score comes out honest
+  `ai_artifact_depth`'s 3 explicitly vacuous. New worked **Example E** — the inverse of
+  the research-under-a-delivery-title case. This is the fix for the 18/18-vs-SKIP class:
+  the score comes out honest
   (~11/18) and falls below the allocation bar on its own.
 - **profile.md**: current title aligned with the HR record, matching the workspace's 07-16
   framing rules.

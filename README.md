@@ -252,8 +252,8 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
 **Verdict sections** (how the evaluator triaged each posting):
 
 - **Cold-apply (PASS)** = *worth your read*, not *apply*. The script reliably kills hard
-  fails (years floors, clearance language, research-coded substance), but KPMG-style
-  research-coding under an SA title can slip through — the ⚠️ flags mark where the
+  fails (years floors, clearance language, research-coded substance), but a research-coded
+  role wearing an SA title can slip through — the ⚠️ flags mark where the
   evaluator was unsure. Strong-band (14–18) postings deserve a full manual gate check
   before you tailor anything. Each carries a **bucket**: 2 (acceptable-tier BI/BA) or
   3 (clean low-code / Power Platform AI delivery — where cold conversion is realistic).

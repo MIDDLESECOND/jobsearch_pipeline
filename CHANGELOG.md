@@ -7,6 +7,74 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-21 — AI-recruiter intermediaries route as lead-gen only
+
+### Why
+One high-volume posting source is an AI-recruiter service — every posting's description
+carries boilerplate saying an AI agent screens candidates on behalf of an unnamed customer.
+The DB holds 400+ rows from it (166 gates-passed, max fit 18, 0 applied). Applying means
+entering an AI screening funnel: under the standing allocation that is the worst of both
+worlds (can't carry a ramp narrative like a human recruiter; unverifiable intermediary
+unlike a portal). But ~75% of the gates-passed postings name the real client in the title
+(early-stage AI startup FDE/Deployment-Strategist roles with salary bands — the Bucket 1
+target tier), so hard-filtering the feed would discard genuine lead-gen.
+
+### Changes (guide text only — no code, no schema, verdicts unchanged)
+- **Part 2.5 — AI-recruiter-intermediary overlay:** score and bucket normally, emit an
+  `ai-recruiter-intermediary` flag (flags are free text; report/UI render whatever is
+  emitted), never apply through the intermediary's funnel. Client named in the title →
+  a lead: pursue the company directly or via a human recruiter; salary band = negotiating
+  intel. Client anonymized ("VC-backed…", "stealth") → skip.
+- `evaluation_guide.example.md` carries the overlay generically (boilerplate-tell pattern,
+  no company name). The external triage instructions get a one-line pointer (the full rule
+  lives in the guide only — the anti-drift lesson from the 07-09/07-16 divergence).
+
+### Expected effect
+The intermediary's rows keep their verdicts and stay visible in the report, now flagged;
+triage treats named-client rows as direct/recruiter leads and skips anonymized ones. No
+application ever goes through the AI funnel.
+
+---
+
+## 2026-07-21 — guide sync with the external triage rules: cold-channel allocation + convenience-layer scoring
+
+### Why
+The external triage workspace and the pipeline had drifted onto different-vintage rules: the
+workspace's instructions were updated 2026-07-16 after a cold-channel conversion audit
+(mechanical causes — PDF parsing, knockout answers — ruled out; the cold portal channel was
+underperforming warm channels by a wide margin), while the pipeline still ran the 07-09
+guide. Canonical divergence: an AI-native company's "Forward Deployed Engineer" posting
+(2026-07-21) — pipeline scored it **18/18 PASS** (DeepSeek read the company branding as AI
+work); the workspace scored the same posting **12/18 SKIP** (`ai_applied_vs_research` 1 —
+the seat's only AI content is "explore AI tools to streamline tasks", a productivity
+convenience layer). High-scoring pipeline PASSes were routinely being vetoed at triage.
+
+### Changes (guide/profile only — no code, no schema)
+- **Part 2.5 — the standing allocation** (supersedes the 50/0-era channel text): cold
+  applies = minimum insurance only — fresh Bucket 3, **fit ≥ 15, posted ≤ 14 days**. Bucket 3
+  is the ONLY bucket where cold applies are permitted (the audit's Bucket 3 slice is too
+  recent to prove cold conversion works — treat it as unproven, not established); Bucket 2 is
+  insurance that rarely clears the bar. Explicitly volume/priority only: **PASS remains the
+  verdict standard for cold-apply eligibility** — no verdict vocabulary or `normalize_result`
+  change.
+- **Part 2 — convenience-layer scoring rule** on the `ai_applied_vs_research` starred line:
+  score the SEAT's responsibilities, not the company's branding; "use/explore AI tools to work
+  faster" as the only AI content → 0–1 (near-disqualifying), with `learning_value` 0–1 and
+  `ai_artifact_depth`'s 3 explicitly vacuous. New worked **Example E** — the KPMG
+  case's inverse. This is the fix for the 18/18-vs-SKIP class: the score comes out honest
+  (~11/18) and falls below the allocation bar on its own.
+- **profile.md**: current title aligned with the HR record, matching the workspace's 07-16
+  framing rules.
+- `evaluation_guide.example.md` mirrors the two scoring changes generically, with the
+  allocation expressed as an audit-your-own-data escape valve.
+
+### Expected effect
+AI-branding-only seats stop surfacing as top-of-report 17–18/18 cold applies; the report's
+PASS list and the external triage verdicts converge. Bucket routing and the two code caps
+unchanged.
+
+---
+
 ## 2026-07-20 — schema: `meta` table; scheduled-run cooldown skip
 
 ### Why
@@ -37,13 +105,15 @@ run-level routing.
 ## 2026-07-09 — recruiter-screen realism: tenure split, formal-leadership cap, cold-apply bar
 
 ### Why
-A application-conversion audit (details in the private notes) showed the evaluator scoring conceptual fit correctly while talking past
-three cold-screen walls. Canonical miss: [redacted] "AI Enablement & Engineering Manager" —
-required "Minimum of 5 years… AI enablement" + "Minimum of 3 years of leadership", scored
-17/18 PASS Bucket 3, cold-applied, silence. Root cause was partly the evaluator's own
-input: `profile.md` stated one total years figure with no title-tenure split, so
-architect-function years requirements were scored against total tenure when the tenure
-actually held **in the current title is a small fraction of it** (the exact figures live in the gitignored profile.md, deliberately not here).
+A conversion audit of the applications to date showed the evaluator scoring conceptual fit
+correctly while talking past three cold-screen walls. Canonical miss: a manager-titled
+"AI Enablement & Engineering" role — required "Minimum of 5 years… AI enablement" +
+"Minimum of 3 years of leadership" — scored 17/18 PASS Bucket 3, yet was a role the resume
+could not screen into cold. Root cause was partly the evaluator's own input: `profile.md`
+stated one total years figure with no title-tenure split, so architect-function years
+requirements were scored against total tenure when the tenure actually held **in the
+current title is a small fraction of it** (the exact figures live in the gitignored
+profile.md, deliberately not here).
 
 ### Changes
 - **`profile.md`** (input correction): experience split by function — years requirements
@@ -77,7 +147,7 @@ instead of high-scoring cold PASSes.
 ## 2026-07-09 — application channel tracking (schema: `jobs.channel`)
 
 ### Why
-A application-conversion conversion audit found the funnel unreadable in aggregate: direct
+A conversion audit found the funnel unreadable in aggregate: direct
 cold-applies, staffing-agency submissions, and referrals convert at very different rates,
 and the DB couldn't say which was which — the response-rate question the outcome tracking
 below exists to answer needs the channel axis to mean anything.
@@ -147,14 +217,14 @@ analytics are fast-follows on this schema.
 ## 2026-07-06 — `enablement-cluster` flag + deadline-insurance routing (guide only, no code)
 
 ### Why
-The [redacted] "Senior Technology Consultant – GenAI & AI Adoption" posting passed the eval
-(PASS, 15/18, bucket 3) while manual triage failed it categorically on role substance —
-the second such divergence ([redacted] "AI Training and Adoption Consultant",
-2026-07-01). Investigation showed the pipeline followed its spec: the guide's
+A staffing-vendor "Senior Technology Consultant – GenAI & AI Adoption" posting passed the
+eval (PASS, 15/18, bucket 3) while manual triage failed it categorically on role substance —
+the second such divergence (an "AI Training and Adoption Consultant" posting, 2026-07-01).
+Investigation showed the pipeline followed its spec: the guide's
 role_substance gate only screens out *research* roles, and the management-drift note is
 explicitly flag-only "until the pattern proves structural." It now has. But with the
-deadline and the 50/0 cold-conversion history, pure-enablement roles are also the
-highest-conversion slice of the funnel (~4-5 enablement-titled passes/day), so hiding
+search's deadline pressure and the cold-conversion history, pure-enablement roles are also
+the highest-conversion slice of the funnel (~4-5 enablement-titled passes/day), so hiding
 them in GATE_FAIL was rejected in favor of keeping them visible as flagged insurance.
 
 ### What changed (evaluation_guide.md + evaluation_guide.example.md — data, not code)
@@ -165,11 +235,11 @@ them in GATE_FAIL was rejected in favor of keeping them visible as flagged insur
   real delivery) and from enablement-*engineer* roles with build content (no flag).
 - **Part 2.5 insurance overlay:** flagged roles route like Bucket 2 — cold-apply OK,
   always below Bucket 3 in priority; permanent-FTE only (many are staffing-vendor seats).
-- **Sunset written into the guide:** once an offer lands or the deadline passes,
+- **Sunset written into the guide:** once an offer lands or the search's deadline passes,
   the cluster hardens into a role_substance hard FAIL.
-- **Worked Example D ([redacted])** added (personal `evaluation_guide.md` only — the committed
+- **Worked Example D** added (personal `evaluation_guide.md` only — the committed
   `.example` template carries the flag + routing text but still ends at Example C); two
-  backtest cases ([redacted], [redacted]) added to `tests/validation/backtest_v2.py`
+  backtest cases added to the local `backtest_v2.py`
   asserting PASS + `enablement-cluster` flag.
 - Also noted during investigation: `filters.yaml` has never existed, so the deterministic
   hard-filter layer has been a no-op every run. Left as-is deliberately — a title-based
@@ -854,8 +924,8 @@ schema had no content fingerprint and no notion of which postings had been appli
 - **Backtest over the real DB (the decisive test).** Fuzzy matching flagged 1,598 pairs,
   manual inspection showing most were distinct roles sharing a generic core — which drove
   the switch to exact matching. Exact normalized-title matching flagged **212** reposts,
-  every sampled one a genuine same-title relisting (`Data Analyst @ AARATECH`,
-  `Forward Deployed Engineer … @ [an AI-recruiter agency]`, `SR HRIS ANALYST @ RemoteHunter` across days).
+  every sampled one a genuine same-title relisting (`Data Analyst`, `Forward Deployed
+  Engineer`, `SR HRIS ANALYST` — same title, same poster, across days).
 - Offline `_find_repost`: an identical-title repost matched its original across
   company-suffix drift (`Acme Corp` → `Acme Corp, LLC`), location-format drift
   (`Austin, TX` → `Austin TX`), and punctuation drift (`…, AI` → `… - AI`); a reworded
@@ -876,8 +946,9 @@ schema had no content fingerprint and no notion of which postings had been appli
 ## 2026-06-19 — v2 evaluation framework (the "50/0" fix)
 
 ### Why
-Applying the v1 framework produced an initial batch of cold applications with no conversions. The framework scored roles correctly *as fits* but couldn't tell whether an
-application would *clear the screen*. Two structural blind spots:
+Field results from the v1 framework showed high-scoring primary-tier cold applications
+failing to convert. The framework scored roles correctly *as fits* but couldn't tell whether
+an application would *clear the screen*. Two structural blind spots:
 
 1. **One AI score did two jobs.** "Is this applied AI, not research?" was tangled with
    "can my current artifact *evidence* the required AI depth?" A role can be genuinely

@@ -21,8 +21,8 @@ and the **tool-requirement gate**. AI-depth realism has two parts, and conflatin
 what produces a "high score, zero conversion" result.
 
 **Critical lesson (the "50/0" finding):** A candidate applying an earlier version of this
-framework produced an initial batch of cold applications with no conversions. The framework was
-scoring roles correctly *as fits* and missing whether the application could *clear the screen*.
+framework found high-scoring primary-tier cold applications failing to convert. The framework
+was scoring roles correctly *as fits* and missing whether the application could *clear the screen*.
 Two structural blind spots caused it:
 
 1. **AI-depth realism was doing two jobs at once.** "Is this applied AI, not research?" (the
@@ -69,7 +69,7 @@ reason a high-scoring role still won't convert cold.
 
 | Dimension | What "strong" looks like | Score (0–3) | Evidence to cite |
 |---|---|---|---|
-| **AI-realism: applied vs. research** ⭐ (`ai_applied_vs_research`) | What they want = applied AI / production deployment / prompt eng / integration — NOT research depth (model training/tuning, evals, published work) that would have to be invented. Score on whether the *role* is applied vs. research. | | |
+| **AI-realism: applied vs. research** ⭐ (`ai_applied_vs_research`) | What they want = applied AI / production deployment / prompt eng / integration — NOT research depth (model training/tuning, evals, published work) that would have to be invented. Score on whether the *role* is applied vs. research. **Score the SEAT, not the company:** an "AI-native" employer whose seat's only AI content is "use/explore AI tools to work faster" is a convenience layer, not AI work — score 0–1. | | |
 | **AI-realism: artifact-evidences-required-depth** ⭐ (`ai_artifact_depth`) | Does my **current shipped artifact** evidence the AI depth this role lists as **required**? **3** = exactly what I've shipped (e.g. low-code GenAI automation, prompt design, classification/routing). **1–2** = adjacent but a step beyond (some orchestration, light agent work). **0** = a generation ahead (production agentic systems, multi-agent orchestration, LangChain/CrewAI/LangGraph/MCP as a *built* requirement, SDK/connector/middleware engineering). *This is the line a single AI dimension is blind to.* | | |
 | **Learning value** (`learning_value`) | Does the role *grow* AI capability — a step beyond current depth? Note: a role can be high learning value AND score 0 on artifact-depth — that's the Bucket 1 trap. High learning value is a reason to *want* the role, not evidence you can *land* it cold. | | |
 | **Technical skill match** (`technical_skill_match`) | Core skills map to required (not "plus") skills — OR gaps are ramp-able, not stated core requirements. | | |
@@ -79,7 +79,7 @@ reason a high-scoring role still won't convert cold.
 **Total: ___ / 18.**  14–18 = strong, tailor and apply. 10–13 = acceptable-tier, apply only if friction is low. <10 = likely pass.
 
 **⭐ Starred-line rules (these override the total):**
-- If *applied-vs-research* (`ai_applied_vs_research`) scores 0–1 → near-disqualifying regardless of total (a research role wearing an architect title).
+- If *applied-vs-research* (`ai_applied_vs_research`) scores 0–1 → near-disqualifying regardless of total. Two mirror-image failure shapes: a research role wearing a delivery title, and a barely-AI seat wearing an AI-company logo (there, `ai_artifact_depth`'s 3 is vacuous — the required depth is ~zero, so the score carries no signal and does not rescue the role).
 - **If *artifact-evidences-required-depth* (`ai_artifact_depth`) scores 0 → the verdict is CAPPED at "RECRUITER_ONLY," regardless of total.** A 16/18 with this line at 0 is NOT the same role as a 16/18 with it at 3. Cold-applying the former is the "50/0" pattern. It does not become a PASS just because every other line is strong.
 - **Formal-leadership check (code-enforced cap, like the artifact-depth line).** If the posting's *required* qualifications state N+ years of formal **people leadership / management / technical program management** the candidate lacks (per the profile's leadership line), set `formal_leadership_required: true` in the output — the verdict is CAPPED at RECRUITER_ONLY regardless of total. Boundaries: (a) *required*, not preferred; (b) formal authority over people, not stakeholder/project leadership or mentoring; (c) if the leadership requirement makes the whole role management-of-delivery, the years-floor or role-substance gate may fail it first.
 
@@ -114,8 +114,23 @@ where the required bar is "you've shipped a working AI workflow," not "you've bu
 - **Channel: cold-apply is fine — this is where cold conversion is realistic.** This is the
   slice where AI-realism and landability *agree*. Concentrate cold-application effort here.
 
+**Standing-allocation escape valve:** audit your own cold-channel response data periodically.
+If cold portal applications flatline across a meaningful sample (with mechanical causes — PDF
+parsing, knockout answers — ruled out first), tighten the allocation rather than the scoring: keep
+PASS as the *eligibility* standard but restrict actual cold applies to fresh, high-fit Bucket 3
+(e.g. fit ≥ 15, posted ≤ 14 days) and redirect the freed hours to recruiter threads and inbound
+optimization. Volume and priority change; gates and scoring don't.
+
 **Enablement-cluster overlay:** flagged pure-enablement roles (see Part 2) route like Bucket 2 —
 cold-apply OK as deadline insurance, always below Bucket 3 in priority.
+
+**AI-recruiter-intermediary overlay (lead-gen only).** Some agencies post via an AI recruiter —
+the posting's boilerplate says an AI agent screens candidates on the client's behalf, and the
+client is often anonymized ("VC-backed…", "stealth"). Never apply through the AI funnel: it can't
+hear a gap narrative like a human recruiter, and it's an unverifiable intermediary unlike a
+portal. Score the role normally and emit an `ai-recruiter-intermediary` flag; if the client is
+named in the title, treat the posting as a *lead* (pursue the company directly or via a human
+recruiter — the salary band is negotiating intel); if anonymized, skip.
 
 **Routing summary:** Cold applications (verdict **PASS**) → Bucket 3 first, small-gap Bucket 2
 second, flagged `enablement-cluster` roles as insurance behind both. Bucket 1 and

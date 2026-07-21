@@ -102,8 +102,8 @@ def parse_eval_json(text):
 def normalize_result(result):
     """Apply the guide's hard routing rules deterministically, regardless of what
     the model returned. The artifact-depth cap is the load-bearing 50/0 fix, and the
-    formal-leadership cap is its application-conversion sibling (a required "N yrs of
-    leadership" is a cold-screen wall the fit total talked past — the [redacted] 17/18
+    formal-leadership cap is its cold-screen sibling (a required "N yrs of
+    leadership" is a wall the fit total talked past — the 17/18 manager-role
     case), so both are enforced in code, not left to the model: any role that passes
     the gates but scores ai_artifact_depth == 0 OR states a required formal-leadership
     tenure is RECRUITER_ONLY / bucket 1, even at 18/18. Mutates and returns `result`."""
@@ -132,7 +132,7 @@ def normalize_result(result):
         # type, so a model quoting the boolean ("true"), emitting 1, or answering "yes"
         # cannot dodge the cap; and a value that is neither a recognized affirmative nor a
         # recognized negative still fails open but is logged — a silent bypass here is the
-        # [redacted] cold-apply miss this cap exists to prevent.
+        # cold-apply miss this cap exists to prevent.
         raw = result.get("formal_leadership_required")
         norm = str(raw).strip().lower()
         leadership = norm in ("true", "yes", "1")

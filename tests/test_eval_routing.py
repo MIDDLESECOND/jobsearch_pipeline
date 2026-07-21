@@ -2,7 +2,7 @@
 
 The load-bearing rule (the '50/0 fix'): a role that clears the gates but whose
 ai_artifact_depth is 0 (or unparseable) is capped to RECRUITER_ONLY / bucket 1,
-even at a perfect score. Its sibling (the 'application-conversion fix'): a required
+even at a perfect score. Its sibling (the formal-leadership cap): a required
 formal-leadership tenure (`formal_leadership_required: true`) caps the same way,
 but fails OPEN on absence — pre-cap eval_json rows lack the key. Both enforced in
 code so they can't depend on the model complying.
@@ -84,8 +84,8 @@ def test_recruiter_only_input_with_depth0_stays_bucket1():
 
 
 def test_leadership_requirement_caps_pass_to_recruiter_even_at_perfect_score():
-    # The application-conversion sibling of the 50/0 fix (the [redacted] 17/18 case): a required
-    # formal-leadership tenure is a cold-screen wall the fit total must not outvote.
+    # The cold-screen sibling of the 50/0 fix (the 17/18 manager-role case): a required
+    # formal-leadership tenure is a wall the fit total must not outvote.
     r = _norm(verdict="PASS", fit_score=18, bucket=3, score_breakdown=_bd(3),
               formal_leadership_required=True)
     assert r["verdict"] == "RECRUITER_ONLY"
@@ -103,7 +103,7 @@ def test_leadership_string_true_still_caps():
 def test_leadership_noncanonical_affirmatives_still_cap():
     # The cap is judged on the normalized VALUE, not the JSON type: 1 and "yes" are
     # affirmative answers a weaker model plausibly emits, and each must cap — a silent
-    # fail-open on an affirmative is the [redacted] cold-apply miss the cap exists to prevent.
+    # fail-open on an affirmative is the cold-apply miss the cap exists to prevent.
     for aff in (1, "yes", "Yes", " TRUE "):
         r = _norm(verdict="PASS", fit_score=17, score_breakdown=_bd(3),
                   formal_leadership_required=aff)

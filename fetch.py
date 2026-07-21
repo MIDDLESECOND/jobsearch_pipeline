@@ -51,6 +51,9 @@ def fetch_new_jobs(cfg, conn):
             )
         except Exception as e:
             print(f"[fetch] {name} FAILED: {e}", file=sys.stderr)
+            # A failure is often the rate-limiter talking — pause before the next search,
+            # same as the 0-results path, instead of hammering the endpoint while it's sore.
+            time.sleep(s["delay_between_searches"])
             continue
 
         if df is None or df.empty:

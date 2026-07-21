@@ -60,6 +60,7 @@ predicted salaries).
 pip install -r requirements.txt          # python-jobspy, anthropic, pyyaml (.venv present)
 
 python pipeline.py run                    # full cycle: fetch → error requeue → repost-skip restores → salary filter → hard filters → repost-skip forward → eval → report
+#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; bare `run` always executes
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
 
@@ -96,7 +97,14 @@ comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Win
 
 ## Architecture invariants (the non-obvious parts)
 
-- **The `run` stage order is load-bearing.** Each stage gates on the `status` column, and only
+- **The `run` stage order is load-bearing.** Before any stage, a `--scheduled` run (the .bat's
+  spelling) may cooldown-skip: if the `meta` table's `last_run_ok_ended` (stamped only after a
+  FULL successful cycle in which ≥1 fetch source didn't crash — an all-sources-down catch-up
+  run must not suppress the first slot that can fetch) is <60 min old, the slot no-ops —
+  visibly, inside the day's run-log markers; the predicate fails open on missing/garbage
+  stamps and manual runs never skip. A skip is a full no-op (error-row requeue, reconciles,
+  and report rebuild all wait for the next executed run).
+  Each stage gates on the `status` column, and only
   `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost passes run *before*
   the LLM and short-circuit obvious rejects: the two repost-skip reconciles' RESTORE direction
   (released rows re-face the current rules), then the salary and hard-requirement filters, then

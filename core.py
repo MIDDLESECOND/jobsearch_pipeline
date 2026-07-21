@@ -438,6 +438,11 @@ def get_db(cfg):
     conn = connect_db(cfg)
     conn.execute(_jobs_table_sql("jobs", if_not_exists=True))
     conn.execute(_events_table_sql())
+    # Run-level state the log files can't provide queryably (they're human-oriented text
+    # with 30-day retention). Currently one key: 'last_run_ok_ended', the ISO end time of
+    # the last SUCCESSFUL full run — the cooldown guard's input. Crashed runs never write
+    # it, so a crash can't suppress the next scheduled slot.
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_app_events_job_url ON app_events(job_url)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
@@ -449,6 +454,16 @@ def get_db(cfg):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs(status)")
     conn.commit()
     return conn
+
+
+def meta_get(conn, key):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def meta_set(conn, key, value):
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
 
 
 def _migrate(conn):

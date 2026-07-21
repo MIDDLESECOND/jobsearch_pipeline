@@ -31,7 +31,9 @@ def test_crash_is_caught_rolled_back_and_logged(conn, capsys):
         _insert_uncommitted(c, "u1")  # partial work, uncommitted
         raise RuntimeError("network exploded")
 
-    assert pipeline._run_fetch_stage(boom, _CFG, conn, "linkedin") == 0
+    # None = crashed (distinct from a fetcher's own 0 = ran fine, nothing new) — the
+    # cooldown stamp keys on this distinction, so pin the exact sentinel.
+    assert pipeline._run_fetch_stage(boom, _CFG, conn, "linkedin") is None
     assert _count(conn) == 0  # the uncommitted row was rolled back
     err = capsys.readouterr().err
     assert "linkedin fetch FAILED" in err

@@ -33,12 +33,12 @@ import argparse
 import re
 import sys
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 # This module is the CLI/orchestrator ONLY: it imports exactly what `run` and the cmd_*
 # wrappers call. Consumers (app.py, the tests, backtest_v2 / compare_models) import the real
 # modules directly — do not re-export names here for them.
-from core import load_config, get_db, run_log
+from core import load_config, get_db, run_log, meta_get, meta_set
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
                     STATUS_SALARY_FILTERED)
 from chain import (
@@ -324,7 +324,43 @@ def _run_fetch_stage(fn, cfg, conn, label):
         conn.rollback()
         print(f"[run] {label} fetch FAILED — skipping this source for this run:", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return 0
+        # None = crashed, distinct from a fetcher's own 0 (= ran fine, nothing new/skipped
+        # by config). The run branch stamps the cooldown only if some source returned
+        # non-None, so an all-sources-down run (wake before Wi-Fi) can't suppress the
+        # next scheduled slot.
+        return None
+
+
+# Scheduled-run cooldown: a slot fired < this many minutes after the last SUCCESSFUL run's
+# end becomes a no-op, so a manual catch-up run (or a missed trigger fired late on wake)
+# shortly before a slot doesn't buy a near-duplicate fetch+eval — the savings are ~$0.10-0.19
+# of eval and, more importantly, a whole LinkedIn scrape cycle of rate-limit exposure.
+# Applies ONLY to `run --scheduled` (what run_pipeline.bat passes); a bare `run` is an
+# explicit human command and always executes. Hardcoded, not config: one consumer, and a
+# knob would need config.example + validation for a number nobody has wanted to tune yet.
+COOLDOWN_MINUTES = 60
+
+
+def _cooldown_active(last_ok_iso, now, minutes=COOLDOWN_MINUTES):
+    """True when last_ok_iso (meta 'last_run_ok_ended') is within `minutes` of `now`.
+
+    Fails OPEN on missing/garbage stamps and on stamps in the future (clock change):
+    corrupt state must never suppress runs — the failure cost is one redundant run,
+    the inverse is a pipeline that silently stops running. TypeError is in the net
+    because two garbage shapes raise it, not ValueError: a non-str value (BLOB-typed
+    meta row) inside fromisoformat, and — for an offset-aware stamp, which fromisoformat
+    parses happily — the naive-minus-aware subtraction below. Aware stamps are
+    normalized to local-naive instead of treated as garbage: they're a valid spelling
+    of a real instant (e.g. a hand-restored '...+00:00' row)."""
+    if not last_ok_iso:
+        return False
+    try:
+        last = datetime.fromisoformat(last_ok_iso)
+        if last.tzinfo is not None:
+            last = last.astimezone().replace(tzinfo=None)
+        return timedelta(0) <= now - last < timedelta(minutes=minutes)
+    except (ValueError, TypeError):
+        return False
 
 
 def main():
@@ -354,6 +390,9 @@ def main():
                     help="`prune`: also VACUUM so the freed pages shrink jobs.db on disk "
                          "(under WAL the shrink lands at checkpoint — i.e. once no other "
                          "process, e.g. the web UI, has the DB open)")
+    ap.add_argument("--scheduled", action="store_true",
+                    help=f"`run`: invoked by the scheduler — skip (no-op) if the last successful "
+                         f"run ended < {COOLDOWN_MINUTES} min ago; a bare `run` always executes")
     args = ap.parse_args()
 
     # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's
@@ -421,6 +460,19 @@ def main():
         # succeeded. The deterministic stages below stay UNGUARDED on purpose — they must fail
         # loud, since continuing past a crashed filter would let un-filtered rows hit the paid eval.
         with run_log("run"):
+            # Cooldown guard, scheduled runs only — INSIDE run_log so a skipped slot is
+            # visible in the day's log (a silent non-run reads as a crash). A skip does
+            # NOT re-stamp last_run_ok_ended, so consecutive slots can't cascade-skip.
+            # Guarded on args.scheduled first so a manual `run` pays no meta read; the
+            # stamp is then read ONCE and reused in the message (runs may overlap,
+            # deliberately unguarded, and this log line is what a user reads to learn why
+            # a slot didn't run — it must show the value the decision was made on).
+            if args.scheduled:
+                last_ok = meta_get(conn, "last_run_ok_ended")
+                if _cooldown_active(last_ok, datetime.now()):
+                    print(f"[cooldown] last successful run ended {last_ok} "
+                          f"(< {COOLDOWN_MINUTES} min ago) — skipping this scheduled slot")
+                    return
             # The report is keyed to the date the run STARTED, not the date it finishes:
             # a run launched 23:xx that drags past midnight (throttled fetch, big eval batch)
             # stamps its rows with yesterday's first_seen — keying the report to "today at
@@ -428,9 +480,11 @@ def main():
             # report at all. This is a code invariant, deliberately not a scheduling
             # constraint (any run can cross midnight if delayed).
             run_date = args.date or date.today().isoformat()
-            _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin")
-            _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
-            _run_fetch_stage(fetch_ats, cfg, conn, "ats")
+            fetch_results = [
+                _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin"),
+                _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna"),
+                _run_fetch_stage(fetch_ats, cfg, conn, "ats"),
+            ]
             requeue_error_rows(conn)
             # RESTORE direction first, BEFORE the filters: a skipped row whose chain decision
             # was undone (or whose chain verdict was cleared) returns to 'new' here so it
@@ -447,6 +501,20 @@ def main():
             skip_evaluated_reposts(conn, restore=False)
             evaluate_new_jobs(cfg, conn)
             generate_report(cfg, conn, run_date)
+            # Written only after the FULL cycle succeeded AND at least one fetch source
+            # did — the cooldown guard keys on this. A crashed run leaving it stale is
+            # exactly the desired behavior (its slot did no eval/report, so the next
+            # slot must not be suppressed); likewise a run whose every fetcher crashed
+            # (wake before Wi-Fi reconnects) fetched nothing, so stamping it would make
+            # the guard suppress the first slot that COULD fetch. None = crashed in
+            # fetch_results; a fetcher's own 0 (nothing new / source unconfigured)
+            # still counts as a working cycle.
+            if any(r is not None for r in fetch_results):
+                meta_set(conn, "last_run_ok_ended",
+                         datetime.now().isoformat(timespec="seconds"))
+            else:
+                print("[cooldown] all fetch sources failed — not stamping "
+                      "last_run_ok_ended, so the next scheduled slot runs in full")
     elif args.command == "report":
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":

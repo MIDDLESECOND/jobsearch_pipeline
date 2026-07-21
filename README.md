@@ -220,6 +220,11 @@ cost.
    → "Start in": `C:\jobsearch_pipeline`.
 5. OK to save. Right-click → Run once to verify; check the day's
    `logs\pipeline-YYYY-MM-DD.log` (one log file per day, pruned after 30 days).
+   Heads-up: the .bat passes `--scheduled`, which skips the run (a `[cooldown]` line in
+   the log, exit 0) if any successful run — including the §2 manual test — finished
+   less than an hour earlier. Seeing that line IS a successful verification of the
+   task wiring; to watch a full cycle instead, wait out the hour or run
+   `python pipeline.py run` (manual runs never cooldown-skip).
 
 The times don't need to be exact — `hours_old: 4` in config.yaml gives each run overlap
 with the previous one, and the database dedupes anything seen twice. A waking-hours-only

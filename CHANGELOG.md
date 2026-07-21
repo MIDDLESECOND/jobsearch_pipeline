@@ -7,6 +7,33 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-07-20 — schema: `meta` table; scheduled-run cooldown skip
+
+### Why
+Near-duplicate runs (a manual catch-up, or a missed trigger fired late on wake, shortly
+before a fixed Task Scheduler slot) cost ~$0.10–0.19 of eval each and a full LinkedIn
+scrape cycle of rate-limit exposure. Postings are judged identically; this is purely
+run-level routing.
+
+### Changes
+- **Schema:** new `meta` key/value table (run-level state; created idempotently in
+  `core.get_db`). One key so far: `last_run_ok_ended` — ISO end time of the last
+  *successful* full run, written only after `generate_report` completes AND at least
+  one fetch source didn't crash (`_run_fetch_stage` returns None on crash vs the
+  fetcher's own 0), so neither a crashed run nor an all-sources-down catch-up run
+  (wake before Wi-Fi) suppresses the next slot.
+- **`pipeline.py run --scheduled`** (what `run_pipeline.bat` now passes): if the last
+  successful run ended < 60 min ago (`COOLDOWN_MINUTES`), the slot logs
+  `[cooldown] … skipping` inside the day's run markers and exits 0 without fetching.
+  Manual `run` (no flag) always executes. The predicate (`_cooldown_active`) fails
+  OPEN on missing/garbage/future stamps — including the TypeError shapes (bytes;
+  offset-aware stamps are normalized to local, not rejected) — corrupt state must
+  never stop the pipeline. A skip does not re-stamp, so consecutive slots can't
+  cascade-skip; a skip is a full no-op, so error-row requeue and reconciles wait for
+  the next executed slot (accepted: ≤1 slot of extra delay).
+
+---
+
 ## 2026-07-09 — recruiter-screen realism: tenure split, formal-leadership cap, cold-apply bar
 
 ### Why

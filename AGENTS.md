@@ -58,6 +58,7 @@ predicted salaries).
 pip install -r requirements.txt          # python-jobspy, anthropic, pyyaml (.venv present)
 
 python pipeline.py run                    # full cycle: fetch → error requeue → repost-skip restores → salary filter → hard filters → repost-skip forward → eval → report
+#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; bare `run` always executes
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
 
@@ -85,7 +86,10 @@ tests can't reach). Real-DB validation scripts live in `tests/validation/` (not 
 no `test_*.py` names there; all test/validation scripts, existing and future, belong under `tests/`):
 `python tests/validation/backtest_v2.py` (asserts expected verdicts on known postings — the
 eval-framework regression guard) and `python tests/validation/compare_models.py` (cross-model
-comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Windows Task Scheduler.
+comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Windows Task
+Scheduler; the .bat passes `--scheduled`, so scheduled slots may cooldown-skip (see the
+`meta` table's `last_run_ok_ended` and pipeline.py's `_cooldown_active`) while manual
+`python pipeline.py run` never does.
 
 ## Architecture invariants (the non-obvious parts)
 

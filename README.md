@@ -1,5 +1,7 @@
 # jobsearch_pipeline
 
+[![CI](https://github.com/MIDDLESECOND/jobsearch_pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/MIDDLESECOND/jobsearch_pipeline/actions/workflows/ci.yml)
+
 **LLM-gated job-posting triage.** Fetches postings from LinkedIn (guest endpoints), the
 Adzuna API, and company ATS boards (Greenhouse/Lever/Ashby); dedupes them; runs each
 genuinely new posting through an LLM evaluation gate scored against your own profile and

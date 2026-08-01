@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import compare_models as cm  # noqa: E402
 import stratified_rerun as sr  # noqa: E402
+import evaluation  # noqa: E402
 from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 REPS = 3
@@ -42,6 +43,7 @@ def main():
     strat_path = RESULTS_DIR / "stratified_results.json"
     if not strat_path.exists():
         sys.exit(f"missing {strat_path} — run stratified_rerun.py first")
+    strat = json.load(open(strat_path, encoding="utf-8"))
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
@@ -49,6 +51,19 @@ def main():
     strat_sample = sr.pick_sample(conn)
     trunc_a = [r for s, r in strat_sample if s == "truncated"]
     used_urls = {r["job_url"] for _, r in strat_sample}
+
+    # The probe-A summary lines these fresh reps up against the STORED file's
+    # verdicts, so the re-materialized slice must be the same postings — pick_sample
+    # orders by first_seen DESC, and any pipeline run since the stratified run
+    # displaces the recency fill. Same guard role as arbitrate_k3's title asserts;
+    # checked BEFORE the paid calls. (Also catches a file predating the 2026-08-01
+    # prompt unification only if the rows drifted too — a same-rows stale file still
+    # needs a stratified re-run after any prompt change.)
+    stored_trunc = sorted(r["title"] for r in strat if r["slice"] == "truncated")
+    if sorted(r["title"] for r in trunc_a) != stored_trunc:
+        sys.exit("stratified_results.json's truncated slice no longer matches the "
+                 "re-materialized picks (rows fetched since, or a stale file) — "
+                 "re-run stratified_rerun.py first")
 
     # --- probe B rows: fresh truncated picks, deterministic pseudo-random order
     # (url tails are Adzuna id/hash noise — arbitrary w.r.t. content but stable).
@@ -88,7 +103,8 @@ def main():
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futs = {}
         for probe, pi, (lab, caller, model, extra), rep, row in tasks:
-            fut = ex.submit(sr.one_call, caller, model, extra, sr.user_msg_for(row))
+            fut = ex.submit(sr.one_call, caller, model, extra,
+                            evaluation.build_user_msg(row))
             futs[fut] = (probe, pi, lab, rep)
         for fut in as_completed(futs):
             probe, pi, lab, rep = futs[fut]
@@ -108,7 +124,6 @@ def main():
     # ---- probe A summary: xhigh vs the stratified luna/luna-high truncated rows
     print("\n" + "=" * 70)
     print("PROBE A — same 10 boundary-slice postings, luna effort dial complete")
-    strat = json.load(open(strat_path, encoding="utf-8"))
     strunc = [r for r in strat if r["slice"] == "truncated"]
     for lab, evs in [
         ("luna(default)", [m for r in strunc for m in r["models"]["luna"] if m and m["ok"]]),

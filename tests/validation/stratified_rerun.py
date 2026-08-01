@@ -82,10 +82,6 @@ def pick_sample(conn):
     return [("full", r) for r in full] + [("truncated", r) for r in trunc]
 
 
-def user_msg_for(row):
-    return evaluation.build_user_msg(row)
-
-
 def one_call(caller, model, extra, user_msg):
     t0 = time.monotonic()
     try:
@@ -125,7 +121,7 @@ def main():
     done = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futs = {ex.submit(one_call, caller, model, extra,
-                          user_msg_for(sample[pi][1])): (pi, label, rep)
+                          evaluation.build_user_msg(sample[pi][1])): (pi, label, rep)
                 for pi, label, caller, model, extra, rep in tasks}
         for fut in as_completed(futs):
             pi, label, rep = futs[fut]

@@ -12,6 +12,13 @@ results/arbitration_k3.json.
 
 Needs KIMI_API_JOBPIPELINE_KEY. k3 is priced $3/$15 per M — this touches only the
 disagreement rows, not the full sample.
+
+PROVENANCE: results files written before the 2026-08-01 prompt unification carry
+verdicts from the old hyphen "POSTED SALARY: min-max" prompt; this script now sends
+the production en-dash prompt (evaluation.build_user_msg). On the truncated-snippet
+boundary a one-character delta can flip temp-0 verdicts, so before RE-running the
+arbitration, regenerate compare_results.json with compare_models.py — otherwise a
+prompt-byte flip gets attributed to model disagreement.
 """
 import json
 import sys

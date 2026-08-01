@@ -7,6 +7,145 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-01 — Boundary-variance finding (V4-Flash-0731 cutover); fuzzy-zone backtest anchors
+
+### Why
+DeepSeek re-post-trained V4-Flash and cut the `deepseek-v4-flash` endpoint over in place on
+2026-07-31 (build V4-Flash-0731) — no opt-in, same model name. A same-day A/B on the same 25
+postings (temperature 0, hours apart; `tests/validation/compare_models.py`) showed 4 verdicts
+flipped, all toward PASS, all on truncated ~500-char Adzuna snippets — which first read as
+retrain-induced drift. A follow-up stability probe (3 repeat runs per flipped posting, same
+build, temperature 0) reframed it: two of the four cases are intrinsically unstable
+(Tenex "Bring Your Own Pod": RECRUITER_ONLY / GATE_FAIL / parse-error across three runs;
+AJAIA "Executive Strategy Lead" produced all three verdicts within one day), and the other
+two are stable at a non-PASS verdict, making their round-2 PASS an outlier draw. Conclusion:
+**truncated postings sit on the judge's decision boundary, where temperature-0 verdicts are
+high-variance**; the A/B flips cannot be attributed to the build cutover. A kimi-k3
+arbitration over the 12 model-disagreement cases (`tests/validation/arbitrate_k3.py` →
+`arbitration_k3.json`) set the invariants: the two Strategy & Ops seats legitimately PASS;
+the pod-only mechanism and the Executive-titled seat must never cold-PASS.
+
+### Changes (test coverage only — no guide text, no schema)
+- **backtest_v2 gains three fuzzy-zone anchors** pinning "never a cold PASS" on: a
+  quota-carrying sales role (talentpluto AE — stable), a pod-only application mechanism
+  (Tenex "Bring Your Own Pod"), and an Executive-titled strategy seat (AJAIA). The latter
+  two ride the decision boundary, so a red on them is not test flakiness — it means the
+  judge drew a cold PASS on a never-PASS case in that run, and production evaluates each
+  posting exactly once, so the red frequency samples the real boundary-error rate.
+- **Pending observation, not yet a rule**: if triage shows cold-PASSed truncated
+  strategy/executive postings arriving at a bothersome rate, add a "truncated posting →
+  conservative default" rule to the guide (that change would get its own entry here).
+
+---
+
+## 2026-07-25 — Artifact check, function-precedent cap, variant→file routing map
+
+### Why
+A ten-JD audit (triggered by four rejections landing in two days on fit-14–16 PASS roles)
+examined the 202-application / 0-interview funnel. Corrected same-day findings:
+(1) the eval reads the profile but the screener reads the PDF — the pre-07-25 BIAnalyst
+variant contained zero AI tokens, so any fit stamp on an AI-titled req was unachievable by
+that paper; however, where the variant WAS recorded (56/202), routing was already correct
+(all 35 BIAnalyst applies → analyst-titled reqs) — the documented failure is that 146
+applies (incl. all 72 pre-variant-system June applies) are unattributable, so misrouting
+can be neither proven nor ruled out; (2) the eval over-scored roles whose core daily
+function has no career precedent (pre-sales SE @ Trucker Path fit 18, post-sales SE @
+Instabase fit 17 — unwinnable cold at any resume quality); (3) that same 146-row
+`resume_variant` gap makes variant-level outcome analysis impossible. Full report:
+`resume_variant\linkedin_job_review_material\application_conversion_diagnosis_2026-07-25.md`
+(local, not in repo).
+
+### Changes (guide text only — no code, no schema; verdicts vocabulary unchanged)
+- **Part 2.5 gains an "Artifact check"**: the cold-apply bar is evaluated against the exact
+  variant being sent (named in Part 4), never against profile facts; a PASS whose evidence
+  isn't on the paper routes to *switch/fix variant first*, not apply.
+- **Part 2.5 gains a "Function-precedent check"** (guide-enforced cap, sibling to the
+  code-enforced artifact-depth and leadership caps): zero career precedent in the role's core
+  daily function (pre-/post-sales, quota motion, people management) caps the verdict at
+  RECRUITER_ONLY regardless of skill overlap.
+- **Part 4's Resume-variant line becomes a variant→file routing map** (BIAnalyst = pure
+  BI/analyst reqs only; Industry = SA/internal-builder; AIAdvisor = legal-tech/advisory;
+  AI_Data_Analyst = AI-flavored analyst) and requires recording the variant at apply time
+  (`applied --resume`).
+- Resume artifacts updated in the same pass (outside the repo): BIAnalyst gained an
+  AI-production clause, split dated titles (SA / BIA), senior SQL vocabulary, Power BI (DAX),
+  AI Builder + Git; all four variants gained Git; all re-exported and verified 1 page.
+
+### Expected effect
+Fit scores become achievable by the paper submitted; pre/post-sales function mismatches stop
+consuming paid evals and application hours as PASS verdicts; variant-level conversion becomes
+measurable from the DB.
+
+---
+
+## 2026-07-23 — Freshness line, enablement star-scoring rule, allocation/overlay clarification
+
+### Why
+Review of the first post-07-21-template evaluation (an enablement-cluster specimen) confirmed
+the two 07-21 fixes took (on-enum verdict + disposition, matcher line emitted with correct
+trigger reasoning) and surfaced three remaining gaps, all guide-side:
+(1) the standing allocation's third leg — posted ≤ 14 days — had no template line anywhere,
+so evaluations asserted freshness conclusions without ever stating the posting date (the same
+no-line-binds-it decay mode the 07-21 audit identified); (2) the guide never said how an
+enablement-cluster seat scores `ai_applied_vs_research` — Example D has no score table, so the
+same posting could defensibly score 1 (convenience-layer reading) or 3 (applied reading), a
+±2 swing that flips dispositions at the fit ≥ 15 allocation boundary; (3) the standing
+allocation ("Bucket 3 only") and the enablement overlay ("cold-apply fine, insurance behind
+Bucket 3") contradicted each other on whether flagged enablement roles may still cold-apply.
+
+### Changes (guide text only — no code, no schema, verdicts unchanged)
+- **Part 4 gains a "Posted date / freshness" line**, emitted even when another leg of the
+  allocation bar already fails.
+- **"How to use" gains an emit-every-line rule**: every template line in Parts 1–4 is
+  written (N/A rather than omitted) — covers the Part 3 internal checklist, the
+  location/relo-comp line, and the unstated-employment-type flag, all of which had drifted
+  to prose or been dropped.
+- **Enablement-cluster flag gains a star-scoring rule**: `ai_applied_vs_research` scores as
+  applied (2–3) on flagged seats — driving AI adoption IS the seat's job, unlike the Eulerity
+  0–1 case where AI is incidental to a non-AI seat; the penalty is carried by
+  `learning_value`, `title_trajectory`, and the flag, not double-counted in the star.
+- **Allocation/overlay contradiction resolved (user decision)**: flagged enablement roles
+  remain cold-appliable under the standing allocation at the SAME bar as Bucket 3
+  (fit ≥ 15, posted ≤ 14 days, permanent FTE *confirmed*, not unstated-default), always
+  behind Bucket 3 in priority, until the Part 2 sunset triggers.
+
+### Expected effect
+Freshness becomes visible in every evaluation instead of asserted; enablement specimens
+score consistently at the allocation boundary; a fresh fit-15+ enablement FTE role now has
+one unambiguous disposition (apply, behind Bucket 3) instead of two readings.
+
+---
+
+## 2026-07-21 — Part 4 anti-drift: matcher spot-check line + "skip at triage" disposition
+
+### Why
+An audit of the external triage chats found two drifts since the 07-16 recalibration:
+(1) evaluations stopped emitting the Part 4 resume-variant line and never mention the
+local resume↔JD matcher — the spot-check policy's triggers rarely fire under the standing
+allocation, and with no template line forcing the question, the whole tail of Part 4
+silently fell away; (2) "SKIP" crept in as an ad-hoc *verdict* for all-gates-pass roles
+the allocation rules out, which is off-vocabulary (the verdict enum is PASS /
+RECRUITER_ONLY / GATE_FAIL and is pinned by code and schema).
+
+### Changes (guide template text only — no code, no schema, verdicts unchanged)
+- **Part 4 gains a mandatory "Matcher spot-check: YES (trigger) / NO" line** on every
+  gates-passed evaluation. A YES names the variant to run. This makes the narrow
+  spot-check triggers visible instead of relying on the evaluator to volunteer them;
+  it does not loosen the policy.
+- **Part 4's verdict line now states that "SKIP" is a triage disposition, not a fourth
+  verdict**: an allocation-ruled-out role keeps PASS/RECRUITER_ONLY and gets
+  "skip at triage" as its disposition. Pipeline vocabulary untouched.
+- The external triage instructions gain an explicit output-format section (the exact
+  Part 1→4 block structure); that lives instructions-side only, since the pipeline's
+  JSON output spec already pins its own format.
+
+### Expected effect
+Chat-side evaluations regain the variant recommendation + matcher direction where the
+policy warrants it, and stop drifting in structure; no change to pipeline scoring,
+routing, or stored verdicts.
+
+---
+
 ## 2026-07-21 — AI-recruiter intermediaries route as lead-gen only
 
 ### Why

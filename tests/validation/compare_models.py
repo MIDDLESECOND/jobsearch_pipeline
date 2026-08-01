@@ -25,29 +25,43 @@ import core
 import evaluation  # build_system_prompt / parse_eval_json / normalize_result
 
 SAMPLE_N = 25
+# (label, provider, model, extra request params). The anthropic columns are
+# parked below MODELS — the stored ANTHROPIC_API_KEY 401'd on 2026-07-31; re-add
+# them if the key is ever refreshed. luna vs luna-high is a controlled pair:
+# same model, only the reasoning budget differs.
 MODELS = [
-    ("sonnet",   "anthropic", "claude-sonnet-4-6"),
-    ("haiku",    "anthropic", "claude-haiku-4-5"),
-    ("ds-flash", "deepseek",  "deepseek-v4-flash"),
-    ("ds-pro",   "deepseek",  "deepseek-v4-pro"),
+    ("ds-flash",  "deepseek", "deepseek-v4-flash", {}),
+    ("ds-pro",    "deepseek", "deepseek-v4-pro", {}),
+    ("luna",      "openai",   "gpt-5.6-luna", {}),
+    ("luna-high", "openai",   "gpt-5.6-luna", {"reasoning_effort": "high"}),
+    ("kimi",      "kimi",     "kimi-k2.6", {}),
 ]
-# $ per token (input, output). DeepSeek rates are placeholders — adjust to the
-# current rate card; tokens are measured exactly so you can recompute.
+_PARKED = [
+    ("sonnet",   "anthropic", "claude-sonnet-4-6", {}),
+    ("haiku",    "anthropic", "claude-haiku-4-5", {}),
+]
+REF = "ds-flash"  # agreement baseline: the incumbent (was "sonnet" pre-401)
+# $ per token (input, output). Rates verified 2026-07-31 (Luna post the 07-30
+# 80% cut); tokens are measured exactly so you can recompute if cards change.
 PRICES = {
     "claude-sonnet-4-6": (3.0 / 1e6, 15.0 / 1e6),
     "claude-haiku-4-5":  (1.0 / 1e6, 5.0 / 1e6),
-    "deepseek-v4-flash": (0.10 / 1e6, 0.30 / 1e6),
-    "deepseek-v4-pro":   (0.28 / 1e6, 1.10 / 1e6),
+    "deepseek-v4-flash": (0.14 / 1e6, 0.28 / 1e6),
+    "deepseek-v4-pro":   (0.435 / 1e6, 0.87 / 1e6),
+    "gpt-5.6-luna":      (0.20 / 1e6, 1.20 / 1e6),
+    "kimi-k2.6":         (0.95 / 1e6, 4.00 / 1e6),
 }
 
 core._ensure_api_key()
 import anthropic
 aclient = anthropic.Anthropic()
 DS_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+OAI_KEY = core._ensure_api_key("OPENAI_API_KEY") or ""
+MS_KEY = core._ensure_api_key("KIMI_API_JOBPIPELINE_KEY") or ""
 SYSTEM = evaluation.build_system_prompt()
 
 
-def call_anthropic(model, user_msg):
+def call_anthropic(model, user_msg, extra=None):
     r = aclient.messages.create(
         model=model, max_tokens=1200, temperature=0,
         system=SYSTEM, messages=[{"role": "user", "content": user_msg}],
@@ -55,7 +69,7 @@ def call_anthropic(model, user_msg):
     return r.content[0].text, r.usage.input_tokens, r.usage.output_tokens
 
 
-def call_deepseek(model, user_msg):
+def call_deepseek(model, user_msg, extra=None):
     r = httpx.post(
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {DS_KEY}"},
@@ -80,11 +94,67 @@ def call_deepseek(model, user_msg):
             u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
 
 
-def evaluate(provider, model, user_msg):
+def call_openai(model, user_msg, extra=None):
+    r = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OAI_KEY}"},
+        json={
+            # GPT-5.x rejects max_tokens (wants max_completion_tokens) and any
+            # temperature other than the default — omit temperature entirely.
+            # The cap includes reasoning tokens, so give the high-effort column
+            # the same 16k headroom as the other thinking models.
+            "model": model, "max_completion_tokens": 16000,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            **(extra or {}),
+        },
+        timeout=180,
+    )
+    r.raise_for_status()
+    d = r.json()
+    u = d.get("usage", {})
+    return (d["choices"][0]["message"]["content"],
+            u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+
+
+def call_kimi(model, user_msg, extra=None):
+    # Moonshot's international endpoint is OpenAI-compatible. K2.6 is a thinking
+    # model: it only accepts temperature=1 (so we omit it), and the answer lands
+    # in message.content with reasoning kept separate. Docs say max_tokens >=
+    # 16000 so reasoning_content + content never truncate.
+    r = httpx.post(
+        "https://api.moonshot.ai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {MS_KEY}"},
+        json={
+            "model": model, "max_tokens": 16000,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            **(extra or {}),
+        },
+        timeout=180,
+    )
+    r.raise_for_status()
+    d = r.json()
+    u = d.get("usage", {})
+    return (d["choices"][0]["message"]["content"],
+            u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+
+
+CALLERS = {"anthropic": call_anthropic, "deepseek": call_deepseek,
+           "openai": call_openai, "kimi": call_kimi}
+
+
+def evaluate(provider, model, user_msg, extra=None):
     t0 = time.monotonic()
-    fn = call_anthropic if provider == "anthropic" else call_deepseek
+    fn = CALLERS[provider]
     try:
-        text, tin, tout = fn(model, user_msg)
+        text, tin, tout = fn(model, user_msg, extra)
         # normalize_result applies the same hard routing the pipeline enforces
         # (the depth-0 -> RECRUITER_ONLY cap), so verdicts compared here match prod.
         parsed = evaluation.normalize_result(evaluation.parse_eval_json(text))
@@ -103,6 +173,12 @@ def evaluate(provider, model, user_msg):
 
 def main():
     import sqlite3
+    if not OAI_KEY:
+        print("OPENAI_API_KEY not set — skipping the luna columns\n")
+        MODELS[:] = [m for m in MODELS if m[1] != "openai"]
+    if not MS_KEY:
+        print("KIMI_API_JOBPIPELINE_KEY not set — skipping the kimi column\n")
+        MODELS[:] = [m for m in MODELS if m[1] != "kimi"]
     c = sqlite3.connect("jobs.db"); c.row_factory = sqlite3.Row
     rows = c.execute(
         "SELECT * FROM jobs WHERE length(trim(description))>0 "
@@ -120,8 +196,8 @@ def main():
         )
         rec = {"title": r["title"], "company": r["company"], "search": r["search_name"], "models": {}}
         line = f"[{i:>2}/{len(rows)}] {(r['title'] or '')[:38]:<38}"
-        for label, provider, model in MODELS:
-            res = evaluate(provider, model, user_msg)
+        for label, provider, model, extra in MODELS:
+            res = evaluate(provider, model, user_msg, extra)
             rec["models"][label] = res
             tag = res.get("verdict") if res["ok"] else "ERR"
             line += f" {label}={str(tag):<14}"
@@ -154,8 +230,8 @@ def summarize(results):
               f"PASS {npass:>2}  RECRUITER {nrec:>2}  GATE_FAIL {nfail:>2}  ERR {nerr}  "
               f"| ${per1k:>6.2f}/1k jobs  {avg_lat:>4.1f}s avg")
 
-    # Agreement vs sonnet (reference)
-    ref = "sonnet"
+    # Agreement vs the incumbent (reference)
+    ref = REF if REF in labels else labels[0]
     print("\n" + "=" * 64)
     print(f"VERDICT AGREEMENT vs {ref} (only jobs both parsed)")
     for lab in labels:

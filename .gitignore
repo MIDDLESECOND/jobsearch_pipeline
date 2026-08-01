@@ -36,7 +36,13 @@ jobs.db
 *.db-journal
 logs/
 reports/
-compare_results.json
+# Model-comparison / arbitration run outputs (real postings + personal eval notes)
+compare_results*.json
+arbitration_*.json
+stratified_results.json
+followup_results.json
+# Local-only data companions for the public validation scripts (name real postings)
+tests/validation/*.local.json
 
 # ---- Local validation tools (read the private jobs.db; name real search targets) ----
 tests/validation/backtest_v2.py

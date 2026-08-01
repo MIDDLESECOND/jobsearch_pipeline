@@ -56,6 +56,26 @@ boards are public no-auth JSON APIs with no search query — you list companies 
 their postings carry **full** job descriptions, so the evaluator sees the whole JD.
 Adzuna and the ATS boards are optional and off until configured (setup steps 6–7).
 
+### Code layout
+
+One module per stage, importing strictly downward (a one-way DAG — no circular imports):
+
+| Module | Owns |
+|---|---|
+| `states.py` | the status/verdict vocabulary and state machine (imports nothing) |
+| `chain.py` | repost/dedup chains, decision propagation, outcome tracking |
+| `core.py` | config, SQLite schema + inline migrations, shared parsing |
+| `filters.py` | deterministic pre-eval filters (salary, hard rules) |
+| `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
+| `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
+| `report.py` | the daily markdown report |
+| `pipeline.py` | CLI orchestrator (stage order lives here) |
+| `app.py` + `templates/` | the local Flask triage UI |
+
+Unit tests live in `tests/` (`python -m pytest`, synthetic fixtures only); model-comparison
+and validation scripts in `tests/validation/` (they run against your local `jobs.db` and
+write their result JSONs locally — neither is ever committed).
+
 ## By the numbers
 
 Running since June 19, 2026 (2 scheduled runs/day through early July, every 3 hours across

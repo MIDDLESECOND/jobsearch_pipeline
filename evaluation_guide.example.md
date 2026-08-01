@@ -12,7 +12,8 @@ illustrative — swap in your own.
 **How to use:** Run Part 1 (hard gates) FIRST. If any gate fails, stop and log the reason —
 do not score fit. Only proceed to Part 2 if all gates pass. Always name the trade-offs
 explicitly (what's foregrounded, what's de-emphasized) and steelman the unflattering reading
-before the generous one.
+before the generous one. **Emit every template line in Parts 1–4** — write N/A rather than
+dropping a line; a dropped line is how a policy silently decays.
 
 **Scope note:** In this example, location is open (relocation-willing) and industry is open —
 any sector is fine *as long as the role doesn't require sector experience not held*. Because
@@ -83,7 +84,7 @@ reason a high-scoring role still won't convert cold.
 - **If *artifact-evidences-required-depth* (`ai_artifact_depth`) scores 0 → the verdict is CAPPED at "RECRUITER_ONLY," regardless of total.** A 16/18 with this line at 0 is NOT the same role as a 16/18 with it at 3. Cold-applying the former is the "50/0" pattern. It does not become a PASS just because every other line is strong.
 - **Formal-leadership check (code-enforced cap, like the artifact-depth line).** If the posting's *required* qualifications state N+ years of formal **people leadership / management / technical program management** the candidate lacks (per the profile's leadership line), set `formal_leadership_required: true` in the output — the verdict is CAPPED at RECRUITER_ONLY regardless of total. Boundaries: (a) *required*, not preferred; (b) formal authority over people, not stakeholder/project leadership or mentoring; (c) if the leadership requirement makes the whole role management-of-delivery, the years-floor or role-substance gate may fail it first.
 
-**Enablement-cluster (assistive flag, not a cap).** The pure-enablement false positive: a role whose *entire* responsibility set is awareness campaigns, workshops/training, evangelism, adoption playbooks, and tool-selection guidance, with **no build/own/ship verbs anywhere** (strongest tell: self-declared "not hands-on" language in the posting itself). It still passes the gates — it IS applied-AI work, not research — so do not gate-fail it: emit an `enablement-cluster` flag, score `title_trajectory` honestly (0–1), and route it as deadline insurance (below Bucket 3 priority; see Part 2.5). Enablement-in-title with real build content (enablement *engineer/developer* roles) gets no flag — read the responsibilities, not the title. Decide deliberately whether this cluster should harden into a role-substance gate fail once your deadline pressure lifts (e.g., after an offer lands).
+**Enablement-cluster (assistive flag, not a cap).** The pure-enablement false positive: a role whose *entire* responsibility set is awareness campaigns, workshops/training, evangelism, adoption playbooks, and tool-selection guidance, with **no build/own/ship verbs anywhere** (strongest tell: self-declared "not hands-on" language in the posting itself). It still passes the gates — it IS applied-AI work, not research — so do not gate-fail it: emit an `enablement-cluster` flag, score `title_trajectory` honestly (0–1), and route it as deadline insurance (below Bucket 3 priority; see Part 2.5). Enablement-in-title with real build content (enablement *engineer/developer* roles) gets no flag — read the responsibilities, not the title. **Star-scoring on flagged seats:** `ai_applied_vs_research` scores as applied (2–3) — driving AI adoption IS the seat's job, unlike the convenience-layer 0–1 case where the AI content is incidental to a non-AI seat; the enablement penalty is already carried by `learning_value`, `title_trajectory`, and the flag — don't double-count it in the star. Decide deliberately whether this cluster should harden into a role-substance gate fail once your deadline pressure lifts (e.g., after an offer lands).
 
 ---
 
@@ -122,7 +123,9 @@ PASS as the *eligibility* standard but restrict actual cold applies to fresh, hi
 optimization. Volume and priority change; gates and scoring don't.
 
 **Enablement-cluster overlay:** flagged pure-enablement roles (see Part 2) route like Bucket 2 —
-cold-apply OK as deadline insurance, always below Bucket 3 in priority.
+cold-apply OK as deadline insurance, always below Bucket 3 in priority. If you adopt a tightened
+standing allocation, decide explicitly whether flagged roles clear the same numeric bar (fit and
+freshness) behind Bucket 3, or are paused — an unstated answer produces inconsistent triage.
 
 **AI-recruiter-intermediary overlay (lead-gen only).** Some agencies post via an AI recruiter —
 the posting's boilerplate says an AI agent screens candidates on the client's behalf, and the
@@ -143,6 +146,19 @@ in production, function-matched years met, no unheld leadership requirement, no 
 A role that needs any *explaining* goes through a human channel that can carry the
 explanation; an ATS screen cannot. When in doubt, that's what RECRUITER_ONLY is for.
 
+**Artifact check ("the resume as written" means the variant being SENT).** Evaluate the
+cold-apply bar against the exact resume variant that will be submitted, named in Part 4 —
+never against profile facts the paper doesn't carry. A PASS whose evidence lives only in the
+candidate profile routes to **switch (or fix) the variant first**, not apply. If you maintain
+multiple resume variants, keep an explicit variant→role-family routing map and record the
+variant with every application — outcome data is unreadable without it.
+
+**Function-precedent check (a guide-enforced cap, sibling to the code-enforced caps).** If the
+role's core *daily function* — e.g. pre-sales demos/discovery, post-sales customer-facing
+delivery ownership, quota-carried motion, people management — has zero precedent anywhere in
+the career, cap the verdict at **RECRUITER_ONLY** regardless of skill-line overlap. Skill
+adjacency does not substitute for function precedent at a cold screen.
+
 ---
 
 ## PART 3 — INTERVIEW VULNERABILITY CHECK
@@ -158,14 +174,23 @@ explanation; an ATS screen cannot. When in doubt, that's what RECRUITER_ONLY is 
 ## PART 4 — APPLICATION CONFIG
 
 - Bucket (1 / 2 / 3) and resulting channel: _______________________
-- Resume variant: _______________________
+- Posted date / freshness: _______________________ (if your standing allocation has a freshness
+  leg, state the date even when another leg of the bar already fails)
+- Resume variant — name the FILE being sent, per your variant→role-family routing map: _______________________
+  (record it with the application, e.g. `applied --resume <variant>`)
 - Work-auth phrasing: _______________________
 - Location / relocation: _______________________
 - Learning orientation: willing to ramp on industry-standard, AI-related tools. **Boundary:**
   this covers tools the role treats as *ramp-able*. It does **not** convert a stated *core
   requirement with years attached* that I lack into a match.
 - Effort-weighted verdict: **PASS (cold-apply)** / **RECRUITER_ONLY** / **GATE_FAIL**
+  (an all-gates-pass role a standing allocation rule says not to apply to *keeps its
+  verdict* and gets the disposition **skip at triage** — "SKIP" is a triage disposition,
+  not a fourth verdict)
 - One-line reason: _______________________
+- Matcher spot-check (if you run a local resume↔JD keyword checker): **YES (name the
+  trigger)** / **NO** — emit this line on every gates-passed evaluation so a qualifying
+  posting is never silently skipped; a YES names the resume variant to run against the JD.
 
 ---
 ---

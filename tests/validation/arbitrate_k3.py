@@ -27,12 +27,11 @@ except Exception:
 
 # Lives in tests/validation/ but imports the pipeline modules at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import core
 import evaluation
-
-# All validation-script outputs land here (gitignored), never in the repo root.
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
+from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 K3_MODEL = "kimi-k3"
 MS_KEY = core._ensure_api_key("KIMI_API_JOBPIPELINE_KEY")
@@ -77,7 +76,7 @@ def main():
     # Re-materialize the exact sample the comparison ran on: same query, same
     # ordering, so rows[i] is results[i]'s posting (titles are asserted below —
     # a drifted jobs.db would silently misalign the join otherwise).
-    c = sqlite3.connect("jobs.db")
+    c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     rows = c.execute(
         "SELECT * FROM jobs WHERE length(trim(description))>0 "
@@ -100,12 +99,7 @@ def main():
             m = round1[i - 1]["models"].get("ds-flash", {})
             r1_flash = m.get("verdict") if m.get("ok") else None
 
-        user_msg = (
-            f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
-            f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
-            f"POSTED SALARY: {row['salary_min']}-{row['salary_max']}\n\n"
-            f"JOB DESCRIPTION:\n{row['description']}"
-        )
+        user_msg = evaluation.build_user_msg(row)
         t0 = time.monotonic()
         try:
             text, tin, tout = call_k3(user_msg)
@@ -137,7 +131,6 @@ def main():
             "k3_sides_with": sided,
         })
 
-    RESULTS_DIR.mkdir(exist_ok=True)
     with open(RESULTS_DIR / "arbitration_k3.json", "w", encoding="utf-8") as f:
         json.dump(arb, f, indent=2, ensure_ascii=False)
 

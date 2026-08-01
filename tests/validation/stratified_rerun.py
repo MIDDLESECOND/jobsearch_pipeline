@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import compare_models as cm  # noqa: E402  (loads keys + SYSTEM at import)
 import evaluation  # noqa: E402
+from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 REPS = 3
 WORKERS = 6
@@ -82,12 +83,7 @@ def pick_sample(conn):
 
 
 def user_msg_for(row):
-    return (
-        f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
-        f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
-        f"POSTED SALARY: {row['salary_min']}-{row['salary_max']}\n\n"
-        f"JOB DESCRIPTION:\n{row['description']}"
-    )
+    return evaluation.build_user_msg(row)
 
 
 def one_call(caller, model, extra, user_msg):
@@ -107,7 +103,7 @@ def one_call(caller, model, extra, user_msg):
 
 def main():
     import sqlite3
-    conn = sqlite3.connect("jobs.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     sample = pick_sample(conn)
     n_full = sum(1 for s, _ in sample if s == "full")
@@ -138,8 +134,7 @@ def main():
             if done % 25 == 0:
                 print(f"  {done}/{len(tasks)} calls done", flush=True)
 
-    cm.RESULTS_DIR.mkdir(exist_ok=True)
-    with open(cm.RESULTS_DIR / "stratified_results.json", "w", encoding="utf-8") as f:
+    with open(RESULTS_DIR / "stratified_results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     summarize(results)

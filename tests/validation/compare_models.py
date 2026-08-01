@@ -21,12 +21,11 @@ except Exception:
 
 # Lives in tests/validation/ but imports the pipeline modules at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import core
-import evaluation  # build_system_prompt / parse_eval_json / normalize_result
-
-# All validation-script outputs land here (gitignored), never in the repo root.
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
+import evaluation  # build_system_prompt / build_user_msg / parse_eval_json / normalize_result
+from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 SAMPLE_N = 25
 # (label, provider, model, extra request params). The anthropic columns are
@@ -183,7 +182,7 @@ def main():
     if not MS_KEY:
         print("KIMI_API_JOBPIPELINE_KEY not set — skipping the kimi column\n")
         MODELS[:] = [m for m in MODELS if m[1] != "kimi"]
-    c = sqlite3.connect("jobs.db"); c.row_factory = sqlite3.Row
+    c = sqlite3.connect(DB_PATH); c.row_factory = sqlite3.Row
     rows = c.execute(
         "SELECT * FROM jobs WHERE length(trim(description))>0 "
         "ORDER BY search_name, job_url LIMIT ?", (SAMPLE_N,)
@@ -192,12 +191,7 @@ def main():
 
     results = []
     for i, r in enumerate(rows, 1):
-        user_msg = (
-            f"TITLE: {r['title']}\nCOMPANY: {r['company']}\nLOCATION: {r['location']}\n"
-            f"SOURCE SEARCH: {r['search_name']} (tier: {r['tier']})\n"
-            f"POSTED SALARY: {r['salary_min']}-{r['salary_max']}\n\n"
-            f"JOB DESCRIPTION:\n{r['description']}"
-        )
+        user_msg = evaluation.build_user_msg(r)
         rec = {"title": r["title"], "company": r["company"], "search": r["search_name"], "models": {}}
         line = f"[{i:>2}/{len(rows)}] {(r['title'] or '')[:38]:<38}"
         for label, provider, model, extra in MODELS:
@@ -208,7 +202,6 @@ def main():
         results.append(rec)
         print(line, flush=True)
 
-    RESULTS_DIR.mkdir(exist_ok=True)
     with open(RESULTS_DIR / "compare_results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 

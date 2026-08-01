@@ -261,18 +261,27 @@ def requeue_error_rows(conn):
     return n
 
 
+def build_user_msg(row):
+    """The ONE builder of the per-posting eval message. The validation scripts
+    (backtest_v2, compare_models, stratified_rerun, arbitrate_k3) re-evaluate stored
+    rows and their whole premise is "the SAME prompt the pipeline sends" — they must
+    call this, never rebuild the f-string by hand (the hand copies had already
+    drifted: hyphen vs en dash in POSTED SALARY)."""
+    return (
+        f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
+        f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
+        f"POSTED SALARY: {row['salary_min']}–{row['salary_max']}\n\n"
+        f"JOB DESCRIPTION:\n{row['description']}"
+    )
+
+
 def _evaluate_one(row, provider, model, system_prompt, client, api_key):
     """Pure worker (no DB access): build the message, call the provider with the same
     3-attempt backoff, parse. Returns (job_url, result_or_None, in, out, cache_read,
     cache_write) with token counts summed across attempts — identical to the serial
     tally, but off the main thread so calls overlap. All DB writes stay in
     evaluate_new_jobs on the main thread (a sqlite3 conn isn't safe across threads)."""
-    user_msg = (
-        f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
-        f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
-        f"POSTED SALARY: {row['salary_min']}–{row['salary_max']}\n\n"
-        f"JOB DESCRIPTION:\n{row['description']}"
-    )
+    user_msg = build_user_msg(row)
     tin = tout = cr = cw = 0
     result = None
     for attempt in range(3):

@@ -39,6 +39,13 @@ reports/
 # Validation-script run outputs (real postings + personal eval notes) — every
 # script under tests/validation/ writes into results/, never the repo root
 tests/validation/results/
+# Belt-and-suspenders: the same files BY NAME at any path, so a copy that lands
+# outside results/ (stale checkout/stash, hand-copy, backup restore) stays
+# uncommittable in this public repo
+compare_results*.json
+arbitration_*.json
+stratified_results*.json
+followup_results*.json
 # Local-only data companions for the public validation scripts (name real postings)
 tests/validation/*.local.json
 

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import compare_models as cm  # noqa: E402
 import stratified_rerun as sr  # noqa: E402
+from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 REPS = 3
 WORKERS = 6
@@ -35,7 +36,13 @@ WORKERS = 6
 
 def main():
     import sqlite3
-    conn = sqlite3.connect("jobs.db")
+    # Probe A's summary needs the stratified run's output — check BEFORE spending
+    # ~120 paid model calls, not after (the load at the bottom would otherwise be
+    # the first thing to notice it's missing).
+    strat_path = RESULTS_DIR / "stratified_results.json"
+    if not strat_path.exists():
+        sys.exit(f"missing {strat_path} — run stratified_rerun.py first")
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
     # --- probe A rows: the stratified run's truncated slice, re-materialized
@@ -94,15 +101,14 @@ def main():
             if done % 20 == 0:
                 print(f"  {done}/{len(tasks)} calls done", flush=True)
 
-    cm.RESULTS_DIR.mkdir(exist_ok=True)
-    with open(cm.RESULTS_DIR / "followup_results.json", "w", encoding="utf-8") as f:
+    with open(RESULTS_DIR / "followup_results.json", "w", encoding="utf-8") as f:
         json.dump({"probe_a_xhigh": res_a, "probe_b_random_truncated": res_b},
                   f, indent=2, ensure_ascii=False)
 
     # ---- probe A summary: xhigh vs the stratified luna/luna-high truncated rows
     print("\n" + "=" * 70)
     print("PROBE A — same 10 boundary-slice postings, luna effort dial complete")
-    strat = json.load(open(cm.RESULTS_DIR / "stratified_results.json", encoding="utf-8"))
+    strat = json.load(open(strat_path, encoding="utf-8"))
     strunc = [r for r in strat if r["slice"] == "truncated"]
     for lab, evs in [
         ("luna(default)", [m for r in strunc for m in r["models"]["luna"] if m and m["ok"]]),

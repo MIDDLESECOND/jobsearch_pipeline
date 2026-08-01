@@ -18,7 +18,9 @@ boundary_cases.local.json). Each case is an object:
              "title_trajectory_max": <int>},
    "note": ...}                                 # why this expectation — free text
 
-Run:  python tests/validation/backtest_v2.py   (from the repo root, next to jobs.db)
+Run:  python tests/validation/backtest_v2.py   (any CWD — config/DB/cases are all
+__file__-anchored via core.BASE_DIR; unlike the comparison scripts, nothing here
+is CWD-relative).
 Needs the same API key the configured provider needs (DEEPSEEK_API_KEY by default).
 """
 import json
@@ -40,14 +42,33 @@ import evaluation
 CASES_PATH = Path(__file__).with_name("backtest_cases.local.json")
 
 
+# The full vocabulary the runner understands. Validated on load because a typo'd
+# key in the JSON would otherwise be silently ignored — the case would degrade to
+# a verdict-only check while still printing PASS (the old hardcoded-Python CASES
+# made that mistake a loud NameError; JSON needs the loudness re-added).
+_CASE_KEYS = {"company_like", "title_like", "expected", "extra", "note"}
+_EXTRA_KEYS = {"flag", "title_trajectory_max"}
+
+
 def load_cases():
     # A regression guard with zero cases is a silent lie — refuse to "pass" on a
-    # missing file instead of exiting green having asserted nothing.
+    # missing or empty file instead of exiting green having asserted nothing.
     if not CASES_PATH.exists():
         sys.exit(f"no cases file: {CASES_PATH}\n"
                  "(local-only, gitignored — it names real postings; create it as a JSON "
                  "list of case objects, see this script's docstring)")
-    return json.loads(CASES_PATH.read_text(encoding="utf-8"))
+    cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(cases, list) or not cases:
+        sys.exit(f"cases file is not a non-empty JSON list: {CASES_PATH}")
+    for i, c in enumerate(cases):
+        bad = set(c) - _CASE_KEYS
+        bad_extra = set(c.get("extra") or {}) - _EXTRA_KEYS
+        missing = {"company_like", "title_like", "expected"} - set(c)
+        if bad or bad_extra or missing:
+            sys.exit(f"case {i} ({c.get('company_like', '?')}): "
+                     f"unknown keys {sorted(bad | bad_extra)}, missing {sorted(missing)} "
+                     f"— accepted: {sorted(_CASE_KEYS)}, extra: {sorted(_EXTRA_KEYS)}")
+    return cases
 
 
 def _norm(s):
@@ -61,31 +82,44 @@ def pick(conn, company_like, title_like):
     # chain.skip_evaluated_reposts) — never a 'repost_evaluated' relisting (verdict NULL) and
     # never a rule_filtered row whose GATE_FAIL is a filters.yaml stamp, not a judgment; the
     # backtest must re-evaluate the exact text the judge actually scored.
-    return conn.execute(
+    # ORDER BY pins WHICH matching row a broad LIKE fragment resolves to — without it
+    # LIMIT 1 is scan-order (rowid), which VACUUM / _rebuild_for_stale_checks can
+    # reorder, silently re-pinning a case to a different posting than its note describes.
+    rows = conn.execute(
         "SELECT * FROM jobs WHERE company LIKE ? AND title LIKE ? "
         "AND status='evaluated' AND verdict IS NOT NULL "
-        "AND length(trim(description))>0 LIMIT 1",
+        "AND length(trim(description))>0 ORDER BY first_seen, job_url LIMIT 2",
         (f"%{company_like}%", f"%{title_like}%"),
-    ).fetchone()
+    ).fetchall()
+    if len(rows) > 1:
+        print(f"  note  {company_like}/{title_like}: matches multiple rows — "
+              f"using earliest first_seen ({rows[0]['job_url']})")
+    return rows[0] if rows else None
 
 
-def evaluate(cfg, system_prompt, row):
+def make_caller(cfg, system_prompt):
+    """Resolve provider/key/client ONCE, before the case loop — a missing key must be
+    one clean exit up front, not one 'Bearer None' 401 per case miscounted as an eval
+    regression (the production pipeline gets this via its upfront check + EvalAuthError;
+    this mirrors it). Returns user_msg -> raw response text."""
     provider = cfg["settings"].get("provider", "anthropic")
     model = cfg["settings"]["model"]
-    user_msg = (
-        f"TITLE: {row['title']}\nCOMPANY: {row['company']}\nLOCATION: {row['location']}\n"
-        f"SOURCE SEARCH: {row['search_name']} (tier: {row['tier']})\n"
-        f"POSTED SALARY: {row['salary_min']}–{row['salary_max']}\n\n"
-        f"JOB DESCRIPTION:\n{row['description']}"
-    )
     if provider == "anthropic":
+        if not core._ensure_api_key("ANTHROPIC_API_KEY"):
+            sys.exit("ANTHROPIC_API_KEY not set")
         import anthropic
-        core._ensure_api_key("ANTHROPIC_API_KEY")
         client = anthropic.Anthropic()
-        text = evaluation._call_anthropic(client, model, system_prompt, user_msg)[0]
-    else:
-        key = core._ensure_api_key("DEEPSEEK_API_KEY")
-        text = evaluation._call_deepseek(key, model, system_prompt, user_msg)[0]
+        return lambda user_msg: evaluation._call_anthropic(
+            client, model, system_prompt, user_msg)[0]
+    key = core._ensure_api_key("DEEPSEEK_API_KEY")
+    if not key:
+        sys.exit("DEEPSEEK_API_KEY not set")
+    return lambda user_msg: evaluation._call_deepseek(
+        key, model, system_prompt, user_msg)[0]
+
+
+def evaluate(call, row):
+    text = call(evaluation.build_user_msg(row))
     return evaluation.normalize_result(evaluation.parse_eval_json(text))
 
 
@@ -94,9 +128,10 @@ def main():
     cfg = core.load_config()
     conn = core.get_db(cfg)
     system_prompt = evaluation.build_system_prompt()
+    call = make_caller(cfg, system_prompt)
     print(f"provider={cfg['settings'].get('provider')} model={cfg['settings']['model']}\n")
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for case in cases:
         company_like, title_like = case["company_like"], case["title_like"]
         expected = case["expected"]
@@ -104,9 +139,10 @@ def main():
         row = pick(conn, company_like, title_like)
         if row is None:
             print(f"  SKIP  {company_like}/{title_like}: not found in jobs.db")
+            skipped += 1
             continue
         try:
-            res = evaluate(cfg, system_prompt, row)
+            res = evaluate(call, row)
         except Exception as e:
             print(f"  ERROR {company_like}: {type(e).__name__}: {e}")
             failed += 1
@@ -151,7 +187,11 @@ def main():
         print(f"          {res.get('one_line','')}\n")
 
     print("=" * 60)
-    print(f"backtest: {passed} matched expectation, {failed} did not")
+    print(f"backtest: {passed} matched expectation, {failed} did not, {skipped} skipped")
+    # Same silent-lie principle as load_cases: an all-skip run (fresh/rebuilt DB,
+    # stale LIKE fragments) asserted nothing and must not read as green.
+    if passed + failed == 0:
+        sys.exit("backtest executed ZERO cases — every case skipped; not a pass")
     sys.exit(0 if failed == 0 else 1)
 
 

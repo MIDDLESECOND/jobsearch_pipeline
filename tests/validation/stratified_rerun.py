@@ -12,7 +12,7 @@ Design:
   - REPS=3 per (posting, model): every number gets an error bar, and the
     luna-vs-luna-high comparison is no longer a single-draw claim.
 
-Writes stratified_results.json. Reuses compare_models' callers/prompt.
+Writes results/stratified_results.json. Reuses compare_models' callers/prompt.
 """
 import json
 import sys
@@ -138,7 +138,8 @@ def main():
             if done % 25 == 0:
                 print(f"  {done}/{len(tasks)} calls done", flush=True)
 
-    with open("stratified_results.json", "w", encoding="utf-8") as f:
+    cm.RESULTS_DIR.mkdir(exist_ok=True)
+    with open(cm.RESULTS_DIR / "stratified_results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     summarize(results)

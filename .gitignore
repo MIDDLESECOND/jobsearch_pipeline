@@ -36,16 +36,13 @@ jobs.db
 *.db-journal
 logs/
 reports/
-# Model-comparison / arbitration run outputs (real postings + personal eval notes)
-compare_results*.json
-arbitration_*.json
-stratified_results.json
-followup_results.json
+# Validation-script run outputs (real postings + personal eval notes) — every
+# script under tests/validation/ writes into results/, never the repo root
+tests/validation/results/
 # Local-only data companions for the public validation scripts (name real postings)
 tests/validation/*.local.json
 
 # ---- Local validation tools (read the private jobs.db; name real search targets) ----
-tests/validation/backtest_v2.py
 tests/validation/investigate_adzuna_churn.py
 
 # Make sure the shipped example templates are never accidentally ignored

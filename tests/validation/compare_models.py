@@ -3,7 +3,8 @@
 """Head-to-head: run the SAME gate-eval prompt through Claude + DeepSeek V4 on a
 sample of real postings, then diff the verdicts. Quality test, not production.
 
-Reads DEEPSEEK_API_KEY + ANTHROPIC_API_KEY from env. Writes compare_results.json.
+Reads DEEPSEEK_API_KEY + ANTHROPIC_API_KEY from env. Writes
+tests/validation/results/compare_results.json.
 """
 import json
 import os
@@ -23,6 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import core
 import evaluation  # build_system_prompt / parse_eval_json / normalize_result
+
+# All validation-script outputs land here (gitignored), never in the repo root.
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 SAMPLE_N = 25
 # (label, provider, model, extra request params). The anthropic columns are
@@ -204,7 +208,8 @@ def main():
         results.append(rec)
         print(line, flush=True)
 
-    with open("compare_results.json", "w", encoding="utf-8") as f:
+    RESULTS_DIR.mkdir(exist_ok=True)
+    with open(RESULTS_DIR / "compare_results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     summarize(results)
@@ -275,6 +280,6 @@ def summarize(results):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "resummarize":
-        summarize(json.load(open("compare_results.json", encoding="utf-8")))
+        summarize(json.load(open(RESULTS_DIR / "compare_results.json", encoding="utf-8")))
     else:
         main()

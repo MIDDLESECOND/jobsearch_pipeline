@@ -38,6 +38,11 @@ re-export hub):
 - `app.py` (Flask) + `templates/index.html` — the local triage UI (also a thin layer over the
   chain service cores).
 
+**Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
+where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach
+drafting, a funnel view's aggregation logic) gets its own module in the DAG — `chain.py` only
+absorbs changes to the concerns it already owns (chains, decisions, events, dupes).
+
 Unit tests are in `tests/` (`python -m pytest`) — synthetic fixtures, never the real `jobs.db`.
 Other top-level files are config/data.
 
@@ -92,8 +97,12 @@ a moved function references a name its new file forgot to import (a NameError on
 tests can't reach). Real-DB validation scripts live in `tests/validation/` (not collected by pytest —
 no `test_*.py` names there; all test/validation scripts, existing and future, belong under `tests/`):
 `python tests/validation/backtest_v2.py` (asserts expected verdicts on known postings — the
-eval-framework regression guard) and `python tests/validation/compare_models.py` (cross-model
-comparison → `compare_results.json`). Scheduling is `run_pipeline.bat` via Windows Task Scheduler.
+eval-framework regression guard; the script is committed, its cases live in
+`tests/validation/backtest_cases.local.json`, gitignored because they name real postings — the
+same split as `boundary_cases.local.json`) and `python tests/validation/compare_models.py`
+(cross-model comparison). Every validation script writes its outputs to
+`tests/validation/results/` (gitignored) — never the repo root. Scheduling is `run_pipeline.bat`
+via Windows Task Scheduler.
 
 ## Architecture invariants (the non-obvious parts)
 

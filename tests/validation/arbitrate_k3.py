@@ -5,9 +5,10 @@ disagreement posting through kimi-k3 (Moonshot's flagship) as an INDEPENDENT
 evaluator — k3 sees only the standard system prompt + posting, never the other
 models' verdicts — then line its verdict up against each contender's.
 
-Reads compare_results.json (round 2, required) and compare_results_luna_round1.json
-(round 1, optional — supplies the pre-0731-drift ds-flash verdict for the flip
-cases). Writes arbitration_k3.json.
+Reads results/compare_results.json (round 2, required) and
+results/compare_results_luna_round1.json (round 1, optional — supplies the
+pre-0731-drift ds-flash verdict for the flip cases). Writes
+results/arbitration_k3.json.
 
 Needs KIMI_API_JOBPIPELINE_KEY. k3 is priced $3/$15 per M — this touches only the
 disagreement rows, not the full sample.
@@ -29,6 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import core
 import evaluation
+
+# All validation-script outputs land here (gitignored), never in the repo root.
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 K3_MODEL = "kimi-k3"
 MS_KEY = core._ensure_api_key("KIMI_API_JOBPIPELINE_KEY")
@@ -63,9 +67,10 @@ def call_k3(user_msg):
 
 def main():
     import sqlite3
-    results = json.load(open("compare_results.json", encoding="utf-8"))
+    results = json.load(open(RESULTS_DIR / "compare_results.json", encoding="utf-8"))
     try:
-        round1 = json.load(open("compare_results_luna_round1.json", encoding="utf-8"))
+        round1 = json.load(open(RESULTS_DIR / "compare_results_luna_round1.json",
+                                encoding="utf-8"))
     except FileNotFoundError:
         round1 = None
 
@@ -132,7 +137,8 @@ def main():
             "k3_sides_with": sided,
         })
 
-    with open("arbitration_k3.json", "w", encoding="utf-8") as f:
+    RESULTS_DIR.mkdir(exist_ok=True)
+    with open(RESULTS_DIR / "arbitration_k3.json", "w", encoding="utf-8") as f:
         json.dump(arb, f, indent=2, ensure_ascii=False)
 
     done = [a for a in arb if a["k3"].get("ok")]

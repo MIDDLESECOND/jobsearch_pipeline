@@ -10,7 +10,7 @@ B. 10 fresh RANDOM truncated postings (deterministically pseudo-random, the 4
    an unbiased truncated-slice agreement estimate (the stratified slice was 40%
    hand-picked boundary cases, so its 50% agreement number is depressed).
 
-Writes followup_results.json. Reuses compare_models callers + stratified pick.
+Writes results/followup_results.json. Reuses compare_models callers + stratified pick.
 """
 import json
 import sys
@@ -94,14 +94,15 @@ def main():
             if done % 20 == 0:
                 print(f"  {done}/{len(tasks)} calls done", flush=True)
 
-    with open("followup_results.json", "w", encoding="utf-8") as f:
+    cm.RESULTS_DIR.mkdir(exist_ok=True)
+    with open(cm.RESULTS_DIR / "followup_results.json", "w", encoding="utf-8") as f:
         json.dump({"probe_a_xhigh": res_a, "probe_b_random_truncated": res_b},
                   f, indent=2, ensure_ascii=False)
 
     # ---- probe A summary: xhigh vs the stratified luna/luna-high truncated rows
     print("\n" + "=" * 70)
     print("PROBE A — same 10 boundary-slice postings, luna effort dial complete")
-    strat = json.load(open("stratified_results.json", encoding="utf-8"))
+    strat = json.load(open(cm.RESULTS_DIR / "stratified_results.json", encoding="utf-8"))
     strunc = [r for r in strat if r["slice"] == "truncated"]
     for lab, evs in [
         ("luna(default)", [m for r in strunc for m in r["models"]["luna"] if m and m["ok"]]),

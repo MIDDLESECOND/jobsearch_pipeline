@@ -21,20 +21,37 @@ not a resume. The values below are illustrative (a low-code AI / automation cand
   an interview — e.g. Power Automate, AI Builder, Power BI, Python, SQL, REST integration, ETL].
 - **Production AI evidence:** [your strongest shipped AI artifact, described honestly —
   e.g. an AI Builder + Power Automate classification system. Note whether it is applied AI /
-  prompt engineering / integration vs. from-scratch model development].
+  prompt engineering / integration vs. from-scratch model development. State the broader
+  production boundary you can defend: workflow ownership, automation, API/integration,
+  data/analytics, and stakeholder delivery as applicable].
 - **In-progress / exposure (not production):** [work that counts as exposure, not delivery].
 - **Coursework-only (NOT production; ramp-able category):** [tools you know but haven't
   shipped — e.g. LangChain, agent frameworks, RAG, vector DBs. Listed as *preferred* = fine;
   listed as a *core requirement with years attached* = tool-requirement FAIL].
+- **Building — NOT yet held production experience:** [name the important production gaps
+  explicitly — e.g. agentic SDK/orchestration, LangGraph/MCP, production RAG, evals in CI,
+  LLM observability, incident response, external-customer AI deployment]. Courses, plans,
+  prototypes, and exposure must not be represented as held production experience.
 - **Work authorization:** [your status]. State exactly what is a work-auth FAIL (e.g.
   citizenship-only or clearance requirements) vs. PASS (e.g. "authorized without sponsorship").
 - **Employment type:** [what you'll accept — e.g. permanent full-time only]. State which
   engagement types are an employment-type FAIL (contract, contract-to-hire, temp, part-time,
   internship, staffing-agency W2-contract).
-- **Target roles — primary tier:** [the titles you actually want].
-- **Target roles — acceptable tier:** [fallback titles].
-- **Explicitly OUT of scope:** [role substance you will not pursue regardless of title —
-  e.g. from-scratch model training/tuning, evals/benchmarks, published research].
+- **Near-term bridge roles:** [roles that match current evidence and add real build,
+  integration, or production ownership].
+- **Medium-term observation/stretch roles:** [roles worth building toward but whose current
+  screening requirements may exceed the shipped evidence]. Directional interest must not
+  raise current artifact depth or turn a screenability gap into a cold-apply PASS.
+- **Tactical fallback:** [fallback roles]. Keep strategically weak but attainable roles visible;
+  explain trajectory risk without converting it into a hard gate.
+- **Explicitly IN scope:** [production/application evaluation, eval harnesses, regression
+  testing, reliability/observability, verifiers, human-in-the-loop, deployment validation,
+  agent/workflow quality measurement, error taxonomies, cost per accepted outcome, and
+  production safety/governance testing as applicable].
+- **Explicitly OUT of scope:** [foundation-model research, from-scratch model training/tuning,
+  research benchmark creation, published-research requirements, and core model algorithm or
+  training research]. Classify by what is being evaluated: foundation-model/research
+  contribution versus production application/workflow behavior; never by the word “eval” alone.
 - **Location:** [e.g. relocation-willing; on-site/hybrid/remote all acceptable]. Note whether
   location is ever a gate fail.
 - **Industry:** [open, or list constraints]. Distinguish industry *subject* (usually fine)

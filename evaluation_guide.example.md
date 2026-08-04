@@ -15,6 +15,12 @@ explicitly (what's foregrounded, what's de-emphasized) and steelman the unflatte
 before the generous one. **Emit every template line in Parts 1–4** — write N/A rather than
 dropping a line; a dropped line is how a policy silently decays.
 
+**Three-answer contract:** Always answer separately: (1) **Can I perform the work?** using
+capabilities genuinely held; (2) **Can my current materials pass the screen?** using required
+evidence, function-matched tenure, and the exact resume variant; and (3) **Will the role
+accumulate long-term career capital?** as a non-scoring explanation. The 0–18 fit score does
+not answer all three. Strategic desirability never upgrades present-tense evidence.
+
 **Scope note:** In this example, location is open (relocation-willing) and industry is open —
 any sector is fine *as long as the role doesn't require sector experience not held*. Because
 domain and location don't screen here, the binding filter has shifted to **AI-depth realism**
@@ -51,7 +57,7 @@ Evaluate *before* reading bullets or assessing skill fit. A single fail kills it
 |---|---|---|---|
 | **Years floor** | Stated minimum ≤ ~5–6 yrs? (Tune to your own years of experience.) | | |
 | **Domain requirement** | Does the role *require* sector experience not held — or will it accept domain-naivety and ramp? Industry subject is irrelevant; the **requirement** is what gates. FAIL only when prior sector experience is a stated qualification. | | |
-| **Role substance** | Is the *work* integration/delivery/BA/BI/applied-AI — not from-scratch model training, evals/benchmarks, or "published work"? (Title can say "Architect" and still fail this.) | | |
+| **Role substance** | Is the core work integration/delivery/BA/BI/applied-AI rather than foundation-model research, from-scratch model training/tuning, research benchmark creation, published-research contribution, or core model-algorithm/training research? **Do not gate on “eval,” “evaluation,” or “benchmark.” Identify the evaluation object:** foundation-model/research contribution remains out of scope; production application/workflow evaluation is in scope (eval harnesses, regression, reliability/observability, verifiers, human-in-the-loop, deployment validation, workflow quality, error taxonomy, cost per accepted outcome, production safety/governance testing). | | |
 | **Tool requirement** | Any *specific named tool or platform with years attached* that I lack and that is genuinely non-rampable? Willingness to learn clears ramp-able tools only. **Do NOT fail this gate just because the role requires production agentic/orchestration AI depth beyond my artifact** — that depth is *buildable*, so it CLEARS this gate and is handled instead by the `ai_artifact_depth` line (which scores it 0 → RECRUITER_ONLY). A role built *on* agentic systems is the canonical Bucket 1 case, not a gate fail. | | |
 | **Work auth** | No requirement that can't be met? (This gate is just "any disqualifier?" — never a reason to self-screen.) | | |
 | **Employment type** | Is the role permanent full-time (or whatever you require)? FAIL if it's contract, contract-to-hire, temporary, fixed-term, part-time, internship/co-op, or staffing-agency W2-contract. A recruiter posting a *permanent* placement is fine; the fail is the *engagement type*, not the intermediary. When unstated, default PASS but flag it. | | |
@@ -70,7 +76,7 @@ reason a high-scoring role still won't convert cold.
 
 | Dimension | What "strong" looks like | Score (0–3) | Evidence to cite |
 |---|---|---|---|
-| **AI-realism: applied vs. research** ⭐ (`ai_applied_vs_research`) | What they want = applied AI / production deployment / prompt eng / integration — NOT research depth (model training/tuning, evals, published work) that would have to be invented. Score on whether the *role* is applied vs. research. **Score the SEAT, not the company:** an "AI-native" employer whose seat's only AI content is "use/explore AI tools to work faster" is a convenience layer, not AI work — score 0–1. | | |
+| **AI-realism: applied vs. research** ⭐ (`ai_applied_vs_research`) | Strong = production/application AI: deployment, integration, production eval, regression/reliability/observability, verifiers, human-in-the-loop, workflow quality, deployment validation, error taxonomy, cost per accepted outcome, or production safety/governance testing. Weak/out of scope = foundation-model research, from-scratch training/tuning, research benchmark creation, published research, or core model-algorithm/training work. **Classify the evaluation object, not the keyword:** a production workflow benchmark is applied; a foundation-model research benchmark is research. **Score the SEAT, not the company.** | | |
 | **AI-realism: artifact-evidences-required-depth** ⭐ (`ai_artifact_depth`) | Does my **current shipped artifact** evidence the AI depth this role lists as **required**? **3** = exactly what I've shipped (e.g. low-code GenAI automation, prompt design, classification/routing). **1–2** = adjacent but a step beyond (some orchestration, light agent work). **0** = a generation ahead (production agentic systems, multi-agent orchestration, LangChain/CrewAI/LangGraph/MCP as a *built* requirement, SDK/connector/middleware engineering). *This is the line a single AI dimension is blind to.* | | |
 | **Learning value** (`learning_value`) | Does the role *grow* AI capability — a step beyond current depth? Note: a role can be high learning value AND score 0 on artifact-depth — that's the Bucket 1 trap. High learning value is a reason to *want* the role, not evidence you can *land* it cold. | | |
 | **Technical skill match** (`technical_skill_match`) | Core skills map to required (not "plus") skills — OR gaps are ramp-able, not stated core requirements. | | |
@@ -79,12 +85,33 @@ reason a high-scoring role still won't convert cold.
 
 **Total: ___ / 18.**  14–18 = strong, tailor and apply. 10–13 = acceptable-tier, apply only if friction is low. <10 = likely pass.
 
+**Separation rule:** this total remains the existing fit score; it is not a combined answer
+to capability, screenability, and career capital. Do not change verdict, bucket, gate, or
+application allocation merely because a role is strategically attractive, and do not create
+a new gate merely because an attainable role is strategically weak.
+
 **⭐ Starred-line rules (these override the total):**
 - If *applied-vs-research* (`ai_applied_vs_research`) scores 0–1 → near-disqualifying regardless of total. Two mirror-image failure shapes: a research role wearing a delivery title, and a barely-AI seat wearing an AI-company logo (there, `ai_artifact_depth`'s 3 is vacuous — the required depth is ~zero, so the score carries no signal and does not rescue the role).
 - **If *artifact-evidences-required-depth* (`ai_artifact_depth`) scores 0 → the verdict is CAPPED at "RECRUITER_ONLY," regardless of total.** A 16/18 with this line at 0 is NOT the same role as a 16/18 with it at 3. Cold-applying the former is the "50/0" pattern. It does not become a PASS just because every other line is strong.
 - **Formal-leadership check (code-enforced cap, like the artifact-depth line).** If the posting's *required* qualifications state N+ years of formal **people leadership / management / technical program management** the candidate lacks (per the profile's leadership line), set `formal_leadership_required: true` in the output — the verdict is CAPPED at RECRUITER_ONLY regardless of total. Boundaries: (a) *required*, not preferred; (b) formal authority over people, not stakeholder/project leadership or mentoring; (c) if the leadership requirement makes the whole role management-of-delivery, the years-floor or role-substance gate may fail it first.
 
+**Management-drift (assistive flag, not a cap).** A Program-Manager-family role centered on
+coordination, governance, vendors, and adoption with no hands-on build/integrate verbs may be
+management *of* AI delivery rather than delivery. Preserve the existing verdict, emit a
+`management-drift` flag, and score `title_trajectory` honestly (0–1). Do not add a career-
+capital penalty on top of the score and flag.
+
 **Enablement-cluster (assistive flag, not a cap).** The pure-enablement false positive: a role whose *entire* responsibility set is awareness campaigns, workshops/training, evangelism, adoption playbooks, and tool-selection guidance, with **no build/own/ship verbs anywhere** (strongest tell: self-declared "not hands-on" language in the posting itself). It still passes the gates — it IS applied-AI work, not research — so do not gate-fail it: emit an `enablement-cluster` flag, score `title_trajectory` honestly (0–1), and route it as deadline insurance (below Bucket 3 priority; see Part 2.5). Enablement-in-title with real build content (enablement *engineer/developer* roles) gets no flag — read the responsibilities, not the title. **Star-scoring on flagged seats:** `ai_applied_vs_research` scores as applied (2–3) — driving AI adoption IS the seat's job, unlike the convenience-layer 0–1 case where the AI content is incidental to a non-AI seat; the enablement penalty is already carried by `learning_value`, `title_trajectory`, and the flag — don't double-count it in the star. Decide deliberately whether this cluster should harden into a role-substance gate fail once your deadline pressure lifts (e.g., after an offer lands).
+
+### Career-capital note (gates-passed roles only; non-scoring)
+
+Use the existing `one_line` explanation; do not add structured fields or many new flags. Name
+the strongest likely gains among hands-on code/build, production deployment, eval/reliability/
+observability, API/data/auth integration, incident/debug, discovery/scoping, adoption/business
+outcomes, reusable platform ownership, and leadership/commercial exposure; then name the most
+material capital visibly absent. Do not change verdict, gate, bucket/channel, or duplicate a
+penalty already carried by `learning_value` or `title_trajectory`. Pure reporting/dashboard/
+documentation BA/BI remains a tactical fallback with trajectory risk explained here, not gated.
 
 ---
 
@@ -94,6 +121,13 @@ Every role that passes the gates falls into one of three buckets. The bucket det
 *channel*, not just the verdict — the lever the 50/0 result says matters most: in this
 example the only applications that converted came through recruiters/referrals; cold portal
 applications converted near zero.
+
+**Role-positioning note (no gate or routing change):** distinguish near-term bridge roles with
+real build/integration/production ownership from medium-term stretch roles requiring mature
+production agentic/SDK evidence. Long-term direction must not raise current artifact depth or
+turn a screenability gap into a cold-apply PASS. Keep attainable BA/BI roles as tactical fallback;
+automation, AI workflow, system ownership, or internal-transformation paths can improve their
+career-capital explanation without changing the existing gates.
 
 **Bucket 1 — AI roles where required depth is a generation ahead (`ai_artifact_depth` = 0).**
 High learning value, genuinely applied (not research), real trajectory target — *and* gated
@@ -188,6 +222,9 @@ adjacency does not substitute for function precedent at a cold screen.
   verdict* and gets the disposition **skip at triage** — "SKIP" is a triage disposition,
   not a fourth verdict)
 - One-line reason: _______________________
+- Three-answer summary for every gates-passed role, inside the existing `one_line`:
+  **Can perform:** ______ | **Can screen:** ______ | **Career capital:** builds ______;
+  visibly lacks ______. Career capital is explanatory only.
 - Matcher spot-check (if you run a local resume↔JD keyword checker): **YES (name the
   trigger)** / **NO** — emit this line on every gates-passed evaluation so a qualifying
   posting is never silently skipped; a YES names the resume variant to run against the JD.
@@ -206,8 +243,8 @@ are public postings used illustratively.
 **Verdict: GATE_FAIL (role substance).**
 
 The title is primary-tier ("Solutions Architect"), but the substance is an AI research/
-experimentation role: model training/tuning, designing AI experiments, building evals and
-benchmarks. Qualifications make it explicit ("preferably... model training/tuning, performance
+experimentation role: model training/tuning, designing AI experiments, and building foundation-
+model research evals and benchmarks. Qualifications make it explicit ("preferably... model training/tuning, performance
 evaluations incl published work"). A low-code classification/extraction artifact is real and
 valuable but explicitly NOT from-scratch model development — those interview questions can't be
 answered without inventing experience, which violates no-inflation. Category fit (right employer,

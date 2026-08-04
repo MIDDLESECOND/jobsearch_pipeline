@@ -7,6 +7,38 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-03 — Career-strategy alignment: production eval disambiguation and non-scoring capital note
+
+### Why
+
+The canonical decision `D-2026-08-03-CAREER-REALIGNMENT` makes production/application
+evaluation a core capability while keeping foundation-model research and from-scratch training
+out of scope. The prior prompt used “evals/benchmarks” as an undifferentiated research signal,
+so a production deployment role could be misclassified from keywords alone. The same decision
+requires capability, current screenability, and long-term career capital to remain separate.
+
+### Changes (prompt/templates/docs only; no DB schema or historical rerun)
+
+- `profile.md` and its committed example now distinguish held production workflow/integration
+  capability from production agentic/SDK, RAG, eval-in-CI, observability, incident, and external-
+  customer deployment capabilities that are still being built.
+- `evaluation_guide.md` and its example classify eval work by its object: foundation-model or
+  research contribution remains out of scope; production application/workflow eval, reliability,
+  verification, observability, and deployment validation are in scope.
+- Gates-passed evaluations answer performability, screenability, and career capital separately.
+  Career capital reuses `one_line`, is explicitly non-scoring, and cannot add a gate or duplicate
+  `learning_value` / `title_trajectory` penalties.
+- `docs/career_strategy_alignment.md` records the downstream mapping, nine-case anonymized manual
+  adjudication matrix, unchanged boundaries, and a deferred structured-field option.
+- Local prompt-contract tests cover the ambiguity fix, no-inflation boundary, preserved routing
+  contract, three-answer separation, and requested adjudication archetypes.
+
+### Explicitly unchanged
+
+The score thresholds, Bucket definitions, verdict vocabulary, application allocation, current
+artifact-depth and formal-leadership caps, function-precedent and enablement/management rules,
+work-auth/employment/location/compensation facts, SQLite schema, `jobs.db`, and historical verdicts.
+
 ## 2026-08-01 — Boundary-variance finding (V4-Flash-0731 cutover); fuzzy-zone backtest anchors
 
 ### Why

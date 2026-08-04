@@ -80,7 +80,7 @@ Respond with ONLY a JSON object, no markdown fences, no preamble:
   "score_breakdown": null or {{"ai_applied_vs_research": 0-3, "ai_artifact_depth": 0-3, "learning_value": 0-3, "technical_skill_match": 0-3, "title_trajectory": 0-3, "years_vs_stated": 0-3}},
   "formal_leadership_required": true or false (true ONLY when required — not preferred — formal people-leadership/management years are stated),
   "bucket": null or 1 or 2 or 3,
-  "one_line": "one-line summary a human reads in the report",
+  "one_line": "For gates-passed roles: Can perform: ... | Can screen: ... | Career capital: builds ...; visibly lacks ... . Career capital is explanatory only. For gate failures: one-line decisive reason.",
   "flags": ["anything needing human judgment, e.g. ambiguous seniority, possible research-coding, recruiter posting with unnamed client"]
 }}"""
 

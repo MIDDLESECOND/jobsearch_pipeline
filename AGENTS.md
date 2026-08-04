@@ -211,3 +211,25 @@ via Windows Task Scheduler.
 - **Windows environment**: PowerShell/cmd; API keys via `setx` with a registry-read fallback
   (`_ensure_api_key`): `DEEPSEEK_API_KEY` (default eval provider) or `ANTHROPIC_API_KEY`, plus
   `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` for the optional Adzuna source.
+
+## Frontier Radar instructions for Codex
+
+Read `CLAUDE.md` for the repository's existing workflow and evidence rules.
+
+For career-related claims, also read:
+
+- `D:\Github\learning_path\governance\CROSS_PROJECT_RULES.md`
+- `D:\Github\learning_path\assumptions\AI_CAREER_CLAIM_LEDGER.md`
+- `D:\Github\learning_path\decisions\D-2026-08-03_CAREER_REALIGNMENT.md`
+
+If the canonical files are unavailable, report the missing access instead of reconstructing them
+from memory.
+
+This repository owns external evidence monitoring and claim updates. It does not own career
+decisions.
+
+- Separate capability, task automation, job redesign, headcount, wages, and career meaning.
+- Single articles, demos, vendor claims, or anecdotes cannot directly change the canonical
+  strategy.
+- Preserve existing user modifications, especially `config/sources.yaml`.
+- Private career implications remain in the private layer.

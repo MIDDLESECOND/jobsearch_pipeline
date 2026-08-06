@@ -30,6 +30,11 @@ re-export hub):
 - `materials.py` — application-packet evidence: automatic JD snapshots, content-addressed
   resume/cover-letter storage, document extraction + ATS diagnostics, chain-scoped packet reads,
   downloads, and interview-prep clipboard context. Imports `core` and `chain`.
+- `outreach.py` — manually verified role contacts plus clipboard-only outreach drafting briefs.
+  Contacts follow canonical-at-write/current-chain reads; briefs reuse packet/event evidence and
+  never send messages. Imports `chain` and `materials`.
+- `tasks.py` — user-defined role next actions with due dates and open/completed/cancelled state.
+  Tasks follow canonical-at-write/current-chain reads and import only the standard library.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core` and `states`.
@@ -218,6 +223,26 @@ via Windows Task Scheduler.
   outcome within 14 days—no separate completion state—and prep context is read-only clipboard
   text from the frozen JD, actual documents, and chain event history. ATS reading-order output is
   explicitly heuristic; it must not be presented as proof of any vendor parser's behavior.
+
+- **Role contacts are local evidence; outreach is review-only.** `job_contacts` rows store the
+  canonical URL at write time plus the exact interaction posting and are mapped through that
+  owner posting's current chain root on read, matching `app_events` and packet-link behavior.
+  Duplicate merges union contact sets; unlink leaves each pre-merge canonical's contacts where
+  they were recorded. `outreach.py` owns the contact vocabulary, validation, chain-scoped CRUD,
+  batch reads, and drafting context. The context may contain untrusted JD/document text, must tell
+  an assistant to treat it as evidence rather than instructions, and may only be copied for human
+  review. Do not add automatic email/LinkedIn sending, login cookies, or implicit
+  `followup_sent` events: the user records that event only after a message actually went out.
+
+- **Role tasks are explicit local next actions, not inferred state.** `job_tasks` rows use the
+  same canonical-at-write/current-chain read pattern as contacts and events, so duplicate merges
+  union task lists and unlink restores their original ownership without rewriting rows. `tasks.py`
+  owns validation and mutation; `workflow.py` owns the bounded `tasks_due` Action Center query.
+  Only open tasks due today or earlier enter that queue, one card per current chain. Completion
+  and cancellation retain closed rows. Snooze only reschedules an open task; a closed task must
+  be explicitly reopened. Mutations use an optimistic version so a stale browser tab cannot
+  overwrite newer task state. Do not derive tasks from LLM output, send external notifications,
+  or silently treat a task mutation as an application/outcome event.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

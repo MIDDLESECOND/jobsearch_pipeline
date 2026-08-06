@@ -95,6 +95,47 @@
   .material.ok { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
   .material.warning { color: #92400e; background: #fffbeb; border-color: #fde68a; }
   .material.unreadable { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+  .contacts { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+              margin: .35rem 0; font-size: .78rem; color: #556; }
+  .contact { border: 1px solid #bfdbfe; border-radius: 999px; padding: .16rem .5rem;
+             background: #eff6ff; color: #1e3a8a; max-width: 24rem; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .contact a { text-decoration: none; }
+  .tasks { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+           margin: .35rem 0; font-size: .78rem; color: #556; }
+  .task { border: 1px solid #c7d2fe; border-radius: 999px; padding: .16rem .5rem;
+          background: #eef2ff; color: #3730a3; }
+  .task.due { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+  .task.overdue { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  #contactDialog { width: min(34rem, calc(100vw - 2rem)); border: 0; border-radius: 10px;
+                   padding: 0; background: #fff; color: #1a1a1a;
+                   box-shadow: 0 18px 55px rgba(15, 23, 42, .25); }
+  #contactDialog::backdrop { background: rgba(15, 23, 42, .48); }
+  #contactForm { padding: 1.1rem; display: grid; gap: .75rem; }
+  #contactForm h2 { margin: 0; font-size: 1.05rem; }
+  #contactForm .form-hint { margin: -.35rem 0 0; color: #667085; font-size: .8rem; }
+  #contactForm label { display: grid; gap: .25rem; color: #344054; font-size: .8rem; }
+  #contactForm input, #contactForm select, #contactForm textarea {
+    width: 100%; padding: .45rem .55rem; border: 1px solid #d0d4da; border-radius: 6px;
+    background: #fff; color: #1a1a1a; font: inherit;
+  }
+  #contactForm textarea { min-height: 5rem; resize: vertical; }
+  #contactForm .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+  #contactForm .form-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  #taskDialog { width: min(32rem, calc(100vw - 2rem)); border: 0; border-radius: 10px;
+                padding: 0; background: #fff; color: #1a1a1a;
+                box-shadow: 0 18px 55px rgba(15, 23, 42, .25); }
+  #taskDialog::backdrop { background: rgba(15, 23, 42, .48); }
+  #taskForm { padding: 1.1rem; display: grid; gap: .75rem; }
+  #taskForm h2 { margin: 0; font-size: 1.05rem; }
+  #taskForm .form-hint { margin: -.35rem 0 0; color: #667085; font-size: .8rem; }
+  #taskForm label { display: grid; gap: .25rem; color: #344054; font-size: .8rem; }
+  #taskForm input, #taskForm textarea { width: 100%; padding: .45rem .55rem;
+    border: 1px solid #d0d4da; border-radius: 6px; background: #fff; color: #1a1a1a;
+    font: inherit; }
+  #taskForm textarea { min-height: 5rem; resize: vertical; }
+  #taskForm .form-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  @media (max-width: 520px) { #contactForm .form-row { grid-template-columns: 1fr; } }
   .tag.out-recruiter_screen { background: #dbeafe; color: #1e40af; }
   .tag.out-interview { background: #fde68a; color: #78350f; }
   .tag.out-offer { background: #bbf7d0; color: #14532d; font-weight: 700; }
@@ -108,8 +149,11 @@
   select.channel-in { background: #fff; }
   input.note-in { width: 9rem; }
   button.record { background: #0891b2; color: #fff; border-color: #0891b2; }
-  .history { font-size: .8rem; color: #445; background: #f8fafc; border: 1px solid #e3e6ea;
-             border-radius: 6px; padding: .4rem .6rem; margin-top: .5rem; }
+  .history, .task-history { font-size: .8rem; color: #445; background: #f8fafc;
+             border: 1px solid #e3e6ea; border-radius: 6px; padding: .4rem .6rem;
+             margin-top: .5rem; }
+  .task-history > div { display: flex; gap: .5rem; align-items: center;
+                        justify-content: space-between; padding: .2rem 0; }
   #funnelControls { align-items: center; gap: .5rem; }
   #funnelControls select { padding: .35rem .5rem; border: 1px solid #d0d4da; border-radius: 6px;
                            background: #fff; }
@@ -201,11 +245,72 @@
   <div id="linkbar"></div>
 </header>
 <main id="list"></main>
+<dialog id="contactDialog" aria-labelledby="contactDialogTitle">
+  <form id="contactForm">
+    <h2 id="contactDialogTitle">Add role contact</h2>
+    <p class="form-hint">Saved locally on this role chain. Nothing is messaged or sent.</p>
+    <div class="form-row">
+      <label>Name *
+        <input id="contactName" name="name" maxlength="160" autocomplete="name" required>
+      </label>
+      <label>Type
+        <select id="contactKind" name="kind">
+          {% for kind in contact_kinds %}
+          <option value="{{ kind }}">{{ kind | replace('_', ' ') }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <label>Role/title
+      <input id="contactRole" name="role" maxlength="240" autocomplete="organization-title">
+    </label>
+    <div class="form-row">
+      <label>Email
+        <input id="contactEmail" name="email" type="email" maxlength="320" autocomplete="email">
+      </label>
+      <label>LinkedIn/profile URL
+        <input id="contactProfile" name="profile_url" type="url" maxlength="2048"
+               placeholder="https://…">
+      </label>
+    </div>
+    <label>Relationship/context note
+      <textarea id="contactNote" name="note" maxlength="2000"
+                placeholder="How you found them; prior interaction; facts only"></textarea>
+    </label>
+    <div class="form-actions">
+      <button id="contactCancel" type="button" class="undo">Cancel</button>
+      <button id="contactSave" type="submit" class="record">Save contact</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="taskDialog" aria-labelledby="taskDialogTitle">
+  <form id="taskForm">
+    <h2 id="taskDialogTitle">Add next action</h2>
+    <p class="form-hint">Saved locally on this role chain and surfaced when due.</p>
+    <label>Action *
+      <input id="taskTitle" name="title" maxlength="240" required
+             placeholder="Prepare questions, request referral, send portfolio…">
+    </label>
+    <label>Due date *
+      <input id="taskDue" name="due_date" type="date" required>
+    </label>
+    <label>Note
+      <textarea id="taskNote" name="note" maxlength="2000"
+                placeholder="Optional context or definition of done"></textarea>
+    </label>
+    <div class="form-actions">
+      <button id="taskCancel" type="button" class="undo">Cancel</button>
+      <button id="taskSave" type="submit" class="record">Save action</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const GATES = {{ gates | tojson }};
 const EVENTS = {{ events | tojson }};  // outcomes + followup_sent + note
 const CHANNELS = {{ channels | tojson }};  // states.ALL_CHANNELS — how the application went out
+const CONTACT_KINDS = {{ contact_kinds | tojson }};
+const OUTREACH_PURPOSES = {{ outreach_purposes | tojson }};
 const FEEDBACK_URL = (() => {
   let u = String({{ feedback_url | tojson }});
   if (!u) return "";
@@ -281,6 +386,9 @@ let mutBusy = 0;
 // double-fire guard), and the handlers' entry checks use it to block keyboard re-activation
 // (.busy's pointer-events:none stops the mouse but not Enter on the focused button).
 const busyUrls = new Set();
+// Task mutations are chain-scoped: canonical and relisting cards can display the same task,
+// so a per-job-url lock would still let two sibling cards race one state transition.
+const taskBusyRoots = new Set();
 
 // Selected by data-view — the semantic the click handler consumes — so a button that merely
 // shares the .tab pill style (#toggleDecided) can never be picked up as a view tab, even if it
@@ -360,6 +468,14 @@ function esc(s) {
     ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
+function localTodayISO() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 // The decision in force for a card, walking a relisting back to its canonical original (its own
 // app_status is null — only the canonical carries the decision). Own decision wins, else the
 // chain's. Mirrors pipeline's _repost_info / the server join.
@@ -422,6 +538,34 @@ function materialPanelHTML(j) {
     + `${chip("resume", "Resume")}${chip("cover_letter", "Cover letter")}</div>`;
 }
 
+function contactPanelHTML(j) {
+  const contacts = j.contacts || [];
+  if (!contacts.length) return "";
+  const chips = contacts.map(c => {
+    const role = c.role ? ` · ${esc(c.role)}` : "";
+    const email = c.email ? ` · <a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "";
+    const profile = c.profile_url
+      ? ` · <a href="${esc(c.profile_url)}" target="_blank" rel="noopener">profile ↗</a>` : "";
+    const note = c.note ? ` title="${esc(c.note)}"` : "";
+    return `<span class="contact"${note}><b>${esc(c.name)}</b> · ${esc(c.kind.replace(/_/g, " "))}${role}${email}${profile}</span>`;
+  }).join("");
+  return `<div class="contacts"><b>Role contacts</b>${chips}</div>`;
+}
+
+function taskPanelHTML(j) {
+  const tasks = j.tasks || [];
+  if (!tasks.length) return "";
+  const today = localTodayISO();
+  const chips = tasks.map(t => {
+    const cls = t.due_date < today ? "overdue" : (t.due_date === today ? "due" : "");
+    const label = t.due_date < today ? `overdue · ${t.due_date}`
+      : (t.due_date === today ? "due today" : `due ${t.due_date}`);
+    const note = t.note ? ` title="${esc(t.note)}"` : "";
+    return `<span class="task ${cls}"${note}><b>${esc(t.title)}</b> · ${esc(label)}</span>`;
+  }).join("");
+  return `<div class="tasks"><b>Next actions</b>${chips}</div>`;
+}
+
 function scoreLine(b) {
   // Render whatever dimensions the stored eval has (the schema has changed over time);
   // highlight any AI-related dimension. Mirrors the report's score line.
@@ -436,8 +580,10 @@ function card(j, actionSection = null) {
   const div = document.createElement("div");
   // Re-apply the in-flight lock: a card rebuilt while its POST is pending must not come back
   // with live buttons (double-fire) — see busyUrls.
-  div.className = busyUrls.has(j.job_url) ? "card busy" : "card";
+  div.className = (busyUrls.has(j.job_url) || taskBusyRoots.has(j.chain_root))
+    ? "card busy" : "card";
   div.dataset.url = j.job_url;  // lets a decision update every affected (repost-chain) card
+  div.dataset.root = j.chain_root;
   const salary = fmtSalary(j.salary_min, j.salary_max);
   const score = j.fit_score != null ? `<span class="score">${j.fit_score}/18</span> (${j.band})` : "";
   // Eval-skipped relistings (repost_evaluated) have verdict NULL by design — show the chain's
@@ -453,6 +599,8 @@ function card(j, actionSection = null) {
   div.innerHTML = `
     <h2>${esc(j.title)} — ${esc(j.company)} ${statusTag(j)} ${repost}</h2>
     ${outcomeRowHTML(j)}
+    ${taskPanelHTML(j)}
+    ${contactPanelHTML(j)}
     ${materialPanelHTML(j)}
     <div class="meta">${verdict}${score}</div>
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
@@ -560,6 +708,57 @@ function card(j, actionSection = null) {
     actions.appendChild(btn("Undo last", "undo", () => postEvent(div, j, {undo: true})));
   }
 
+  actions.appendChild(btn("Add next action", "undo", () => openTaskDialog(div, j)));
+  const roleTasks = j.tasks || [];
+  if (roleTasks.length) {
+    const tsel = document.createElement("select");
+    tsel.className = "task-in";
+    tsel.title = "open next action";
+    tsel.innerHTML = roleTasks.map(t =>
+      `<option value="${esc(t.id)}">${esc(t.title)} · ${esc(t.due_date)}</option>`
+    ).join("");
+    const snooze = document.createElement("select");
+    snooze.className = "task-snooze-in";
+    snooze.title = "reschedule interval";
+    snooze.innerHTML = '<option value="1">+1 day</option><option value="3">+3 days</option>'
+      + '<option value="7">+7 days</option>';
+    actions.appendChild(tsel);
+    actions.appendChild(btn("Done", "record", () => completeTask(div, j, Number(tsel.value))));
+    actions.appendChild(snooze);
+    actions.appendChild(btn("Snooze", "undo", () =>
+      snoozeTask(div, j, Number(tsel.value), Number(snooze.value))));
+    actions.appendChild(btn("Cancel task", "undo", () =>
+      cancelTask(div, j, Number(tsel.value))));
+  }
+  if (j.task_count) {
+    actions.appendChild(btn("Task history ▸", "undo", event =>
+      toggleTaskHistory(div, j, event.currentTarget)));
+  }
+
+  actions.appendChild(btn("Add contact", "undo", () => openContactDialog(div, j)));
+  const contacts = j.contacts || [];
+  if (contacts.length) {
+    const csel = document.createElement("select");
+    csel.className = "contact-in";
+    csel.title = "verified role contact";
+    csel.innerHTML = contacts.map(c =>
+      `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.kind.replace(/_/g, " "))}</option>`
+    ).join("");
+    const psel = document.createElement("select");
+    psel.className = "outreach-purpose-in";
+    psel.title = "draft purpose";
+    const preferred = decided === "applied" ? "application_follow_up" : "recruiter_intro";
+    psel.innerHTML = OUTREACH_PURPOSES.map(p =>
+      `<option value="${esc(p)}"${p === preferred ? " selected" : ""}>${esc(p.replace(/_/g, " "))}</option>`
+    ).join("");
+    actions.appendChild(csel);
+    actions.appendChild(psel);
+    actions.appendChild(btn("Draft outreach ↗", "send", () =>
+      copyOutreachBrief(div, j, Number(csel.value), psel.value)));
+    actions.appendChild(btn("Remove contact", "undo", () =>
+      removeContact(div, j, Number(csel.value))));
+  }
+
   appendLinkControls(actions, div, j);
   return div;
 }
@@ -660,6 +859,253 @@ async function copyPrepContext(div, j) {
   } catch (e) {
     toast.textContent = "Error: " + e;
   }
+}
+
+async function copyOutreachBrief(div, j, contactId, purpose) {
+  const toast = div.querySelector(".toast");
+  toast.textContent = "Building evidence-backed outreach brief…";
+  try {
+    const params = new URLSearchParams({
+      job_url: j.job_url, contact_id: String(contactId), purpose,
+    });
+    const res = await fetch("/api/outreach?" + params.toString());
+    const data = await res.json();
+    if (!res.ok || !data.ok) { toast.textContent = data.message || "Couldn't build outreach brief"; return; }
+    // As with JD feedback, copy while this tab still owns focus, then open the configured
+    // assistant.  The app never sends the resulting message; the user reviews it first.
+    const copied = await copyText(data.text);
+    if (copied && FEEDBACK_URL) window.open(FEEDBACK_URL, "feedback_project");
+    toast.textContent = !copied ? "Copy failed — retry from a focused tab"
+      : data.partial ? "Partial outreach brief copied — review evidence warning before drafting"
+      : FEEDBACK_URL ? `Brief copied — draft in ${ASSISTANT}, then review before sending`
+      : "Outreach brief copied — paste into an assistant, then review before sending";
+  } catch (e) {
+    toast.textContent = "Error: " + e;
+  }
+}
+
+let pendingContactTarget = null;
+const contactDialog = document.getElementById("contactDialog");
+const contactForm = document.getElementById("contactForm");
+const contactSave = document.getElementById("contactSave");
+const contactCancel = document.getElementById("contactCancel");
+let contactDialogSubmitting = false;
+
+function openContactDialog(div, j) {
+  if (linkBusy || mutBusy || busyUrls.has(j.job_url)
+      || contactDialog.open || taskDialog.open) return;
+  pendingContactTarget = {div, j};
+  contactForm.reset();
+  document.getElementById("contactKind").value = "recruiter";
+  contactDialog.showModal();
+  document.getElementById("contactName").focus();
+}
+
+contactCancel.addEventListener("click", () => contactDialog.close());
+contactDialog.addEventListener("cancel", event => {
+  if (contactDialogSubmitting) event.preventDefault();
+});
+contactDialog.addEventListener("close", () => {
+  pendingContactTarget = null;
+  contactDialogSubmitting = false;
+  contactSave.disabled = false;
+  contactCancel.disabled = false;
+});
+contactForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!pendingContactTarget || contactDialogSubmitting || !contactForm.reportValidity()) return;
+  const submittedTarget = pendingContactTarget;
+  const {div, j} = submittedTarget;
+  const fields = Object.fromEntries(new FormData(contactForm).entries());
+  contactDialogSubmitting = true;
+  contactSave.disabled = true;
+  contactCancel.disabled = true;
+  const saved = await mutateContact(div, j, Object.assign({action: "add"}, fields));
+  if (saved && pendingContactTarget === submittedTarget) contactDialog.close();
+  else {
+    contactDialogSubmitting = false;
+    contactSave.disabled = false;
+    contactCancel.disabled = false;
+  }
+});
+
+async function removeContact(div, j, contactId) {
+  const contact = (j.contacts || []).find(c => c.id === contactId);
+  if (!contact || !confirm(`Remove ${contact.name} from this role chain?`)) return;
+  await mutateContact(div, j, {action: "delete", contact_id: contactId});
+}
+
+async function mutateContact(div, j, fields) {
+  if (linkBusy || busyUrls.has(j.job_url)) return false;
+  div.classList.add("busy");
+  busyUrls.add(j.job_url);
+  mutBusy++;
+  try {
+    const data = await postJSON("/api/contacts", Object.assign({job_url: j.job_url}, fields));
+    if (!data.ok) { alert(data.message || "contact update failed"); return false; }
+    j.contacts = data.contacts || [];
+    // Contacts are chain-scoped and may be shown on sibling cards or in another bounded queue.
+    // Refetch the server-owned surface rather than partially patching one card.
+    await load();
+    return true;
+  } catch (e) {
+    alert("error: " + e);
+    return false;
+  } finally {
+    mutBusy--;
+    releaseBusy(j.job_url, div);
+  }
+}
+
+let pendingTaskTarget = null;
+const taskDialog = document.getElementById("taskDialog");
+const taskForm = document.getElementById("taskForm");
+const taskSave = document.getElementById("taskSave");
+const taskCancel = document.getElementById("taskCancel");
+let taskDialogSubmitting = false;
+
+function openTaskDialog(div, j) {
+  if (linkBusy || mutBusy || busyUrls.has(j.job_url)
+      || taskBusyRoots.has(j.chain_root) || taskDialog.open || contactDialog.open) return;
+  pendingTaskTarget = {div, j};
+  taskForm.reset();
+  document.getElementById("taskDue").value = localTodayISO();
+  taskDialog.showModal();
+  document.getElementById("taskTitle").focus();
+}
+
+taskCancel.addEventListener("click", () => taskDialog.close());
+taskDialog.addEventListener("cancel", event => {
+  if (taskDialogSubmitting) event.preventDefault();
+});
+taskDialog.addEventListener("close", () => {
+  pendingTaskTarget = null;
+  taskDialogSubmitting = false;
+  taskSave.disabled = false;
+  taskCancel.disabled = false;
+});
+taskForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!pendingTaskTarget || taskDialogSubmitting || !taskForm.reportValidity()) return;
+  const submittedTarget = pendingTaskTarget;
+  const {div, j} = submittedTarget;
+  const fields = Object.fromEntries(new FormData(taskForm).entries());
+  taskDialogSubmitting = true;
+  taskSave.disabled = true;
+  taskCancel.disabled = true;
+  const saved = await mutateTask(div, j, Object.assign({action: "add"}, fields));
+  if (saved && pendingTaskTarget === submittedTarget) taskDialog.close();
+  else {
+    taskDialogSubmitting = false;
+    taskSave.disabled = false;
+    taskCancel.disabled = false;
+  }
+});
+
+function selectedTask(j, taskId) {
+  return (j.tasks || []).find(task => task.id === taskId);
+}
+
+async function completeTask(div, j, taskId) {
+  const task = selectedTask(j, taskId);
+  if (!task || !confirm(`Mark “${task.title}” complete?`)) return;
+  await mutateTask(div, j, {
+    action: "complete", task_id: taskId, expected_version: task.version,
+  });
+}
+
+function shiftedTaskDate(task, days) {
+  const due = new Date(`${task.due_date}T12:00:00Z`);
+  const today = new Date(`${localTodayISO()}T12:00:00Z`);
+  const base = due < today ? today : due;
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
+async function snoozeTask(div, j, taskId, days) {
+  const task = selectedTask(j, taskId);
+  if (!task) return;
+  await mutateTask(div, j, {
+    action: "snooze", task_id: taskId, expected_version: task.version,
+    due_date: shiftedTaskDate(task, days),
+  });
+}
+
+async function cancelTask(div, j, taskId) {
+  const task = selectedTask(j, taskId);
+  if (!task || !confirm(`Cancel “${task.title}”? Its closed record will be retained.`)) return;
+  await mutateTask(div, j, {
+    action: "cancel", task_id: taskId, expected_version: task.version,
+  });
+}
+
+async function mutateTask(div, j, fields) {
+  const root = j.chain_root || j.job_url;
+  if (linkBusy || busyUrls.has(j.job_url) || taskBusyRoots.has(root)) return false;
+  taskBusyRoots.add(root);
+  list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+    .forEach(card => card.classList.add("busy"));
+  mutBusy++;
+  try {
+    const data = await postJSON("/api/tasks", Object.assign({job_url: j.job_url}, fields));
+    if (!data.ok) {
+      alert(data.message || "task update failed");
+      // A rejected optimistic write leaves this tab's task versions stale. Refresh now so
+      // the next click can use the winning state instead of repeating the same rejection.
+      if (data.message === "task changed; refresh and retry") await load();
+      return false;
+    }
+    j.tasks = data.tasks || [];
+    // Completing or snoozing may remove this chain from the due queue; refetch its owner.
+    await load();
+    return true;
+  } catch (e) {
+    alert("error: " + e);
+    return false;
+  } finally {
+    mutBusy--;
+    taskBusyRoots.delete(root);
+    list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+      .forEach(card => card.classList.remove("busy"));
+  }
+}
+
+async function toggleTaskHistory(div, j, btnEl) {
+  const open = div.querySelector(".task-history");
+  if (open) { open.remove(); btnEl.textContent = "Task history ▸"; return; }
+  btnEl.textContent = "Task history …";
+  let history = null;
+  try {
+    const res = await fetch("/api/tasks?include_closed=1&job_url="
+      + encodeURIComponent(j.job_url));
+    if (res.ok) history = (await res.json()).tasks;
+  } catch (e) { /* history stays null */ }
+  if (!div.isConnected) return;
+  if (div.querySelector(".task-history")) { btnEl.textContent = "Task history ▾"; return; }
+  const p = document.createElement("div");
+  p.className = "task-history";
+  if (history === null) {
+    p.textContent = "⚠ Couldn't load task history — close and retry.";
+  } else if (!history.length) {
+    p.textContent = "No tasks recorded yet.";
+  } else {
+    for (const task of history) {
+      const line = document.createElement("div");
+      const detail = document.createElement("span");
+      detail.textContent = `${task.due_date} — ${task.title} · ${task.status}`
+        + (task.note ? ` · ${task.note}` : "");
+      line.appendChild(detail);
+      if (task.status !== "open") {
+        line.appendChild(btn("Reopen", "undo", () =>
+          mutateTask(div, j, {
+            action: "reopen", task_id: task.id, expected_version: task.version,
+          })));
+      }
+      p.appendChild(line);
+    }
+  }
+  div.appendChild(p);
+  btnEl.textContent = "Task history ▾";
 }
 
 async function uploadMaterial(div, j, kind, file) {

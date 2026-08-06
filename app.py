@@ -10,7 +10,8 @@ existing `jobs.db`: `mark_posting` /
 propagation and the status lift behave exactly like the CLI wrappers in pipeline.py),
 and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
 linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
-changes. Single-user, local-only — binds to 127.0.0.1.
+changes directly; schema ownership remains in core.get_db. Single-user, local-only — binds
+to 127.0.0.1.
 
 Launch through serve() (what `pipeline.py ui` / `python app.py` do) — it runs the one-time
 schema/migration pass the routes rely on. A serve-less launch (`flask run`, a WSGI import)
@@ -32,10 +33,13 @@ from core import connect_db, get_db, load_config
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
 from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, download_info,
                        material_summaries, prep_context_bundle, snapshot_jd)
+from outreach import (CONTACT_KINDS, OUTREACH_PURPOSES, add_contact, chain_contacts,
+                      contact_summaries, outreach_context_bundle, remove_contact)
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
                     VERDICT_RECRUITER_ONLY)
+from tasks import add_task, chain_tasks, change_task, task_counts, task_summaries
 from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_job_page
 
 app = Flask(__name__)
@@ -64,7 +68,8 @@ def _pin_host():
         return jsonify({"ok": False, "message": "unrecognized Host header"}), 403
 
 
-def row_to_dict(row, cap, dec, packet=None):
+def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
+                task_count=0):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
     configured max_description_chars — a stored description at that length was truncated.
     `dec` is chain.effective_decision(conn, row) — the chain-wide decision, computed by the
@@ -79,6 +84,7 @@ def row_to_dict(row, cap, dec, packet=None):
     row_keys = set(row.keys())
     return {
         "job_url": row["job_url"],
+        "chain_root": row["repost_of"] or row["job_url"],
         "title": row["title"],
         "company": row["company"],
         "location": row["location"],
@@ -147,17 +153,29 @@ def row_to_dict(row, cap, dec, packet=None):
                                if "last_followup_date" in row_keys else None),
         "next_followup_date": (row["next_followup_date"]
                                if "next_followup_date" in row_keys else None),
+        "next_task_due": row["next_task_due"] if "next_task_due" in row_keys else None,
         "materials": packet or {"resume": None, "cover_letter": None,
                                 "jd_snapshot": None},
+        "contacts": contacts or [],
+        "tasks": role_tasks or [],
+        "task_count": task_count,
     }
 
 
 def rows_to_dicts(conn, rows, cap, decisions=None):
-    """Batch chain decisions and application packets for a bounded row set."""
+    """Batch chain decisions, packets, contacts, and tasks for a bounded row set."""
     decisions = decisions or effective_decisions(conn, rows)
     packets = material_summaries(conn, rows)
-    return [row_to_dict(row, cap, decisions[row["job_url"]],
-                        packets[row["repost_of"] or row["job_url"]]) for row in rows]
+    contacts = contact_summaries(conn, rows)
+    role_tasks = task_summaries(conn, rows)
+    role_task_counts = task_counts(conn, rows)
+    return [row_to_dict(
+        row, cap, decisions[row["job_url"]],
+        packet=packets[row["repost_of"] or row["job_url"]],
+        contacts=contacts[row["repost_of"] or row["job_url"]],
+        role_tasks=role_tasks[row["repost_of"] or row["job_url"]],
+        task_count=role_task_counts[row["repost_of"] or row["job_url"]],
+    ) for row in rows]
 
 
 def jobs_for_view(conn, view, for_date, cap):
@@ -230,6 +248,8 @@ def index():
         gates=GATE_OPTIONS,
         events=list(ALL_EVENTS),
         channels=list(ALL_CHANNELS),
+        contact_kinds=list(CONTACT_KINDS),
+        outreach_purposes=list(OUTREACH_PURPOSES),
         today=date.today().isoformat(),
         feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
     )
@@ -461,6 +481,125 @@ def api_prep():
     finally:
         conn.close()
     return jsonify({"ok": True, **bundle})
+
+
+@app.route("/api/contacts", methods=["GET", "POST"])
+def api_contacts():
+    """Read or mutate the current role chain's manually verified contacts."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    job_url = body.get("job_url") if request.method == "POST" else request.args.get("job_url")
+    if not isinstance(job_url, str) or not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        if request.method == "GET":
+            return jsonify({"ok": True, "contacts": chain_contacts(conn, row)})
+        action = body.get("action", "add")
+        try:
+            if action == "add":
+                result = add_contact(
+                    conn, row, name=body.get("name"), role=body.get("role"),
+                    kind=body.get("kind", "other"), email=body.get("email"),
+                    profile_url=body.get("profile_url"), note=body.get("note"),
+                )
+                message = f"added {result['contact']['name']}"
+            elif action == "delete":
+                result = remove_contact(conn, row, body.get("contact_id"))
+                if result is None:
+                    return jsonify({"ok": False, "message": "contact not found"}), 404
+                message = "contact removed"
+            else:
+                return jsonify({"ok": False, "message": "unknown contact action"}), 400
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, "message": message, **result})
+    finally:
+        conn.close()
+
+
+@app.route("/api/outreach")
+def api_outreach():
+    """Return a local-evidence drafting brief for copy/paste; never send a message."""
+    job_url = request.args.get("job_url")
+    purpose = request.args.get("purpose", "application_follow_up")
+    try:
+        contact_id = int(request.args.get("contact_id", ""))
+    except ValueError:
+        return jsonify({"ok": False, "message": "contact_id must be an integer"}), 400
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        try:
+            bundle = outreach_context_bundle(
+                conn, row, contact_id=contact_id, purpose=purpose, cfg=cfg,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+    finally:
+        conn.close()
+    return jsonify({"ok": True, **bundle})
+
+
+@app.route("/api/tasks", methods=["GET", "POST"])
+def api_tasks():
+    """Read or mutate explicit next actions for the current role chain."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    job_url = body.get("job_url") if request.method == "POST" else request.args.get("job_url")
+    if not isinstance(job_url, str) or not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        if request.method == "GET":
+            include_closed = request.args.get("include_closed") == "1"
+            return jsonify({"ok": True, "tasks": chain_tasks(
+                conn, row, include_closed=include_closed,
+            )})
+        action = body.get("action", "add")
+        try:
+            if action == "add":
+                result = add_task(
+                    conn, row, title=body.get("title"), due_date=body.get("due_date"),
+                    note=body.get("note"),
+                )
+                message = f"added {result['task']['title']}"
+            else:
+                result = change_task(
+                    conn, row, body.get("task_id"), action,
+                    expected_version=body.get("expected_version"),
+                    due_date=body.get("due_date"),
+                )
+                if result is None:
+                    return jsonify({"ok": False, "message": "task not found"}), 404
+                message = {
+                    "complete": "task completed",
+                    "reopen": "task reopened",
+                    "cancel": "task cancelled",
+                    "snooze": "task rescheduled",
+                }[action]
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, "message": message, **result})
+    finally:
+        conn.close()
 
 
 @app.route("/api/decision", methods=["POST"])

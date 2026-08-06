@@ -78,6 +78,12 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert 'View all' in html
     assert 'filtersEl.classList.add("queue-only")' in html
     assert "Attach resume" in html and "Copy prep context" in html
+    assert "Add contact" in html and "Draft outreach" in html
+    assert "review before sending" in html
+    assert 'id="contactDialog"' in html and 'id="contactForm"' in html
+    assert "Add next action" in html and 'id="taskDialog"' in html
+    assert "expected_version: task.version" in html
+    assert "promptField" not in html
     assert "Basic checks passed" in html
     assert "ATS ✓" not in html
     assert 'input.value = ""' in html
@@ -455,6 +461,157 @@ def test_material_upload_requires_applied_chain_and_same_origin(client, seed):
         content_type="multipart/form-data", headers={"Origin": "http://evil.example"},
     )
     assert response.status_code == 403
+
+
+# --------------------------------------------------------------- /api/contacts
+
+def test_contact_crud_card_projection_and_outreach_brief(client, seed):
+    make_job(seed, job_url="c1", title="AI PM", company="Acme",
+             description="Own production AI evaluation.", app_status="applied",
+             status_date="2026-08-01")
+    make_job(seed, job_url="r1", title="AI Product Lead", company="Acme",
+             description="Current relisting JD.", repost_of="c1", app_status="applied",
+             status_date="2026-08-01")
+    _post(client, "/api/decision", {"job_url": "r1", "action": "applied"})
+    response = _post(client, "/api/contacts", {
+        "job_url": "r1", "name": "Alex Rivera", "role": "Senior Recruiter",
+        "kind": "recruiter", "email": "alex@example.com",
+        "profile_url": "https://www.linkedin.com/in/alex", "note": "Met at meetup",
+    })
+    got = response.get_json()
+    assert response.status_code == 200 and got["ok"] is True
+    assert got["contact"]["interaction_url"] == "r1"
+
+    listed = client.get("/api/contacts?job_url=c1").get_json()["contacts"]
+    assert [c["name"] for c in listed] == ["Alex Rivera"]
+    cards = client.get("/api/jobs?view=applied").get_json()
+    assert all(card["contacts"][0]["id"] == got["contact"]["id"] for card in cards)
+
+    brief = client.get(
+        f"/api/outreach?job_url=r1&contact_id={got['contact']['id']}"
+        "&purpose=application_follow_up"
+    ).get_json()
+    assert brief["ok"] is True
+    assert brief["contact"]["email"] == "alex@example.com"
+    assert "Do not send anything" in brief["text"]
+    assert "Current relisting JD." in brief["text"]
+
+    removed = _post(client, "/api/contacts", {
+        "job_url": "c1", "action": "delete", "contact_id": got["contact"]["id"],
+    })
+    assert removed.get_json()["contacts"] == []
+
+
+def test_contact_and_outreach_api_validation_and_origin_guard(client, seed):
+    make_job(seed, job_url="c1")
+    bad = _post(client, "/api/contacts", {
+        "job_url": "c1", "name": "Alex", "email": "not-an-email",
+    })
+    assert bad.status_code == 400 and "email" in bad.get_json()["message"]
+    crossed = _post(
+        client, "/api/contacts", {"job_url": "c1", "name": "Alex"},
+        origin="http://evil.example",
+    )
+    assert crossed.status_code == 403
+    assert seed.execute("SELECT COUNT(*) FROM job_contacts").fetchone()[0] == 0
+    assert client.post("/api/contacts", json=["not", "an", "object"]).status_code == 400
+    assert client.get("/api/outreach?job_url=c1&contact_id=nope").status_code == 400
+    assert client.get("/api/contacts?job_url=missing").status_code == 404
+
+
+# ------------------------------------------------------------------ /api/tasks
+
+def test_task_crud_card_projection_and_due_queue(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="c1", title="AI PM", company="Acme")
+    make_job(seed, job_url="r1", title="AI PM relist", company="Acme", repost_of="c1")
+    created = _post(client, "/api/tasks", {
+        "job_url": "r1", "title": "Prepare portfolio", "due_date": today,
+        "note": "Choose two production AI examples",
+    })
+    got = created.get_json()
+    assert created.status_code == 200 and got["ok"] is True
+    assert got["task"]["interaction_url"] == "r1"
+
+    listed = client.get("/api/tasks?job_url=c1").get_json()["tasks"]
+    assert [task["title"] for task in listed] == ["Prepare portfolio"]
+    cards = client.get("/api/jobs?view=backlog&page=1&page_size=20").get_json()["items"]
+    assert len(cards) == 2
+    assert {card["chain_root"] for card in cards} == {"c1"}
+    assert all(card["tasks"][0]["id"] == got["task"]["id"] for card in cards)
+    assert all(card["task_count"] == 1 for card in cards)
+    due = client.get("/api/actions/tasks_due?page=1&page_size=20").get_json()
+    assert [item["job_url"] for item in due["items"]] == ["c1"]
+    assert due["items"][0]["next_task_due"] == today
+
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    snoozed = _post(client, "/api/tasks", {
+        "job_url": "c1", "action": "snooze", "task_id": got["task"]["id"],
+        "expected_version": got["task"]["version"], "due_date": tomorrow,
+    }).get_json()
+    assert snoozed["task"]["due_date"] == tomorrow
+    assert client.get("/api/actions/tasks_due").get_json()["items"] == []
+
+    completed = _post(client, "/api/tasks", {
+        "job_url": "r1", "action": "complete", "task_id": got["task"]["id"],
+        "expected_version": snoozed["task"]["version"],
+    }).get_json()
+    assert completed["task"]["status"] == "completed"
+    assert completed["tasks"] == []
+    history = client.get("/api/tasks?job_url=c1&include_closed=1").get_json()["tasks"]
+    assert history[0]["status"] == "completed"
+    reopened = _post(client, "/api/tasks", {
+        "job_url": "c1", "action": "reopen", "task_id": got["task"]["id"],
+        "expected_version": completed["task"]["version"],
+    }).get_json()
+    assert reopened["task"]["status"] == "open"
+
+
+def test_task_api_validation_cross_chain_and_origin_guard(client, seed):
+    make_job(seed, job_url="left")
+    make_job(seed, job_url="right")
+    bad = _post(client, "/api/tasks", {
+        "job_url": "left", "title": "Task", "due_date": "tomorrow",
+    })
+    assert bad.status_code == 400 and "YYYY-MM-DD" in bad.get_json()["message"]
+    crossed = _post(
+        client, "/api/tasks",
+        {"job_url": "left", "title": "Task", "due_date": "2026-08-08"},
+        origin="http://evil.example",
+    )
+    assert crossed.status_code == 403
+    assert client.post("/api/tasks", json=["bad"]).status_code == 400
+
+    task = _post(client, "/api/tasks", {
+        "job_url": "left", "title": "Left task", "due_date": "2026-08-08",
+    }).get_json()["task"]
+    missing = _post(client, "/api/tasks", {
+        "job_url": "right", "action": "complete", "task_id": task["id"],
+        "expected_version": task["version"],
+    })
+    assert missing.status_code == 404
+    assert client.get("/api/tasks?job_url=missing").status_code == 404
+
+
+def test_task_api_rejects_a_stale_cross_tab_update(client, seed):
+    make_job(seed, job_url="root")
+    task = _post(client, "/api/tasks", {
+        "job_url": "root", "title": "Follow up", "due_date": "2026-08-08",
+    }).get_json()["task"]
+    first = _post(client, "/api/tasks", {
+        "job_url": "root", "action": "snooze", "task_id": task["id"],
+        "expected_version": task["version"], "due_date": "2026-08-09",
+    })
+    assert first.status_code == 200
+
+    stale = _post(client, "/api/tasks", {
+        "job_url": "root", "action": "snooze", "task_id": task["id"],
+        "expected_version": task["version"], "due_date": "2026-08-15",
+    })
+    assert stale.status_code == 400
+    assert stale.get_json()["message"] == "task changed; refresh and retry"
+    current = client.get("/api/tasks?job_url=root").get_json()["tasks"][0]
+    assert current["due_date"] == "2026-08-09"
 
 
 # ----------------------------------------------------------------- /api/event

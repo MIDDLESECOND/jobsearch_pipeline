@@ -7,6 +7,62 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-06 — Chain-scoped next actions and due-task queue
+
+### Why
+
+The fixed application follow-up cadence covers one standard workflow but cannot represent the
+other concrete commitments around a role: prepare questions, request a referral, send a portfolio,
+or check a deadline. Open-source trackers such as JobSync make tasks and upcoming work first-class;
+the useful subset here is explicit local next actions, not general project management or another
+notification service.
+
+### Changes (schema/workflow only; evaluation judgment unchanged)
+
+- Added `job_tasks`, using canonical-at-write/current-chain reads so manual duplicate merges union
+  task lists and unlink restores original ownership without data migration.
+- Added validated local task creation with a title, due date, and optional note; completion and
+  cancellation retain closed records, while reopen/reschedule operations preserve task identity.
+- Added optimistic task versions so concurrent browser tabs reject stale updates instead of
+  silently overwriting a newer completion, cancellation, reopen, or snooze.
+- Added a bounded **Next actions due** Action Center section with one canonical card per chain and
+  earliest-due-first paging. Future and closed tasks do not enter the queue.
+- Added card controls to create tasks, complete or cancel the selected task, and snooze it by 1, 3,
+  or 7 days. Overdue tasks reschedule from today rather than remaining overdue.
+
+### Explicitly unchanged
+
+No external notifications, calendar writes, automatic task generation, evaluation changes,
+application/outcome mutations, or general-purpose priority/time-tracking system.
+
+## 2026-08-06 — Chain-scoped role contacts and no-send outreach briefs
+
+### Why
+
+The application history knew that a follow-up happened but not which recruiter, hiring manager,
+or referral was involved. Mature open-source trackers place contacts beside the application and
+use the same role context for drafting; the useful part here is the evidence model and human review
+boundary, not automated account access or message sending.
+
+### Changes (schema/workflow only; evaluation judgment unchanged)
+
+- Added `job_contacts`, with canonical-at-write/current-chain reads matching application events
+  and packet links. Duplicate merges union contact evidence without rewriting rows; deletion is
+  scoped to the current chain so one role cannot remove another role's contact.
+- Added local UI controls to add/remove recruiter, hiring-manager, referral, and other contacts;
+  cards expose the chain's current contact list with optional email/profile links and context notes.
+- Added a clipboard-only outreach brief for application follow-ups, recruiter introductions, and
+  referral requests. It uses the selected contact plus the frozen JD, actual submitted packet, and
+  event history, labels incomplete evidence, and instructs the drafting assistant not to invent
+  facts. The app never sends a message or marks a follow-up as sent.
+- Kept contact details local in SQLite and retained the existing explicit user action for recording
+  `followup_sent` only after a message was actually sent.
+
+### Explicitly unchanged
+
+Posting gates, scores, verdicts, bucket routing, fetch/eval stage order, historical decisions,
+and external account access.
+
 ## 2026-08-05 — Chain-scoped application packet evidence
 
 ### Why

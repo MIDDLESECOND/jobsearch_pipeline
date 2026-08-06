@@ -229,6 +229,35 @@ def test_stale_check_rebuild_carries_outcome_columns(tmp_path):
         conn.close()
 
 
+def test_job_task_version_is_added_to_intermediate_schema(tmp_path):
+    path = str(tmp_path / "preversion.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE job_tasks (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, job_url TEXT NOT NULL,
+               interaction_url TEXT NOT NULL, title TEXT NOT NULL, note TEXT,
+               due_date TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+               closed_at TEXT
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO job_tasks
+           (job_url,interaction_url,title,due_date,status,created_at)
+           VALUES ('root','root','Existing task','2026-08-08','open','2026-08-06')"""
+    )
+    conn.commit()
+    conn.close()
+
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(job_tasks)")}
+        row = conn.execute("SELECT title,version FROM job_tasks").fetchone()
+        assert "version" in columns
+        assert row["title"] == "Existing task" and row["version"] == 0
+    finally:
+        conn.close()
+
+
 def test_connections_run_in_wal_mode(tmp_path):
     # connect_db switches the DB to WAL so a slow concurrent reader (the UI's full-table
     # view scan) can never block an eval write past the busy timeout — the failure mode

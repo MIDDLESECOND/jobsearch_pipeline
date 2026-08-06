@@ -478,6 +478,62 @@ def _application_materials_table_sql():
     """
 
 
+def _job_contacts_table_sql():
+    """Manual role contacts, canonical-keyed at write time and read chain-wide.
+
+    ``kind`` is a code-side vocabulary owned by outreach.py, intentionally without a
+    schema CHECK so adding a user-facing label never creates another frozen-CHECK migration.
+    Contact details remain local in SQLite and are never sent by this application.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS job_contacts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url         TEXT NOT NULL,
+            interaction_url TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            role            TEXT,
+            kind            TEXT NOT NULL,
+            email           TEXT,
+            profile_url     TEXT,
+            note            TEXT,
+            created_at      TEXT NOT NULL
+        )
+    """
+
+
+def _job_tasks_table_sql():
+    """Manual next actions, canonical-keyed at write time and read chain-wide.
+
+    Task status is enforced by tasks.py rather than a schema CHECK so the user-facing
+    workflow vocabulary can evolve without rebuilding the table.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS job_tasks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url         TEXT NOT NULL,
+            interaction_url TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            note            TEXT,
+            due_date        TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            closed_at       TEXT,
+            version         INTEGER NOT NULL DEFAULT 0
+        )
+    """
+
+
+def _migrate_job_tasks(conn):
+    """Add optimistic-concurrency state to databases opened during feature development."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(job_tasks)")}
+    if "version" not in cols:
+        conn.execute(
+            "ALTER TABLE job_tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        print("[migrate] added job_tasks.version")
+
+
 def _migrate_application_materials(conn):
     """Add interaction provenance to packet links created by the pre-release schema."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(application_materials)")}
@@ -502,6 +558,9 @@ def get_db(cfg):
     conn.execute(_events_table_sql())
     conn.execute(_material_objects_table_sql())
     conn.execute(_application_materials_table_sql())
+    conn.execute(_job_contacts_table_sql())
+    conn.execute(_job_tasks_table_sql())
+    _migrate_job_tasks(conn)
     _migrate_application_materials(conn)
     # Run-level state the log files can't provide queryably (they're human-oriented text
     # with 30-day retention). Currently one key: 'last_run_ok_ended', the ISO end time of
@@ -513,6 +572,12 @@ def get_db(cfg):
                  "ON application_materials(job_url)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_application_materials_object "
                  "ON application_materials(object_sha256)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_contacts_job_url "
+                 "ON job_contacts(job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_chain_due "
+                 "ON job_tasks(job_url,status,due_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_due "
+                 "ON job_tasks(status,due_date,job_url)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;

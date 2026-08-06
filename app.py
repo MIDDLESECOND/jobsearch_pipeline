@@ -22,7 +22,7 @@ import sys
 import webbrowser
 from datetime import date
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 
 from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    effective_decisions, effective_decision, dupe_resolve, dupe_commit,
@@ -30,6 +30,8 @@ from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    set_channel)
 from core import connect_db, get_db, load_config
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
+from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, download_info,
+                       material_summaries, prep_context_bundle, snapshot_jd)
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
@@ -37,8 +39,14 @@ from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
 from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_job_page
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
 
 GATE_OPTIONS = GATE_NAMES + ["other"]
+
+
+@app.errorhandler(413)
+def _upload_too_large(_error):
+    return jsonify({"ok": False, "message": "file exceeds the 10 MB limit"}), 413
 
 # Hostnames this app may be addressed as. The Origin check below is defeated by DNS
 # rebinding on its own (the browser would send the attacker's domain as BOTH Host and
@@ -56,7 +64,7 @@ def _pin_host():
         return jsonify({"ok": False, "message": "unrecognized Host header"}), 403
 
 
-def row_to_dict(row, cap, dec):
+def row_to_dict(row, cap, dec, packet=None):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
     configured max_description_chars — a stored description at that length was truncated.
     `dec` is chain.effective_decision(conn, row) — the chain-wide decision, computed by the
@@ -139,7 +147,17 @@ def row_to_dict(row, cap, dec):
                                if "last_followup_date" in row_keys else None),
         "next_followup_date": (row["next_followup_date"]
                                if "next_followup_date" in row_keys else None),
+        "materials": packet or {"resume": None, "cover_letter": None,
+                                "jd_snapshot": None},
     }
+
+
+def rows_to_dicts(conn, rows, cap, decisions=None):
+    """Batch chain decisions and application packets for a bounded row set."""
+    decisions = decisions or effective_decisions(conn, rows)
+    packets = material_summaries(conn, rows)
+    return [row_to_dict(row, cap, decisions[row["job_url"]],
+                        packets[row["repost_of"] or row["job_url"]]) for row in rows]
 
 
 def jobs_for_view(conn, view, for_date, cap):
@@ -189,7 +207,7 @@ def jobs_for_view(conn, view, for_date, cap):
                 fit = decisions[r["job_url"]]["chain_fit_score"] or 0
             return recency_sort_key(r, fit=fit)
         rows = sorted(rows, key=_triage_key)
-    out = []
+    visible = []
     for r in rows:
         dec = decisions[r["job_url"]]
         # Backlog: drop a relisting whose chain the user already decided (its own app_status is
@@ -200,8 +218,8 @@ def jobs_for_view(conn, view, for_date, cap):
         # member; it only differs (more robustly) if chain rows are out of sync from a raw DB edit.
         if view == "backlog" and r["repost_of"] is not None and (dec["app_status"] or dec["reject"]):
             continue
-        out.append(row_to_dict(r, cap, dec))
-    return out
+        visible.append(r)
+    return rows_to_dicts(conn, visible, cap, decisions)
 
 
 @app.route("/")
@@ -249,7 +267,7 @@ def api_jobs():
         except (TypeError, ValueError) as e:
             return jsonify({"ok": False, "message": str(e)}), 400
         decisions = effective_decisions(conn, result["rows"])
-        items = [row_to_dict(r, cap, decisions[r["job_url"]]) for r in result["rows"]]
+        items = rows_to_dicts(conn, result["rows"], cap, decisions)
         return jsonify({
             "items": items,
             "total": result["total"],
@@ -276,8 +294,7 @@ def api_actions():
                 "title": section["title"],
                 "description": section["description"],
                 "total": section["total"],
-                "items": [row_to_dict(r, cap, decisions[r["job_url"]])
-                          for r in section["rows"]],
+                "items": rows_to_dicts(conn, section["rows"], cap, decisions),
             })
         return jsonify({"sections": payload})
     finally:
@@ -304,8 +321,7 @@ def api_action_section(section_id):
             "id": section["id"],
             "title": section["title"],
             "description": section["description"],
-            "items": [row_to_dict(r, cap, decisions[r["job_url"]])
-                      for r in section["rows"]],
+            "items": rows_to_dicts(conn, section["rows"], cap, decisions),
             "total": section["total"],
             "page": section["page"],
             "page_size": section["page_size"],
@@ -371,11 +387,79 @@ def _opt_str(v):
 def _origin_ok():
     # CSRF guard for the state-changing routes. The browser sends an Origin header on any
     # cross-site POST; refuse it unless it matches our own origin. (Same-origin requests from the
-    # UI either omit Origin or send a matching one.) Requiring real application/json — i.e. dropping
-    # force=True on get_json — also forces a CORS preflight a cross-site page can't satisfy.
+    # UI either omit Origin or send a matching one.) JSON routes also require their real content
+    # type; the multipart material-upload route uses this same explicit Origin check.
     # (_pin_host has already vetted request.host, so host_url can't be a rebinding alias here.)
     origin = request.headers.get("Origin")
     return origin is None or origin == request.host_url.rstrip("/")
+
+
+@app.route("/api/materials", methods=["GET", "POST"])
+def api_materials():
+    """Read the current chain packet or attach one actual submitted document."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    job_url = (request.form.get("job_url") if request.method == "POST"
+               else request.args.get("job_url"))
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        if request.method == "GET":
+            return jsonify({"ok": True, "materials": chain_materials(conn, row)})
+        upload = request.files.get("file")
+        kind = request.form.get("kind")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "message": "file is required"}), 400
+        data = upload.stream.read(MAX_UPLOAD_BYTES + 1)
+        try:
+            item = attach_upload(conn, row, kind, upload.filename, data, cfg)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, "message": f"attached {item['name']}",
+                        "item": item, "materials": chain_materials(conn, row)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/materials/<int:attachment_id>/download")
+def api_material_download(attachment_id):
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        info = download_info(conn, row, attachment_id, cfg) if row is not None else None
+    finally:
+        conn.close()
+    if info is None:
+        return jsonify({"ok": False, "message": "material not found"}), 404
+    return send_file(info["path"], mimetype=info["media_type"], as_attachment=True,
+                     download_name=info["name"])
+
+
+@app.route("/api/prep")
+def api_prep():
+    """One-click clipboard context: frozen JD, actual packet, and prior events/notes."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        bundle = prep_context_bundle(conn, row, cfg)
+    finally:
+        conn.close()
+    return jsonify({"ok": True, **bundle})
 
 
 @app.route("/api/decision", methods=["POST"])
@@ -396,7 +480,10 @@ def api_decision():
         # 500 instead of this route's JSON error contract — or be stored as a raw number.
         return jsonify({"ok": False, "message": "resume/channel must be strings"}), 400
 
-    conn = connect_db(load_config())
+    cfg = load_config()
+    conn = connect_db(cfg)
+    packet = None
+    material_warning = None
     try:
         # Same service cores as the CLI (chain.mark_posting / reject_posting), so propagation
         # and the status lift can't drift between the two front-ends. `affected` is the whole
@@ -428,12 +515,24 @@ def api_decision():
             ok, message, affected, exempt = set_channel(conn, row, channel)
         else:  # undo_reject
             ok, message, affected, exempt = reject_posting(conn, row, "other", undo=True)
+        if ok and action == "applied":
+            try:
+                snapshot_jd(conn, row, cfg)
+            except Exception as exc:  # The application decision already committed; surface but keep it.
+                material_warning = str(exc)
         # Post-mutation chain truth for the client to patch from — the outcome cache is
         # server-derived state the client CANNOT mirror by rule (a re-apply restores it from
         # event history; the prompted variant may be superseded by the chain's inherited
         # one), so hand it the answer instead of letting patchJob guess. Same contract as
         # /api/event's echo.
         dec = effective_decision(conn, row) if ok else None
+        if ok:
+            try:
+                packet = chain_materials(conn, row)
+            except Exception as exc:
+                # As above, a packet-read failure must not turn a committed decision into a
+                # misleading HTTP failure.  The warning makes the missing evidence visible.
+                material_warning = material_warning or str(exc)
     finally:
         conn.close()
     # `exempt` is chain.py's authoritative "keep these visible past the hide-decided filter"
@@ -445,7 +544,10 @@ def api_decision():
         resp.update({"outcome_status": dec["outcome_status"],
                      "outcome_date": dec["outcome_date"],
                      "resume_variant": dec["resume_variant"],
-                     "channel": dec["channel"]})
+                     "channel": dec["channel"],
+                     "materials": packet})
+    if material_warning:
+        resp["materials_warning"] = material_warning
     return jsonify(resp)
 
 

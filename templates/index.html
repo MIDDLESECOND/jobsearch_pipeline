@@ -85,6 +85,16 @@
   /* Post-application outcome (applied cards): current-state tag + record/history controls. */
   .outcome { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
   .outcome .tag { margin-left: 0; }
+  .materials { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+               margin: .35rem 0; font-size: .78rem; color: #556; }
+  .material { border: 1px solid #d9dee6; border-radius: 999px; padding: .16rem .5rem;
+              background: #f8fafc; max-width: 19rem; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .material a { text-decoration: none; }
+  .material.missing { color: #8a6d3b; background: #fffaf0; border-style: dashed; }
+  .material.ok { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+  .material.warning { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+  .material.unreadable { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
   .tag.out-recruiter_screen { background: #dbeafe; color: #1e40af; }
   .tag.out-interview { background: #fde68a; color: #78350f; }
   .tag.out-offer { background: #bbf7d0; color: #14532d; font-weight: 700; }
@@ -390,6 +400,28 @@ function outcomeRowHTML(j) {
   return `<div class="outcome">${tag}</div>`;
 }
 
+function materialPanelHTML(j) {
+  if (effectiveStatus(j) !== "applied") return "";
+  const packet = j.materials || {};
+  const chip = (kind, label) => {
+    const item = packet[kind];
+    if (!item) return `<span class="material missing">${esc(label)} missing</span>`;
+    if (item.storage_status !== "available") {
+      const state = item.storage_status === "corrupt" ? "unreadable" : "missing";
+      return `<span class="material ${state}">${esc(label)} stored file ${esc(item.storage_status || "missing")}</span>`;
+    }
+    if (kind === "jd_snapshot") return `<span class="material ok">✓ JD frozen</span>`;
+    const state = item.ats_status || "warning";
+    const warnings = (item.ats_warnings || []).join(" ");
+    const status = state === "ok" ? "Basic checks passed"
+      : (state === "unreadable" ? "No readable text" : "Check warnings");
+    const href = `/api/materials/${encodeURIComponent(item.id)}/download?job_url=${encodeURIComponent(j.job_url)}`;
+    return `<span class="material ${esc(state)}" title="${esc(warnings)}"><a href="${href}">${esc(label)}: ${esc(item.name)}</a> · ${esc(status)}</span>`;
+  };
+  return `<div class="materials"><b>Submitted packet</b>${chip("jd_snapshot", "JD")}`
+    + `${chip("resume", "Resume")}${chip("cover_letter", "Cover letter")}</div>`;
+}
+
 function scoreLine(b) {
   // Render whatever dimensions the stored eval has (the schema has changed over time);
   // highlight any AI-related dimension. Mirrors the report's score line.
@@ -421,6 +453,7 @@ function card(j, actionSection = null) {
   div.innerHTML = `
     <h2>${esc(j.title)} — ${esc(j.company)} ${statusTag(j)} ${repost}</h2>
     ${outcomeRowHTML(j)}
+    ${materialPanelHTML(j)}
     <div class="meta">${verdict}${score}</div>
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
@@ -502,6 +535,9 @@ function card(j, actionSection = null) {
       orow.appendChild(resumeField(div, j));
       orow.appendChild(channelField(div, j));
     }
+    actions.appendChild(materialUploadButton(div, j, "resume", "Attach resume"));
+    actions.appendChild(materialUploadButton(div, j, "cover_letter", "Attach cover letter"));
+    actions.appendChild(btn("Copy prep context", "send", () => copyPrepContext(div, j)));
     const esel = document.createElement("select");
     esel.innerHTML = `<option value="">event…</option>`
       + EVENTS.map(e => `<option value="${e}">${e.replace(/_/g, " ")}</option>`).join("");
@@ -552,6 +588,25 @@ function btn(label, cls, onClick) {
   return b;
 }
 
+function materialUploadButton(div, j, kind, label) {
+  const button = btn(label, "undo", () => input.click());
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".pdf,.docx,.txt,.md";
+  input.hidden = true;
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    // Clear the picker before the async upload so the same file can be selected again after
+    // a validation/network failure (browsers do not emit change for an unchanged value).
+    input.value = "";
+    if (file) uploadMaterial(div, j, kind, file);
+  });
+  // Keep the picker outside the button: an input.click() nested inside the button would
+  // bubble back to the button handler and recursively reopen itself.
+  div.appendChild(input);
+  return button;
+}
+
 async function copyText(text) {
   // navigator.clipboard works on http://127.0.0.1 (localhost is a secure context); fall back to
   // a hidden textarea + execCommand for older browsers.
@@ -588,6 +643,54 @@ async function sendToAssistant(div, job_url) {
       : "JD copied — set settings.feedback_project_url to auto-open your project";
   } catch (e) {
     toast.textContent = "Error: " + e;
+  }
+}
+
+async function copyPrepContext(div, j) {
+  const toast = div.querySelector(".toast");
+  toast.textContent = "Building prep context…";
+  try {
+    const res = await fetch("/api/prep?job_url=" + encodeURIComponent(j.job_url));
+    const data = await res.json();
+    if (!res.ok || !data.ok) { toast.textContent = data.message || "Couldn't build context"; return; }
+    const copied = await copyText(data.text);
+    toast.textContent = !copied ? "Copy failed — retry from a focused tab"
+      : data.partial ? "Partial prep context copied — review missing/corrupt evidence warning"
+      : "Prep context copied — JD, submitted packet, and event notes";
+  } catch (e) {
+    toast.textContent = "Error: " + e;
+  }
+}
+
+async function uploadMaterial(div, j, kind, file) {
+  if (linkBusy || busyUrls.has(j.job_url)) return;
+  div.classList.add("busy");
+  busyUrls.add(j.job_url);
+  mutBusy++;
+  const toast = div.querySelector(".toast");
+  toast.textContent = `Checking ${file.name}…`;
+  try {
+    const form = new FormData();
+    form.append("job_url", j.job_url);
+    form.append("kind", kind);
+    form.append("file", file);
+    const res = await fetch("/api/materials", {
+      method: "POST", body: form,
+      signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+        ? AbortSignal.timeout(30000) : undefined,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { alert(data.message || "upload failed"); return; }
+    j.materials = data.materials;
+    if (data.item?.ats_status !== "ok" && data.item?.ats_warnings?.length) {
+      alert("ATS check:\n" + data.item.ats_warnings.join("\n"));
+    }
+    await load();
+  } catch (e) {
+    alert("error: " + e);
+  } finally {
+    mutBusy--;
+    releaseBusy(j.job_url, div);
   }
 }
 
@@ -693,6 +796,7 @@ async function decide(div, j, action, gate, resume, channel) {
           r.chain_outcome_date = data.outcome_date;
           r.chain_resume_variant = data.resume_variant;
           r.chain_channel = data.channel;
+          if (data.materials) r.materials = data.materials;
         }
       }
       j.chain_outcome_status = data.outcome_status;
@@ -701,7 +805,9 @@ async function decide(div, j, action, gate, resume, channel) {
       j.resume_variant = data.resume_variant;
       j.chain_channel = data.channel;
       j.channel = data.channel;
+      if (data.materials) j.materials = data.materials;
     }
+    if (data.materials_warning) alert("Applied, but application packet warning: " + data.materials_warning);
     // A load() raced this decision (tab/date change mid-flight — the only rebuild sources the
     // entry guards don't block, and each bumps loadSeq): its rows may have been read before the
     // commit — refetch rather than patch a snapshot that may not show it. Past this check,

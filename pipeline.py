@@ -53,6 +53,7 @@ from filters import (
 )
 from evaluation import evaluate_new_jobs, requeue_error_rows
 from report import generate_report
+from materials import snapshot_jd
 
 
 # ----------------------------------------------------------------------- main
@@ -138,6 +139,13 @@ def cmd_mark(conn, url, status, resume=None, channel=None):
         return False
     ok, msg, _, _ = mark_posting(conn, m, status, resume, channel)
     print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
+    if ok and status == "applied":
+        try:
+            snapshot_jd(conn, m)
+        except Exception as exc:
+            # mark_posting has already committed the user's decision.  Do not report the
+            # command as failed; make the missing evidence explicit so it can be retried.
+            print(f"[{label}] warning: JD snapshot failed: {exc}", file=sys.stderr)
     return ok
 
 

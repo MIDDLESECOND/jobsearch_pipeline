@@ -27,6 +27,9 @@ re-export hub):
   `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
   normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
   shape's producer and consumers can't drift). The foundation; imports only `chain` and `states`.
+- `materials.py` — application-packet evidence: automatic JD snapshots, content-addressed
+  resume/cover-letter storage, document extraction + ATS diagnostics, chain-scoped packet reads,
+  downloads, and interview-prep clipboard context. Imports `core` and `chain`.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core` and `states`.
@@ -138,14 +141,18 @@ via Windows Task Scheduler.
   are deliberately **not** guarded — they must fail loud, since limping past a crashed filter would
   let un-filtered rows reach the paid eval.
 
-- **SQLite (`jobs.db`) is the single source of truth; reports are disposable derivations.** Never
-  reconstruct state from `reports/` (per-day and lossy). The schema and all migrations live inline
-  in the DB-open path and run on *every* startup — idempotent and additive, plus ONE sanctioned
+- **SQLite (`jobs.db`) is the authoritative store for posting/workflow state; reports are
+  disposable derivations.** Never reconstruct state from `reports/` (per-day and lossy).
+  Application evidence is the one deliberate two-part store: SQLite owns its metadata/links and
+  the adjacent `application_materials/` object store owns its content-addressed bytes. A complete
+  evidence backup or restore MUST treat both as one unit: stop the UI, pipeline, and scheduled runs,
+  then copy/restore `jobs.db` and `application_materials/` together. The schema and all migrations
+  live inline in the DB-open path and run on *every* startup — idempotent and additive, plus ONE sanctioned
   non-additive mechanism: a one-shot row-preserving table rebuild when a DB's baked-in
   status/verdict CHECK falls behind `states.py` (`_rebuild_for_stale_checks` — SQLite can't ALTER
   a CHECK, and a stale one aborts every run). Add schema changes there; there are no separate
   migration files. The DB runs in WAL mode: the `jobs.db-wal`/`jobs.db-shm` sidecars are part
-  of the database whenever a process has it open — copy/back up `jobs.db` only when nothing has
+  of the database whenever a process has it open — copy/back up the evidence unit only when nothing has
   it open (a clean close checkpoints and removes them), and never delete a hot `-wal` (it holds
   committed rows).
 
@@ -195,6 +202,22 @@ via Windows Task Scheduler.
   Follow-up eligibility is derived, never cached: applied + no employer outcome, then the
   next due date is application/last-`followup_sent` date + 7 days; two sent follow-ups retire
   the reminder. Events on former canonicals are mapped through current chain membership.
+
+- **Application packets are immutable evidence, read chain-wide.** Marking a role applied through
+  either front-end freezes the exact interaction posting's stored JD (a relisting may differ from
+  its canonical) and appends a `jd_snapshot` link. JD snapshots and resume/cover-letter uploads
+  live under the gitignored `application_materials/` object store, deduplicated by SHA-256;
+  SQLite stores file/ATS metadata plus append-only links, never the documents' extracted text.
+  Each link stores both its canonical-at-write owner and the exact interaction posting URL;
+  ownership is mapped through the attachment job's CURRENT chain root at read time, exactly like
+  `app_events`: merge unions packets and unlink separates them without data migration. Latest
+  attachment per kind is the current submitted packet; older links remain evidence. The
+  summary/read path checksum-verifies stored objects (cached by path/size/mtime within the process)
+  and surfaces `missing`/`corrupt` instead of presenting cached ATS metadata as live evidence. The
+  `interview_prep` Action Center queue is derived from a current recruiter-screen/interview
+  outcome within 14 days—no separate completion state—and prep context is read-only clipboard
+  text from the frozen JD, actual documents, and chain event history. ATS reading-order output is
+  explicitly heuristic; it must not be presented as proof of any vendor parser's behavior.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

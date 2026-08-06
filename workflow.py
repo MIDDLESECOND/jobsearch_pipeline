@@ -14,7 +14,8 @@ from chain import effective_decisions
 from report import recency_sort_key
 from states import (STATUS_ERROR, STATUS_EVALUATED, STATUS_NEEDS_MANUAL,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED,
-                    EVENT_FOLLOWUP_SENT, VERDICT_PASS, VERDICT_RECRUITER_ONLY)
+                    EVENT_FOLLOWUP_SENT, EVENT_INTERVIEW, EVENT_RECRUITER_SCREEN,
+                    VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 
 
 VALID_VIEWS = ("today", "backlog", "applied", "passed")
@@ -22,8 +23,8 @@ DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 DEFAULT_ACTION_LIMIT = 10
 FOLLOWUP_MAX = 2
-ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "followups_due",
-                      "needs_attention")
+ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "interview_prep",
+                      "followups_due", "needs_attention")
 _TRIAGE_VERDICTS = (VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 _UNDECIDED_BACKLOG_CTE = (
     "WITH decided_roots(root) AS ("
@@ -251,6 +252,35 @@ def _attention_page(conn, *, page, page_size):
     }
 
 
+def _interview_prep_page(conn, *, page, page_size, today, prep_days=14):
+    """Recent recruiter responses that should be prepared from the submitted packet.
+
+    A rolling queue avoids inventing separate completion state: a fresh screen/interview
+    enters automatically, a terminal later outcome removes it, and an untouched item ages
+    out after two weeks.
+    """
+    cutoff = (today - timedelta(days=prep_days - 1)).isoformat()
+    where = (
+        "j.repost_of IS NULL AND j.app_status='applied' "
+        "AND j.outcome_status IN (?,?) AND j.outcome_date>=?"
+    )
+    params = (EVENT_RECRUITER_SCREEN, EVENT_INTERVIEW, cutoff)
+    total = conn.execute("SELECT COUNT(*) FROM jobs j WHERE " + where, params).fetchone()[0]
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        "SELECT j.* FROM jobs j WHERE " + where
+        + " ORDER BY j.outcome_date DESC,j.status_date DESC,j.job_url LIMIT ? OFFSET ?",
+        (*params, page_size, offset),
+    ).fetchall()
+    return {
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size) if total else 0,
+    }
+
+
 def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
                       today=None, fresh_days=3, followup_days=7,
                       followup_max=FOLLOWUP_MAX):
@@ -283,6 +313,12 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         )
         title = "Route to a human"
         description = f"Recruiter-only · score 14+ · last {fresh_days} calendar days"
+    elif section_id == "interview_prep":
+        result = _interview_prep_page(
+            conn, page=page, page_size=page_size, today=today,
+        )
+        title = "Interview prep"
+        description = "Screens or interviews recorded in the last 14 days"
     elif section_id == "followups_due":
         result = _followup_page(
             conn, page=page, page_size=page_size, today=today,
@@ -301,7 +337,7 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
 
 def action_center(conn, *, today=None, fresh_days=3, followup_days=7,
                   limit=DEFAULT_ACTION_LIMIT):
-    """Return the four small work queues that answer "what needs me now?".
+    """Return the small work queues that answer "what needs me now?".
 
     Rows remain ordinary jobs rows.  app.api_actions adds the shared chain/card fields;
     keeping HTTP shaping out of this module makes these queues reusable by a future CLI or

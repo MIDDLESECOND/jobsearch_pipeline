@@ -65,6 +65,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `states.py` | the status/verdict vocabulary and state machine (imports nothing) |
 | `chain.py` | repost/dedup chains, decision propagation, outcome tracking |
 | `core.py` | config, SQLite schema + inline migrations, shared parsing |
+| `materials.py` | submitted packet storage, text extraction, ATS checks, prep context |
 | `filters.py` | deterministic pre-eval filters (salary, hard rules) |
 | `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
@@ -198,8 +199,9 @@ It opens `http://127.0.0.1:5000` in your browser. The page shows the same postin
 does, as cards with their verdict, score breakdown, bucket, flags and a link to the posting.
 Each card has **Applied** / **Passed** / **Reject** buttons (Reject has a gate dropdown), so a
 click does exactly what the matching CLI command does — including repost-chain propagation. The
-opening **Action Center** groups fresh strong matches, recruiter-route candidates, applications
-due for follow-up, and evaluation errors. Other tabs switch between **Today** (with a date picker),
+opening **Action Center** groups fresh strong matches, recruiter-route candidates, recent
+screens/interviews needing preparation, applications due for follow-up, and evaluation errors.
+Other tabs switch between **Today** (with a date picker),
 the undecided **Backlog**, your **Applied** / **Passed** history, and **Funnel**; **Undo** reverses
 a decision. Funnel ranges cover 30/90/180/365 calendar days or all current applications. It counts
 one role per repost chain, shows applied → employer response → interview → offer conversion, and
@@ -209,6 +211,24 @@ and denominators stay visible because these personal samples are descriptive, no
 Follow-ups use a 7-day cadence: click **Follow-up sent** to record the contact, move the next
 reminder seven days out, and retire the reminder after two sends. This history does not claim
 that the employer responded and does not change the role's outcome.
+
+Marking a role **Applied** freezes the exact stored JD at that moment. On an Applied card, attach
+the actual resume and cover letter you submitted (PDF, DOCX, TXT, or Markdown), then open those
+files from the packet chips later. JD snapshots and identical uploaded files are stored once by
+SHA-256 under the local, gitignored `application_materials/` directory; SQLite keeps only the
+chain-scoped relations and file/ATS metadata—not extracted resume or cover-letter text.
+The PDF check reports a missing/blank text layer, missing email or phone, and a conservative text-
+fragmentation warning. The reading-order signal is a heuristic, not proof of how every ATS parses
+the page. **Copy prep context** puts the frozen JD, actual submitted documents, and all prior
+events/notes on the clipboard. Packet chips distinguish available, missing, and checksum-failed
+objects; a partial Prep Context carries the same warning instead of claiming the full packet was
+copied. This drafts context only—it never sends a message or changes status.
+
+For a complete backup, stop the UI and make sure no pipeline or scheduled run is active, then copy
+`jobs.db` **and** its adjacent `application_materials/` directory together. Restore both to that
+same directory before restarting the tool. The database without the object store retains attachment
+metadata but loses the JD/document bytes; the object store without the database loses their role and
+chain relationships. Reports are not a substitute for either part.
 
 History views are server-paged (50 cards at a time) instead of downloading the entire database.
 Use the filter row to search title/company/location, narrow by verdict or source, set a minimum

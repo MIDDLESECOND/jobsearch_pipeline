@@ -434,16 +434,85 @@ def _events_table_sql():
     """
 
 
+def _material_objects_table_sql():
+    """Content-addressed application artifacts.
+
+    Uploaded bytes and JD snapshots live below the local material store and are addressed by
+    ``sha256``. ATS fields are cached metadata derived from the immutable object, not user
+    decisions, so they may be recomputed by a future checker without changing application
+    history. Full resume/cover-letter text deliberately does not live in SQLite.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS material_objects (
+            sha256         TEXT PRIMARY KEY,
+            media_type     TEXT NOT NULL,
+            extension      TEXT NOT NULL,
+            size_bytes     INTEGER NOT NULL,
+            stored_path    TEXT,
+            ats_status     TEXT,
+            ats_json       TEXT,
+            created_at     TEXT NOT NULL
+        )
+    """
+
+
+def _application_materials_table_sql():
+    """Append-only links from a chain member to the artifact attached at that moment.
+
+    ``job_url`` follows the same canonical-at-write convention as app_events, while
+    ``interaction_url`` preserves the exact posting used for the upload/snapshot. Readers map
+    job_url through jobs to the current chain root, so duplicate merge/unlink naturally unions
+    or separates packets without rewriting history. ``kind`` is code-side vocabulary in
+    materials.py; deliberately no frozen schema CHECK.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS application_materials (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url       TEXT NOT NULL,
+            interaction_url TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            object_sha256 TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            attached_at   TEXT NOT NULL
+        )
+    """
+
+
+def _migrate_application_materials(conn):
+    """Add interaction provenance to packet links created by the pre-release schema."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(application_materials)")}
+    changed = False
+    if "interaction_url" not in cols:
+        conn.execute("ALTER TABLE application_materials ADD COLUMN interaction_url TEXT")
+        changed = True
+    backfill = conn.execute(
+        "UPDATE application_materials SET interaction_url=job_url "
+        "WHERE interaction_url IS NULL"
+    )
+    if backfill.rowcount:
+        changed = True
+    if changed:
+        conn.commit()
+        print("[migrate] added/backfilled application_materials.interaction_url")
+
+
 def get_db(cfg):
     conn = connect_db(cfg)
     conn.execute(_jobs_table_sql("jobs", if_not_exists=True))
     conn.execute(_events_table_sql())
+    conn.execute(_material_objects_table_sql())
+    conn.execute(_application_materials_table_sql())
+    _migrate_application_materials(conn)
     # Run-level state the log files can't provide queryably (they're human-oriented text
     # with 30-day retention). Currently one key: 'last_run_ok_ended', the ISO end time of
     # the last SUCCESSFUL full run — the cooldown guard's input. Crashed runs never write
     # it, so a crash can't suppress the next scheduled slot.
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_app_events_job_url ON app_events(job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_application_materials_job_url "
+                 "ON application_materials(job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_application_materials_object "
+                 "ON application_materials(object_sha256)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;

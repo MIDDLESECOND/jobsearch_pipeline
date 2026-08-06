@@ -9,12 +9,14 @@ file via the shared schema builder + make_job) — never the real jobs.db, never
 
 import sqlite3
 from datetime import date, timedelta
+from io import BytesIO
 
 import pytest
 
 import app as webapp
 import chain
 import core
+import materials
 from conftest import make_job
 
 TODAY_SEEN = "2026-06-01T09:00:00"  # make_job's first_seen date, used as the today-view date
@@ -75,6 +77,10 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert 'id="pageLabel"' in html
     assert 'View all' in html
     assert 'filtersEl.classList.add("queue-only")' in html
+    assert "Attach resume" in html and "Copy prep context" in html
+    assert "Basic checks passed" in html
+    assert "ATS ✓" not in html
+    assert 'input.value = ""' in html
 
 
 def test_funnel_api_returns_chain_scoped_snapshot_and_validates_range(client, seed):
@@ -259,13 +265,21 @@ def test_followup_sent_api_advances_queue_without_setting_outcome(client, seed):
 # -------------------------------------------------------------- /api/decision
 
 def test_decision_applied_propagates_across_chain(client, seed):
-    make_job(seed, job_url="c1", company="Chain Co")
-    make_job(seed, job_url="r1", company="Chain Co", repost_of="c1")
+    make_job(seed, job_url="c1", company="Chain Co", description="older canonical JD")
+    make_job(seed, job_url="r1", company="Chain Co", repost_of="c1",
+             description="current relisting JD")
     resp = _post(client, "/api/decision", {"job_url": "r1", "action": "applied"}).get_json()
     assert resp["ok"] is True
     assert set(resp["affected"]) == {"c1", "r1"}
+    assert resp["materials"]["jd_snapshot"] is not None
     rows = {r["job_url"]: r for r in seed.execute("SELECT * FROM jobs").fetchall()}
     assert rows["c1"]["app_status"] == "applied" and rows["r1"]["app_status"] == "applied"
+    assert seed.execute(
+        "SELECT COUNT(*) FROM application_materials WHERE kind='jd_snapshot'"
+    ).fetchone()[0] == 1
+    prep = client.get("/api/prep?job_url=r1").get_json()["text"]
+    assert "Posting applied through: r1" in prep
+    assert "current relisting JD" in prep and "older canonical JD" not in prep
 
 
 def test_decision_undo_app_clears_chain(client, seed):
@@ -370,6 +384,77 @@ def test_decision_applied_with_resume_lands_chainwide(client, seed):
     assert resp["ok"] is True
     row = seed.execute("SELECT resume_variant FROM jobs WHERE job_url='r1'").fetchone()
     assert row["resume_variant"] == "variant-C"
+
+
+# --------------------------------------------------------------- /api/materials
+
+def test_material_upload_packet_download_and_prep_context(client, seed):
+    make_job(seed, job_url="c1", title="AI PM", company="Acme",
+             description="Own the exact production AI roadmap.",
+             app_status="applied", status_date="2026-08-01")
+    # Existing applied rows can predate the feature; explicitly applying again backfills the
+    # frozen JD without duplicating the decision semantics.
+    _post(client, "/api/decision", {"job_url": "c1", "action": "applied"})
+    payload = (b"Actual submitted resume actual@example.com 212-555-0100\n"
+               + b"Production systems evidence. " * 10)
+    response = client.post(
+        "/api/materials",
+        data={"job_url": "c1", "kind": "resume",
+              "file": (BytesIO(payload), "actual-resume.txt")},
+        content_type="multipart/form-data",
+    )
+    got = response.get_json()
+    assert response.status_code == 200 and got["ok"] is True
+    assert got["item"]["ats_status"] == "ok"
+    assert got["materials"]["resume"]["name"] == "actual-resume.txt"
+
+    card = client.get("/api/jobs?view=applied").get_json()[0]
+    assert card["materials"]["jd_snapshot"] is not None
+    assert card["materials"]["resume"]["sha256"] == got["item"]["sha256"]
+    download = client.get(
+        f"/api/materials/{got['item']['id']}/download?job_url=c1"
+    )
+    assert download.status_code == 200 and download.data == payload
+    download.close()
+
+    _post(client, "/api/event",
+          {"job_url": "c1", "type": "interview", "note": "prepare roadmap story"})
+    prep = client.get("/api/prep?job_url=c1").get_json()
+    assert prep["ok"] is True
+    assert prep["partial"] is False
+    assert "Own the exact production AI roadmap." in prep["text"]
+    assert "Actual submitted resume" in prep["text"]
+    assert "prepare roadmap story" in prep["text"]
+
+    stored_path = seed.execute(
+        "SELECT stored_path FROM material_objects WHERE sha256=?",
+        (got["item"]["sha256"],),
+    ).fetchone()[0]
+    material_cfg = {"settings": {
+        "db_path": seed.execute("PRAGMA database_list").fetchone()[2],
+    }}
+    (materials.material_root(material_cfg) / stored_path).unlink()
+    card = client.get("/api/jobs?view=applied").get_json()[0]
+    assert card["materials"]["resume"]["storage_status"] == "missing"
+    partial = client.get("/api/prep?job_url=c1").get_json()
+    assert partial["partial"] is True
+    assert any("resume file is missing" in warning for warning in partial["warnings"])
+
+
+def test_material_upload_requires_applied_chain_and_same_origin(client, seed):
+    make_job(seed, job_url="c1")
+    data = {"job_url": "c1", "kind": "resume",
+            "file": (BytesIO(b"text"), "resume.txt")}
+    response = client.post("/api/materials", data=data, content_type="multipart/form-data")
+    assert response.status_code == 400 and "applied" in response.get_json()["message"]
+
+    response = client.post(
+        "/api/materials",
+        data={"job_url": "c1", "kind": "resume",
+              "file": (BytesIO(b"text"), "resume.txt")},
+        content_type="multipart/form-data", headers={"Origin": "http://evil.example"},
+    )
+    assert response.status_code == 403
 
 
 # ----------------------------------------------------------------- /api/event

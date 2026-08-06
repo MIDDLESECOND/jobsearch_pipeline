@@ -36,6 +36,7 @@ jobs.db
 *.db-journal
 logs/
 reports/
+application_materials/
 # Validation-script run outputs (real postings + personal eval notes) — every
 # script under tests/validation/ writes into results/, never the repo root
 tests/validation/results/

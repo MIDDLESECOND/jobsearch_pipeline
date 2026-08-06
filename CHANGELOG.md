@@ -7,6 +7,39 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-05 — Chain-scoped application packet evidence
+
+### Why
+
+The free-text `resume_variant` label could not establish which document was actually submitted,
+and the mutable posting row could not reliably reconstruct the JD seen at application time.
+
+### Changes (schema/workflow only; evaluation judgment unchanged)
+
+- Added content-addressed `material_objects` and append-only `application_materials` tables.
+  Material links use canonical-at-write/current-chain reads, matching event-history behavior
+  across duplicate merges and unlinks. Document bytes and JD snapshots stay in the local object
+  store; SQLite keeps metadata/relations rather than a second copy of extracted document text.
+- Marking a role applied now freezes the interaction posting's stored JD (including a relisting's
+  own text rather than its canonical's potentially older text). The local UI accepts the actual
+  resume and cover letter, deduplicates bytes by SHA-256, and exposes the submitted packet on
+  Applied cards. Packet links retain that interaction URL separately from chain ownership; Prep
+  Context uses the same interaction posting for its heading and URL. In addition,
+  cached checksum verification makes missing/corrupt objects explicit on cards and prep output.
+  Downloads always rehash at the trust boundary, while unreadable document extraction marks Prep
+  Context partial instead of claiming the complete submitted packet was copied.
+- Added PDF/DOCX/text extraction, explicit PDF text-layer/contact checks, and a conservative
+  reading-order fragmentation heuristic. The UI calls a clean result "Basic checks passed," not
+  ATS certification. Uploaded files remain local and gitignored.
+- Added a recent interview-prep Action Center queue and clipboard context assembled from the
+  frozen JD, submitted documents, and prior events/notes. It does not send or mutate state.
+- Documented `jobs.db` plus its adjacent `application_materials/` object store as one quiesced
+  backup/restore unit; either part alone is incomplete application evidence.
+
+### Explicitly unchanged
+
+Posting gates, scores, verdicts, bucket routing, fetch/eval stage order, and historical decisions.
+
 ## 2026-08-03 — Career-strategy alignment: production eval disambiguation and non-scoring capital note
 
 ### Why

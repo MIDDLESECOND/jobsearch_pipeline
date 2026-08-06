@@ -5,6 +5,7 @@ planned chain.py extraction is safe.
 """
 
 import chain
+import materials
 import pipeline
 from conftest import make_job, job_status
 
@@ -48,13 +49,19 @@ def test_decision_sig_distinguishes_applied_from_passed(conn):
 # ----- decision propagation across a chain (cmd_mark) --------------------------
 
 def test_cmd_mark_propagates_across_chain(conn):
-    make_job(conn, job_url="c")
-    make_job(conn, job_url="r1", repost_of="c")
+    make_job(conn, job_url="c", description="older canonical JD")
+    make_job(conn, job_url="r1", repost_of="c", description="current relisting JD")
     # Mark the RELISTING; the decision must land on the canonical and the sibling too.
     pipeline.cmd_mark(conn, "r1", "applied")
     rows = {r["job_url"]: r["app_status"]
             for r in conn.execute("SELECT job_url, app_status FROM jobs")}
     assert rows == {"c": "applied", "r1": "applied"}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM application_materials WHERE kind='jd_snapshot'"
+    ).fetchone()[0] == 1
+    relisting = conn.execute("SELECT * FROM jobs WHERE job_url='r1'").fetchone()
+    text = materials.prep_context(conn, relisting)
+    assert "current relisting JD" in text and "older canonical JD" not in text
 
 
 def test_cmd_mark_undo_clears_whole_chain(conn):

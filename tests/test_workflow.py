@@ -105,11 +105,12 @@ def test_action_center_returns_bounded_disjoint_work_queues(conn):
         conn, today=date(2026, 8, 5), fresh_days=3, followup_days=7, limit=10
     )
     by_id = {s["id"]: s for s in sections}
-    assert set(by_id) == {"fresh_strong", "recruiter_route", "followups_due",
-                          "needs_attention"}
+    assert set(by_id) == {"fresh_strong", "recruiter_route", "interview_prep",
+                          "followups_due", "needs_attention"}
     assert [r["job_url"] for r in by_id["fresh_strong"]["rows"]] == ["cold"]
     assert [r["job_url"] for r in by_id["recruiter_route"]["rows"]] == ["route"]
     assert [r["job_url"] for r in by_id["followups_due"]["rows"]] == ["due"]
+    assert [r["job_url"] for r in by_id["interview_prep"]["rows"]] == ["answered"]
     assert {r["job_url"] for r in by_id["needs_attention"]["rows"]} == {"err", "manual"}
     assert all(s["total"] == len(s["rows"]) for s in sections)
 
@@ -141,6 +142,22 @@ def test_each_action_section_has_a_paged_view(conn):
     )
     assert page["total"] == 2 and page["pages"] == 2
     assert page["title"] == "Fresh strong matches"
+
+
+def test_interview_prep_queue_is_recent_chain_scoped_and_terminal_outcomes_leave(conn):
+    make_job(conn, job_url="recent", app_status="applied", status_date="2026-07-20",
+             outcome_status="interview", outcome_date="2026-08-04")
+    make_job(conn, job_url="recent-relist", repost_of="recent", app_status="applied",
+             status_date="2026-07-20", outcome_status="interview", outcome_date="2026-08-04")
+    make_job(conn, job_url="old", app_status="applied", status_date="2026-06-01",
+             outcome_status="recruiter_screen", outcome_date="2026-07-01")
+    make_job(conn, job_url="finished", app_status="applied", status_date="2026-07-20",
+             outcome_status="offer", outcome_date="2026-08-04")
+
+    page = workflow.query_action_page(
+        conn, "interview_prep", page=1, page_size=20, today=date(2026, 8, 5)
+    )
+    assert [row["job_url"] for row in page["rows"]] == ["recent"]
 
 
 def test_page_arguments_are_bounded(conn):

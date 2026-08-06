@@ -38,10 +38,13 @@ re-export hub):
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
   imports `report`/`chain`/`states`, performs no mutations, and keeps dashboard-query logic
   out of both the decision service and Flask routes.
+- `funnel.py` — chain-scoped application-funnel aggregation over current applied decisions
+  and append-only outcome history. It imports only `states`, performs no mutations, maps
+  events from former canonicals to the current chain, and owns conversion definitions.
 - `pipeline.py` — the CLI/orchestrator: the `run` stage order, thin `cmd_*` wrappers over the
   chain service cores, and `main`.
 - `app.py` (Flask) + `templates/index.html` — the local triage UI (a thin HTTP/presentation
-  layer over `workflow` reads and the `chain` service cores).
+  layer over `workflow`/`funnel` reads and the `chain` service cores).
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach

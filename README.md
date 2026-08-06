@@ -70,6 +70,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
 | `report.py` | the daily markdown report |
 | `workflow.py` | bounded/filterable UI queries and Action Center queues |
+| `funnel.py` | chain-scoped application funnel and channel conversion reads |
 | `pipeline.py` | CLI orchestrator (stage order lives here) |
 | `app.py` + `templates/` | the local Flask triage UI |
 
@@ -199,7 +200,12 @@ Each card has **Applied** / **Passed** / **Reject** buttons (Reject has a gate d
 click does exactly what the matching CLI command does — including repost-chain propagation. The
 opening **Action Center** groups fresh strong matches, recruiter-route candidates, applications
 due for follow-up, and evaluation errors. Other tabs switch between **Today** (with a date picker),
-the undecided **Backlog**, and your **Applied** / **Passed** history; **Undo** reverses a decision.
+the undecided **Backlog**, your **Applied** / **Passed** history, and **Funnel**; **Undo** reverses
+a decision. Funnel ranges cover 30/90/180/365 calendar days or all current applications. It counts
+one role per repost chain, shows applied → employer response → interview → offer conversion, and
+breaks the same stages down by direct / agency / referral / unrecorded channel. An offer implies
+the earlier interview and response stages; ghosted does not count as an employer response. Counts
+and denominators stay visible because these personal samples are descriptive, not predictive.
 Follow-ups use a 7-day cadence: click **Follow-up sent** to record the contact, move the next
 reminder seven days out, and retire the reminder after two sends. This history does not claim
 that the employer responded and does not change the role's outcome.

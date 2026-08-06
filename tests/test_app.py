@@ -70,10 +70,39 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert page.status_code == 200
     html = page.get_data(as_text=True)
     assert 'data-view="action"' in html
+    assert 'data-view="funnel"' in html
     assert 'id="query"' in html
     assert 'id="pageLabel"' in html
     assert 'View all' in html
     assert 'filtersEl.classList.add("queue-only")' in html
+
+
+def test_funnel_api_returns_chain_scoped_snapshot_and_validates_range(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="root", company="Funnel Co", app_status="applied",
+             status_date=today, channel="direct")
+    make_job(seed, job_url="relist", company="Funnel Co", repost_of="root",
+             app_status="applied", status_date=today, channel="direct")
+    got = client.get("/api/funnel?days=30").get_json()
+    assert got["range"]["days"] == 30
+    assert got["stages"][0]["id"] == "applied"
+    assert got["stages"][0]["count"] == 1
+    assert got["by_channel"][0]["id"] == "direct"
+
+    assert client.get("/api/funnel?days=all").status_code == 200
+    assert client.get("/api/funnel?days=0").status_code == 400
+    assert client.get("/api/funnel?days=recent").status_code == 400
+
+
+def test_funnel_config_error_is_not_misreported_as_bad_query(client, monkeypatch):
+    monkeypatch.setitem(webapp.app.config, "PROPAGATE_EXCEPTIONS", False)
+
+    def bad_config():
+        raise ValueError("invalid local config")
+
+    monkeypatch.setattr(webapp, "load_config", bad_config)
+    response = client.get("/api/funnel?days=90")
+    assert response.status_code == 500
 
 
 # ------------------------------------------------------------------ /api/jobs

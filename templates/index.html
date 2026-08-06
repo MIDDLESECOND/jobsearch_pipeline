@@ -100,6 +100,36 @@
   button.record { background: #0891b2; color: #fff; border-color: #0891b2; }
   .history { font-size: .8rem; color: #445; background: #f8fafc; border: 1px solid #e3e6ea;
              border-radius: 6px; padding: .4rem .6rem; margin-top: .5rem; }
+  #funnelControls { align-items: center; gap: .5rem; }
+  #funnelControls select { padding: .35rem .5rem; border: 1px solid #d0d4da; border-radius: 6px;
+                           background: #fff; }
+  .funnel-wrap { max-width: 1050px; margin: 0 auto; }
+  .funnel-intro { display: flex; justify-content: space-between; gap: 1rem; align-items: start;
+                  margin-bottom: 1rem; }
+  .funnel-intro h2, .funnel-panel h2 { margin: 0 0 .25rem; }
+  .funnel-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+  .funnel-stage, .funnel-panel { background: #fff; border: 1px solid #e3e6ea;
+                                 border-radius: 9px; padding: .9rem; }
+  .funnel-stage .stage-top { display: flex; justify-content: space-between; gap: .5rem;
+                             align-items: baseline; }
+  .funnel-stage .stage-count { font-size: 1.5rem; font-weight: 700; }
+  .funnel-track { height: .55rem; margin: .65rem 0 .45rem; background: #eef2f7;
+                  border-radius: 999px; overflow: hidden; }
+  .funnel-fill { height: 100%; background: #2563eb; border-radius: inherit; }
+  .funnel-panels { display: grid; grid-template-columns: 1fr 1.6fr; gap: .75rem;
+                   margin-top: .75rem; }
+  .outcome-list { display: grid; grid-template-columns: 1fr auto; gap: .45rem .8rem;
+                  margin-top: .75rem; }
+  .channel-table { width: 100%; border-collapse: collapse; margin-top: .6rem; font-size: .86rem; }
+  .channel-table th, .channel-table td { padding: .45rem .35rem; text-align: right;
+                                         border-bottom: 1px solid #edf0f3; }
+  .channel-table th:first-child, .channel-table td:first-child { text-align: left; }
+  .funnel-note { margin-top: .75rem; color: #667085; font-size: .8rem; line-height: 1.45; }
+  @media (max-width: 800px) {
+    .funnel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .funnel-panels { grid-template-columns: 1fr; }
+    .funnel-intro { display: block; }
+  }
 </style>
 </head>
 <body>
@@ -107,6 +137,7 @@
   <h1>Job Pipeline</h1>
   <div class="tabs">
     <button class="tab active" data-view="action">Action Center</button>
+    <button class="tab" data-view="funnel">Funnel</button>
     <button class="tab" data-view="today">Today</button>
     <button class="tab" data-view="backlog">Backlog</button>
     <button class="tab" data-view="applied">Applied</button>
@@ -146,6 +177,16 @@
       <span id="pageLabel"></span>
       <button id="nextPage" type="button">Next →</button>
     </div>
+  </div>
+  <div id="funnelControls" style="display:none">
+    <label for="funnelRange">Applications from</label>
+    <select id="funnelRange">
+      <option value="30">last 30 calendar days</option>
+      <option value="90" selected>last 90 calendar days</option>
+      <option value="180">last 180 calendar days</option>
+      <option value="365">last 365 calendar days</option>
+      <option value="all">all current applications</option>
+    </select>
   </div>
   <div id="linkbar"></div>
 </header>
@@ -190,6 +231,7 @@ let pageMeta = {total: 0, pages: 0, page: 1, page_size: pageSize};
 let actionSections = [];
 let actionQueue = null;
 let actionQueueTitle = "";
+let funnelData = null;
 // localStorage access can throw outright (browser set to block all site data) — a top-level
 // throw would kill this whole script block, so route through a wrapper that degrades to
 // "works, just doesn't persist".
@@ -239,6 +281,8 @@ const list = document.getElementById("list");
 const countEl = document.getElementById("count");
 const toggleDecidedBtn = document.getElementById("toggleDecided");
 const filtersEl = document.getElementById("filters");
+const funnelControls = document.getElementById("funnelControls");
+const funnelRange = document.getElementById("funnelRange");
 const queryInput = document.getElementById("query");
 const verdictFilter = document.getElementById("verdictFilter");
 const sourceFilter = document.getElementById("sourceFilter");
@@ -265,10 +309,12 @@ tabs.forEach(t => t.addEventListener("click", () => {
   page = 1;
   dateInput.style.display = view === "today" ? "" : "none";
   filtersEl.classList.remove("queue-only");
-  filtersEl.style.display = view === "action" ? "none" : "flex";
+  filtersEl.style.display = ["action", "funnel"].includes(view) ? "none" : "flex";
+  funnelControls.style.display = view === "funnel" ? "flex" : "none";
   load();
 }));
 dateInput.addEventListener("change", () => { if (view === "today") { page = 1; load(); } });
+funnelRange.addEventListener("change", () => { if (view === "funnel") load(); });
 
 let filterTimer = null;
 function filtersChanged() {
@@ -1065,6 +1111,77 @@ function renderActionCenter() {
   }
 }
 
+function rateLabel(value) { return value == null ? "—" : `${Number(value).toFixed(1)}%`; }
+
+function renderFunnel() {
+  toggleDecidedBtn.style.display = "none";
+  list.innerHTML = "";
+  const data = funnelData || {};
+  const stages = data.stages || [];
+  const applications = data.quality?.applications || 0;
+  countEl.textContent = `${applications} application${applications === 1 ? "" : "s"}`;
+
+  const wrap = document.createElement("div");
+  wrap.className = "funnel-wrap";
+  const intro = document.createElement("div");
+  intro.className = "funnel-intro";
+  intro.innerHTML = `<div><h2>Application funnel</h2><div class="meta">${esc(data.range?.label || "")}`
+    + `${data.range?.start ? ` · ${esc(data.range.start)} through ${esc(data.range.end)}` : ""}</div></div>`
+    + `<div class="meta">Current applied chains · reposts count once</div>`;
+  wrap.appendChild(intro);
+
+  const stageGrid = document.createElement("div");
+  stageGrid.className = "funnel-grid";
+  stages.forEach((stage, index) => {
+    const width = applications ? Math.max(0, Math.min(100, stage.count * 100 / applications)) : 0;
+    const el = document.createElement("div");
+    el.className = "funnel-stage";
+    const conversion = index === 0 ? "population"
+      : `${rateLabel(stage.rate_from_previous)} from previous · ${rateLabel(stage.rate_from_applied)} overall`;
+    el.innerHTML = `<div class="stage-top"><b>${esc(stage.label)}</b>`
+      + `<span class="stage-count">${Number(stage.count)}</span></div>`
+      + `<div class="funnel-track"><div class="funnel-fill" style="width:${width}%"></div></div>`
+      + `<div class="meta">${conversion}</div>`;
+    stageGrid.appendChild(el);
+  });
+  wrap.appendChild(stageGrid);
+
+  const panels = document.createElement("div");
+  panels.className = "funnel-panels";
+  const outcomes = document.createElement("section");
+  outcomes.className = "funnel-panel";
+  outcomes.innerHTML = `<h2>Current outcome</h2><div class="meta">Latest lifecycle event per application</div>`
+    + `<div class="outcome-list">${(data.outcomes || []).map(o =>
+        `<span>${esc(o.label)}</span><b>${Number(o.count)}</b>`).join("")}</div>`;
+  panels.appendChild(outcomes);
+
+  const channels = document.createElement("section");
+  channels.className = "funnel-panel";
+  channels.innerHTML = `<h2>By application channel</h2>`
+    + `<div class="meta">Rates use each row's applied count as denominator</div>`
+    + `<table class="channel-table"><thead><tr><th>Channel</th><th>Applied</th>`
+    + `<th>Response</th><th>Interview</th><th>Offer</th></tr></thead><tbody>`
+    + `${(data.by_channel || []).map(row => `<tr><td>${esc(row.label)}</td>`
+        + `<td>${Number(row.applied)}</td>`
+        + `<td>${Number(row.responses)} · ${rateLabel(row.response_rate)}</td>`
+        + `<td>${Number(row.interviews)} · ${rateLabel(row.interview_rate)}</td>`
+        + `<td>${Number(row.offers)} · ${rateLabel(row.offer_rate)}</td></tr>`).join("")}`
+    + `</tbody></table>`
+    + `<div class="funnel-note">Channel recorded for ${Number(data.quality?.channel_recorded || 0)}`
+    + `/${applications}; resume variant recorded for ${Number(data.quality?.resume_recorded || 0)}/${applications}. `
+    + `Small samples are descriptive, not predictive.</div>`;
+  panels.appendChild(channels);
+  wrap.appendChild(panels);
+
+  const definitions = data.definitions || {};
+  const note = document.createElement("div");
+  note.className = "funnel-note";
+  note.textContent = [definitions.population, definitions.response, definitions.inference]
+    .filter(Boolean).join(" ");
+  wrap.appendChild(note);
+  list.appendChild(wrap);
+}
+
 function openActionSection(section) {
   view = "action_queue";
   actionQueue = section.id;
@@ -1082,6 +1199,7 @@ function render() {
   // longer previous page into a shorter result set (k would otherwise address no card).
   keyIndex = -1;
   if (view === "action") { renderActionCenter(); return; }
+  if (view === "funnel") { renderFunnel(); return; }
   const visible = jobsData.filter(j => !isHiddenDecided(j));
   const hidden = jobsData.length - visible.length;
   setCount(visible.length, hidden, pageMeta.total);
@@ -1117,11 +1235,15 @@ async function load() {
   toggleDecidedBtn.style.display = "none";
   jobsData = [];
   actionSections = [];
+  funnelData = null;
   countEl.textContent = "";
   list.innerHTML = `<div class="empty">Loading…</div>`;
   const params = new URLSearchParams();
   let url = "/api/actions";
-  if (view === "action_queue") {
+  if (view === "funnel") {
+    params.set("days", funnelRange.value);
+    url = "/api/funnel?" + params;
+  } else if (view === "action_queue") {
     params.set("page", String(page));
     params.set("page_size", String(pageSize));
     url = "/api/actions/" + encodeURIComponent(actionQueue) + "?" + params;
@@ -1155,7 +1277,7 @@ async function load() {
     return false;
   }
   if (seq !== loadSeq) return false;  // a newer load() superseded this response — drop it
-  if (view !== "action" && payload.pages && page > payload.pages) {
+  if (!["action", "funnel"].includes(view) && payload.pages && page > payload.pages) {
     page = payload.pages;
     return load();
   }
@@ -1164,6 +1286,9 @@ async function load() {
     actionSections = payload.sections || [];
     jobsData = actionSections.flatMap(s => s.items);
     pageMeta = {total: jobsData.length, pages: 1, page: 1, page_size: jobsData.length};
+  } else if (view === "funnel") {
+    funnelData = payload;
+    pageMeta = {total: payload.quality?.applications || 0, pages: 1, page: 1, page_size: 0};
   } else {
     jobsData = payload.items || [];
     pageMeta = payload;

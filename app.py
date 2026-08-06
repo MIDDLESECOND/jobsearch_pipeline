@@ -4,7 +4,8 @@ Local web UI for triaging job postings — a faster alternative to the
 `applied` / `passed` / `reject` CLI commands.
 
 Launched via `python pipeline.py ui`. It is a thin Flask layer over workflow.py's bounded
-read models, the chain-service cores, and the existing `jobs.db`: `mark_posting` /
+work queues, funnel.py's chain-level conversion snapshot, the chain-service cores, and the
+existing `jobs.db`: `mark_posting` /
 `reject_posting` (so repost-chain
 propagation and the status lift behave exactly like the CLI wrappers in pipeline.py),
 and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
@@ -28,6 +29,7 @@ from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    dupe_unlink, record_event, undo_event, chain_events, set_resume,
                    set_channel)
 from core import connect_db, get_db, load_config
+from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
@@ -311,6 +313,24 @@ def api_action_section(section_id):
         })
     finally:
         conn.close()
+
+
+@app.route("/api/funnel")
+def api_funnel():
+    """One chain-scoped application funnel; ``days=all`` disables the date cutoff."""
+    try:
+        days = parse_funnel_days(
+            request.args.get("days", str(DEFAULT_FUNNEL_DAYS))
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        result = funnel_snapshot(conn, days=days)
+    finally:
+        conn.close()
+    return jsonify(result)
 
 
 @app.route("/api/clip")

@@ -10,6 +10,7 @@ from datetime import date
 import chain
 from conftest import make_job
 from states import EVENT_FOLLOWUP_SENT
+import tasks
 import workflow
 
 
@@ -140,13 +141,45 @@ def test_action_center_returns_bounded_disjoint_work_queues(conn):
     )
     by_id = {s["id"]: s for s in sections}
     assert set(by_id) == {"fresh_strong", "recruiter_route", "interview_prep",
-                          "followups_due", "needs_attention"}
+                          "tasks_due", "followups_due", "needs_attention"}
     assert [r["job_url"] for r in by_id["fresh_strong"]["rows"]] == ["cold"]
     assert [r["job_url"] for r in by_id["recruiter_route"]["rows"]] == ["route"]
     assert [r["job_url"] for r in by_id["followups_due"]["rows"]] == ["due"]
     assert [r["job_url"] for r in by_id["interview_prep"]["rows"]] == ["answered"]
     assert {r["job_url"] for r in by_id["needs_attention"]["rows"]} == {"err", "manual"}
     assert all(s["total"] == len(s["rows"]) for s in sections)
+
+
+def test_tasks_due_queue_is_chain_scoped_paged_and_closes_immediately(conn):
+    root = make_job(conn, job_url="root")
+    relisting = make_job(conn, job_url="relisting", repost_of="root")
+    later = make_job(conn, job_url="later")
+    second = make_job(conn, job_url="second")
+    due = tasks.add_task(
+        conn, relisting, title="Prepare questions", due_date="2026-08-04")["task"]
+    tasks.add_task(conn, root, title="Send materials", due_date="2026-08-05")
+    tasks.add_task(conn, later, title="Future task", due_date="2026-08-06")
+    tasks.add_task(conn, second, title="Second role", due_date="2026-08-05")
+
+    page = workflow.query_action_page(
+        conn, "tasks_due", page=1, page_size=1, today=date(2026, 8, 5))
+    assert page["total"] == 2 and page["pages"] == 2
+    assert page["rows"][0]["job_url"] == "root"
+    assert page["rows"][0]["next_task_due"] == "2026-08-04"
+
+    tasks.change_task(
+        conn, root, due["id"], "complete", expected_version=due["version"])
+    still_due = workflow.query_action_page(
+        conn, "tasks_due", page=1, page_size=20, today=date(2026, 8, 5))
+    assert [row["job_url"] for row in still_due["rows"]] == ["root", "second"]
+    remaining = tasks.chain_tasks(conn, root)[0]
+    tasks.change_task(
+        conn, root, remaining["id"], "snooze",
+        expected_version=remaining["version"], due_date="2026-08-08",
+    )
+    after = workflow.query_action_page(
+        conn, "tasks_due", page=1, page_size=20, today=date(2026, 8, 5))
+    assert [row["job_url"] for row in after["rows"]] == ["second"]
 
 
 def test_followup_queue_advances_cadence_and_stops_after_two(conn):

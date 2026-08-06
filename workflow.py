@@ -16,6 +16,7 @@ from states import (STATUS_ERROR, STATUS_EVALUATED, STATUS_NEEDS_MANUAL,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED,
                     EVENT_FOLLOWUP_SENT, EVENT_INTERVIEW, EVENT_RECRUITER_SCREEN,
                     VERDICT_PASS, VERDICT_RECRUITER_ONLY)
+from tasks import TASK_OPEN
 
 
 VALID_VIEWS = ("today", "backlog", "applied", "passed")
@@ -24,7 +25,7 @@ MAX_PAGE_SIZE = 200
 DEFAULT_ACTION_LIMIT = 10
 FOLLOWUP_MAX = 2
 ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "interview_prep",
-                      "followups_due", "needs_attention")
+                      "tasks_due", "followups_due", "needs_attention")
 _TRIAGE_VERDICTS = (VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 _UNDECIDED_BACKLOG_CTE = (
     "WITH decided_roots(root) AS ("
@@ -292,6 +293,33 @@ def _attention_page(conn, *, page, page_size):
     }
 
 
+def _tasks_due_page(conn, *, page, page_size, today):
+    """One canonical card per chain with at least one open task due today or earlier."""
+    joins = (
+        " FROM jobs root JOIN jobs owner "
+        "ON COALESCE(owner.repost_of,owner.job_url)=root.job_url "
+        "JOIN job_tasks t ON t.job_url=owner.job_url "
+        "WHERE root.repost_of IS NULL AND t.status=? AND t.due_date<=?"
+    )
+    params = (TASK_OPEN, today.isoformat())
+    total = conn.execute(
+        "SELECT COUNT(DISTINCT root.job_url)" + joins, params
+    ).fetchone()[0]
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        "SELECT root.*,MIN(t.due_date) AS next_task_due" + joins
+        + " GROUP BY root.job_url ORDER BY next_task_due,root.job_url LIMIT ? OFFSET ?",
+        (*params, page_size, offset),
+    ).fetchall()
+    return {
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size) if total else 0,
+    }
+
+
 def _interview_prep_page(conn, *, page, page_size, today, prep_days=14):
     """Recent recruiter responses that should be prepared from the submitted packet.
 
@@ -359,6 +387,12 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         )
         title = "Interview prep"
         description = "Screens or interviews recorded in the last 14 days"
+    elif section_id == "tasks_due":
+        result = _tasks_due_page(
+            conn, page=page, page_size=page_size, today=today,
+        )
+        title = "Next actions due"
+        description = "Open role tasks due today or overdue"
     elif section_id == "followups_due":
         result = _followup_page(
             conn, page=page, page_size=page_size, today=today,

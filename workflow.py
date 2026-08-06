@@ -82,15 +82,20 @@ def _where(view, for_date, filters, today):
     if verdict:
         if verdict not in _TRIAGE_VERDICTS:
             raise ValueError(f"verdict must be one of {list(_TRIAGE_VERDICTS)}")
-        clauses.append("j.verdict=?")
-        params.append(verdict)
+        # Backlog rows are evaluated rows, so their own judgment is the displayed one.
+        # Other views can contain verdict-less reposts whose card inherits the chain's
+        # judgment; those filters are applied after effective_decisions below.
+        if view == "backlog":
+            clauses.append("j.verdict=?")
+            params.append(verdict)
 
     min_score = filters.get("min_score")
     if min_score is not None:
         if isinstance(min_score, bool) or not isinstance(min_score, int) or not 0 <= min_score <= 18:
             raise ValueError("min_score must be an integer from 0 to 18")
-        clauses.append("j.fit_score>=?")
-        params.append(min_score)
+        if view == "backlog":
+            clauses.append("j.fit_score>=?")
+            params.append(min_score)
 
     days = filters.get("days")
     if days is not None:
@@ -113,6 +118,23 @@ def _fetch_selected(conn, urls):
     rows = conn.execute(f"SELECT * FROM jobs WHERE job_url IN ({qs})", tuple(urls)).fetchall()
     by_url = {r["job_url"]: r for r in rows}
     return [by_url[u] for u in urls]
+
+
+def _matches_chain_filters(row, decision, filters):
+    """Apply verdict/score filters to the same values the card presents.
+
+    A skipped repost deliberately keeps its own verdict and score NULL.  Its usable
+    judgment lives on another current chain member, so filtering the physical row columns
+    would hide a card that visibly shows the inherited judgment.
+    """
+    verdict = str(filters.get("verdict") or "").strip()
+    shown_verdict = row["verdict"] or decision["chain_verdict"]
+    if verdict and shown_verdict != verdict:
+        return False
+    min_score = filters.get("min_score")
+    shown_score = (row["fit_score"] if row["fit_score"] is not None
+                   else decision["chain_fit_score"])
+    return min_score is None or (shown_score is not None and shown_score >= min_score)
 
 
 def query_job_page(conn, view, *, for_date=None, page=1, page_size=DEFAULT_PAGE_SIZE,
@@ -152,19 +174,37 @@ def query_job_page(conn, view, *, for_date=None, page=1, page_size=DEFAULT_PAGE_
         urls = [r["job_url"] for r in ordered[offset:offset + page_size]]
         rows = _fetch_selected(conn, urls)
     elif view in ("applied", "passed"):
-        total = conn.execute(
-            "SELECT COUNT(*) FROM jobs j WHERE " + where, tuple(params)
-        ).fetchone()[0]
-        rows = conn.execute(
-            "SELECT j.* FROM jobs j WHERE " + where
-            + " ORDER BY j.status_date DESC,j.fit_score DESC,j.job_url LIMIT ? OFFSET ?",
-            (*params, page_size, offset),
-        ).fetchall()
+        chain_filtered = bool(str(filters.get("verdict") or "").strip()
+                              or filters.get("min_score") is not None)
+        if chain_filtered:
+            # Post-filter before slicing so total/pages describe the visible result rather
+            # than the larger SQL candidate set.
+            all_rows = conn.execute(
+                "SELECT j.* FROM jobs j WHERE " + where
+                + " ORDER BY j.status_date DESC,j.fit_score DESC,j.job_url",
+                tuple(params),
+            ).fetchall()
+            decisions = effective_decisions(conn, all_rows)
+            all_rows = [row for row in all_rows if _matches_chain_filters(
+                row, decisions[row["job_url"]], filters)]
+            total = len(all_rows)
+            rows = all_rows[offset:offset + page_size]
+        else:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM jobs j WHERE " + where, tuple(params)
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT j.* FROM jobs j WHERE " + where
+                + " ORDER BY j.status_date DESC,j.fit_score DESC,j.job_url LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
     else:
         # A single day is naturally bounded, and eval-skipped rows need their chain fit to
         # preserve report.recency_sort_key's established ordering contract.
         all_rows = conn.execute("SELECT j.* FROM jobs j WHERE " + where, tuple(params)).fetchall()
         decisions = effective_decisions(conn, all_rows)
+        all_rows = [row for row in all_rows if _matches_chain_filters(
+            row, decisions[row["job_url"]], filters)]
 
         def key(r):
             fit = r["fit_score"]

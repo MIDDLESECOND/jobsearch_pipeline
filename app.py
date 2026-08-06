@@ -420,8 +420,9 @@ def api_materials():
             item = attach_upload(conn, row, kind, upload.filename, data, cfg)
         except ValueError as exc:
             return jsonify({"ok": False, "message": str(exc)}), 400
+        current = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
         return jsonify({"ok": True, "message": f"attached {item['name']}",
-                        "item": item, "materials": chain_materials(conn, row)})
+                        "item": item, "materials": chain_materials(conn, current)})
     finally:
         conn.close()
 

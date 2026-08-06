@@ -84,6 +84,40 @@ def test_applied_page_keeps_status_date_order_and_search(conn):
     assert page["total"] == 2
 
 
+def test_today_and_applied_filters_use_the_card_inherited_chain_judgment(conn):
+    make_job(
+        conn, job_url="canonical", verdict="PASS", fit_score=17,
+        first_seen="2026-08-01T09:00:00", app_status="applied",
+        status_date="2026-08-04",
+    )
+    make_job(
+        conn, job_url="relisting", repost_of="canonical", verdict=None,
+        fit_score=None, status="repost_evaluated",
+        first_seen="2026-08-05T09:00:00", app_status="applied",
+        status_date="2026-08-05",
+    )
+    make_job(
+        conn, job_url="other", verdict="RECRUITER_ONLY", fit_score=9,
+        first_seen="2026-08-05T10:00:00", app_status="applied",
+        status_date="2026-08-05",
+    )
+    filters = {"verdict": "PASS", "min_score": 10}
+
+    today = workflow.query_job_page(
+        conn, "today", for_date="2026-08-05", page=1, page_size=20,
+        filters=filters, today=date(2026, 8, 5),
+    )
+    assert [row["job_url"] for row in today["rows"]] == ["relisting"]
+    assert today["total"] == 1 and today["pages"] == 1
+
+    applied = workflow.query_job_page(
+        conn, "applied", page=1, page_size=1, filters=filters,
+        today=date(2026, 8, 5),
+    )
+    assert [row["job_url"] for row in applied["rows"]] == ["relisting"]
+    assert applied["total"] == 2 and applied["pages"] == 2
+
+
 def test_action_center_returns_bounded_disjoint_work_queues(conn):
     make_job(conn, job_url="cold", verdict="PASS", fit_score=17,
              first_seen="2026-08-04T09:00:00")

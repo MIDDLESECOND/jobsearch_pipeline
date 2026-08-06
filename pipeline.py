@@ -158,10 +158,10 @@ def cmd_expired(conn, url, undo):
 
 def cmd_event(conn, url, event_type, event_date, note, undo):
     """CLI wrapper over chain.record_event / undo_event: track what happened after applying
-    (recruiter screen, interview rounds, offer, employer rejection, ghosted, withdrew — or a
-    bare `--type note`). The event lands on the chain's canonical and the derived outcome
-    propagates chain-wide; `--undo` deletes the chain's last recorded event. Prints the
-    chain's full timeline after each mutation so the state is always visible."""
+    (follow-up sent, recruiter screen, interview rounds, offer, employer rejection, ghosted,
+    withdrew — or a bare `--type note`). The event lands on the chain's canonical; outcome
+    events propagate the derived cache, while follow-up sent advances cadence only. `--undo`
+    deletes the chain's last recorded event and the full timeline is printed."""
     label = "event"
     m, err = resolve_posting(conn, url)
     if err:

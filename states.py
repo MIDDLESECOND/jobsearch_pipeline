@@ -84,8 +84,9 @@ GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requi
 # transitions — recording one requires the chain to be applied, and the LATEST one (by
 # event_date, insertion-order tiebreak) is cached chain-wide as jobs.outcome_status /
 # outcome_date (chain._recompute_outcome, the one cache writer). 'interview' is repeatable
-# (rounds). EVENT_NOTE is deliberately outside APP_EVENTS: it attaches free text to any
-# posting without asserting an application outcome, so it never sets the cache.
+# (rounds). EVENT_FOLLOWUP_SENT is applied-only history but deliberately outside APP_EVENTS:
+# sending a message advances follow-up cadence without claiming the employer responded.
+# EVENT_NOTE is outside APPLIED_ONLY_EVENTS: it attaches free text to any posting.
 # No schema CHECK on any of these — see the module docstring.
 EVENT_RECRUITER_SCREEN = "recruiter_screen"
 EVENT_INTERVIEW = "interview"
@@ -95,8 +96,10 @@ EVENT_GHOSTED = "ghosted"
 EVENT_WITHDREW = "withdrew"
 APP_EVENTS = (EVENT_RECRUITER_SCREEN, EVENT_INTERVIEW, EVENT_OFFER,
               EVENT_REJECTED_BY_EMPLOYER, EVENT_GHOSTED, EVENT_WITHDREW)
+EVENT_FOLLOWUP_SENT = "followup_sent"
+APPLIED_ONLY_EVENTS = APP_EVENTS + (EVENT_FOLLOWUP_SENT,)
 EVENT_NOTE = "note"
-ALL_EVENTS = APP_EVENTS + (EVENT_NOTE,)
+ALL_EVENTS = APPLIED_ONLY_EVENTS + (EVENT_NOTE,)
 
 # Application channel (jobs.channel): HOW the application went out — the conversion-analysis
 # axis (direct cold-apply vs staffing agency vs referral convert at very different rates, so

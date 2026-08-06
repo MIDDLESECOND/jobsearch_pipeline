@@ -8,7 +8,7 @@ This module owns everything about treating multiple postings as one role:
   * the repost *chain* abstraction — members, the user's effective decision across a
     chain, and propagation/reconcile (skip_decided_reposts),
   * the manual dupe-link cores (dupe_resolve / dupe_commit / dupe_unlink),
-  * the post-application outcome cores (record_event / undo_event / chain_events /
+  * the post-application tracking cores (record_event / undo_event / chain_events /
     set_resume / set_channel, plus _recompute_outcome — the one writer of the cached
     outcome_status/outcome_date columns).
 
@@ -24,7 +24,8 @@ import re
 import sys
 from datetime import date, datetime
 
-from states import (GATE_NAMES, APP_EVENTS, ALL_EVENTS, EVENT_NOTE, ALL_CHANNELS,
+from states import (GATE_NAMES, APP_EVENTS, APPLIED_ONLY_EVENTS, ALL_EVENTS, EVENT_NOTE,
+                    ALL_CHANNELS,
                     STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_FAVOR, sql_list)
 
@@ -468,7 +469,7 @@ def effective_decision(conn, row):
     Returns a dict (never None):
       app_status            'applied' | 'passed' | None  (applied outranks, chain-wide)
       status_date           date the surviving app_status was set, or None
-      outcome_status        the chain's post-application state: latest non-note app_events
+      outcome_status        the chain's post-application state: latest states.APP_EVENTS
                             type (the cache _recompute_outcome maintains), or None —
                             None on an applied chain means "no response yet" (the
                             follow-up bucket)
@@ -753,9 +754,9 @@ def mark_posting(conn, row, status, resume_variant=None, channel=None):
     verb = f"marked {status}" if status else "cleared status"
     msg = f"{verb}: {row['title']} — {row['company']}" + (f" ({stamp})" if status else "")
     if not status:
-        # Lifecycle events only: a notes-only history restores no outcome, so the
+        # Outcome events only: notes/follow-ups restore no outcome, so the
         # "re-applying restores it" promise must not be made for it.
-        kept = _count_events(conn, targets, exclude_notes=True)
+        kept = _count_events(conn, targets, outcomes_only=True)
         if kept:
             msg += f" — outcome history kept ({kept} event(s); re-applying restores it)"
     return True, msg, sorted(targets), exempt
@@ -787,13 +788,13 @@ def reject_posting(conn, row, gate, undo=False):
 
 # ------------------------------------------------------- outcome events
 #
-# Post-application lifecycle tracking: what happened AFTER 'applied' (screen, interview
-# rounds, offer, employer rejection, ghosted, withdrew) plus free-text notes. History lives
+# Post-application tracking: outcomes AFTER 'applied' (screen, interview rounds, offer,
+# employer rejection, ghosted, withdrew), sent follow-ups, and free-text notes. History lives
 # in the append-only `app_events` table (core._events_table_sql); the chain's CURRENT
 # outcome is denormalized onto every member as jobs.outcome_status/outcome_date — the same
-# cached-decision pattern as app_status, with _recompute_outcome as the ONE writer, so the
-# follow-up query ("applied N days ago, no response") stays a pure-SQL predicate:
-#   app_status='applied' AND outcome_status IS NULL AND status_date < cutoff
+# cached-decision pattern as app_status, with _recompute_outcome as the ONE writer. Follow-up
+# eligibility additionally derives cadence from `followup_sent` history in workflow.py; it is
+# never written into the outcome cache because sending a message is not an employer response.
 # An event row is written ONCE, keyed to the chain's canonical url AT WRITE TIME, and always
 # read chain-wide (via _chain_targets) — so a later dupe merge unions both sides' histories
 # with no data migration, and dupe_unlink leaves rows where they sit. Same
@@ -801,14 +802,19 @@ def reject_posting(conn, row, gate, undo=False):
 # app.api_event are thin wrappers; event vocabulary is enforced HERE against
 # states.ALL_EVENTS (no schema CHECK — see states.py's docstring).
 
-def _count_events(conn, member_urls, exclude_notes=False):
-    """Event count across a member-url set. `exclude_notes=True` counts only lifecycle
-    events — what an outcome recompute can actually act on — for messages that promise
-    restoration (a notes-only history restores no outcome)."""
+def _count_events(conn, member_urls, outcomes_only=False):
+    """Event count across a member-url set. ``outcomes_only`` counts only APP_EVENTS —
+    what an outcome recompute can act on — for messages that promise restoration.
+    Notes and sent follow-ups are history, but neither is an employer outcome."""
     urls = sorted(member_urls)
     qs = ",".join("?" * len(urls))
-    extra = " AND event_type != ?" if exclude_notes else ""
-    params = (*urls, EVENT_NOTE) if exclude_notes else tuple(urls)
+    if outcomes_only:
+        event_qs = ",".join("?" * len(APP_EVENTS))
+        extra = f" AND event_type IN ({event_qs})"
+        params = (*urls, *APP_EVENTS)
+    else:
+        extra = ""
+        params = tuple(urls)
     return conn.execute(
         f"SELECT COUNT(*) FROM app_events WHERE job_url IN ({qs}){extra}", params
     ).fetchone()[0]
@@ -817,7 +823,7 @@ def _count_events(conn, member_urls, exclude_notes=False):
 def _recompute_outcome(conn, canonical_url, members=None):
     """Re-derive the cached outcome columns for `canonical_url`'s whole chain from its stored
     events — the ONE writer of jobs.outcome_status/outcome_date. The cache is a pure function
-    of (is the chain applied?, the chain's events): the latest non-note event wins (event_date
+    of (is the chain applied?, the chain's events): the latest APP_EVENTS member wins (event_date
     order, insertion-order tiebreak for same-day events), and a chain that doesn't read
     'applied' gets NULLs — an outcome only means something for an application, and the events
     themselves are kept so a re-apply restores it. Caller commits (service-write convention,
@@ -837,10 +843,12 @@ def _recompute_outcome(conn, canonical_url, members=None):
     ).fetchone() is not None
     latest = None
     if applied:
+        event_qs = ",".join("?" * len(APP_EVENTS))
         latest = conn.execute(
             f"SELECT event_type, event_date FROM app_events WHERE job_url IN ({qs}) "
-            f"AND event_type != ? ORDER BY event_date DESC, id DESC LIMIT 1",
-            (*urls, EVENT_NOTE),
+            f"AND event_type IN ({event_qs}) "
+            f"ORDER BY event_date DESC, id DESC LIMIT 1",
+            (*urls, *APP_EVENTS),
         ).fetchone()
     if latest is None:
         cached = conn.execute(
@@ -857,11 +865,10 @@ def _recompute_outcome(conn, canonical_url, members=None):
 
 
 def record_event(conn, row, event_type, event_date=None, note=None):
-    """Record one outcome event on `row`'s chain. Lifecycle events (states.APP_EVENTS)
-    require the chain's effective decision to be 'applied' — an interview on a role you
-    never applied to is a data-entry error, not a state; bare 'note' events attach to any
-    posting. Returns (ok, message, affected_urls, exempt_urls) like the decision services
-    (exempt is just the interaction handle — an event never flips decided/undecided)."""
+    """Record one application-history event on `row`'s chain. Applied-only events
+    (outcomes plus ``followup_sent``) require the chain's effective decision to be applied;
+    bare notes attach anywhere. Only states.APP_EVENTS affect the cached outcome.
+    Returns the decision-service result shape."""
     if event_type not in ALL_EVENTS:
         return False, f"event type must be one of {list(ALL_EVENTS)}", [], []
     if event_type == EVENT_NOTE and not (note or "").strip():
@@ -882,7 +889,7 @@ def record_event(conn, row, event_type, event_date=None, note=None):
                        f"since the latest event wins)"), [], []
     event_date = d.isoformat()
     targets = _chain_targets(conn, row)
-    if event_type in APP_EVENTS:
+    if event_type in APPLIED_ONLY_EVENTS:
         dec = effective_decision(conn, row)
         if dec["app_status"] != "applied":
             state = _fmt_decision(_chain_decision(conn, targets))

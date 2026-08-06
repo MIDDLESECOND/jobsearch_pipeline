@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LinkedIn Job Triage</title>
+<title>Job Pipeline</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -19,9 +19,25 @@
   .tab.active { background: #2563eb; color: #fff; border-color: #2563eb; }
   input[type=date] { padding: .3rem .4rem; border: 1px solid #d0d4da; border-radius: 6px; }
   #count { margin-left: auto; color: #667; font-size: .85rem; }
+  #filters { display: flex; width: 100%; gap: .45rem; align-items: center; flex-wrap: wrap; }
+  #filters input[type=search] { min-width: 15rem; flex: 1; padding: .35rem .5rem;
+                               border: 1px solid #d0d4da; border-radius: 6px; }
+  #filters input[type=number] { width: 5rem; padding: .35rem .4rem;
+                               border: 1px solid #d0d4da; border-radius: 6px; }
+  #filters.queue-only > :not(#pager) { display: none; }
+  #pager { display: flex; gap: .45rem; align-items: center; margin-left: auto; font-size: .82rem; }
+  #pager button:disabled { cursor: default; opacity: .45; }
   main { max-width: 920px; margin: 1rem auto; padding: 0 1rem; }
+  .action-section { margin: 0 0 1.5rem; }
+  .action-head { display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap;
+                 margin: 1.1rem 0 .55rem; }
+  .action-head h2 { font-size: 1.05rem; margin: 0; }
+  .action-head .meta { margin: 0; }
+  .action-head button { margin-left: auto; }
+  .section-empty { color: #778; font-size: .85rem; padding: .5rem 0 1rem; }
   .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px;
           padding: .85rem 1rem; margin-bottom: .75rem; }
+  .card.key-selected { outline: 2px solid #2563eb; outline-offset: 1px; }
   .card.busy { opacity: .5; pointer-events: none; }
   .card h2 { font-size: 1rem; margin: 0 0 .35rem; }
   .meta { color: #556; font-size: .82rem; margin: .15rem 0; }
@@ -88,23 +104,56 @@
 </head>
 <body>
 <header>
-  <h1>LinkedIn Job Triage</h1>
+  <h1>Job Pipeline</h1>
   <div class="tabs">
-    <button class="tab active" data-view="today">Today</button>
+    <button class="tab active" data-view="action">Action Center</button>
+    <button class="tab" data-view="today">Today</button>
     <button class="tab" data-view="backlog">Backlog</button>
     <button class="tab" data-view="applied">Applied</button>
     <button class="tab" data-view="passed">Passed</button>
   </div>
-  <input type="date" id="date" value="{{ today }}">
+  <input type="date" id="date" value="{{ today }}" style="display:none">
   <button id="toggleDecided" class="tab" style="display:none"></button>
   <span id="count"></span>
+  <div id="filters" style="display:none">
+    <input type="search" id="query" placeholder="Search title, company, location…">
+    <select id="verdictFilter">
+      <option value="">all verdicts</option>
+      <option value="PASS">cold-apply</option>
+      <option value="RECRUITER_ONLY">recruiter-only</option>
+    </select>
+    <select id="sourceFilter">
+      <option value="">all sources</option>
+      <option value="linkedin">LinkedIn</option>
+      <option value="adzuna">Adzuna</option>
+      <option value="greenhouse">Greenhouse</option>
+      <option value="lever">Lever</option>
+      <option value="ashby">Ashby</option>
+    </select>
+    <input type="number" id="minScore" min="0" max="18" placeholder="min score"
+           title="minimum fit score, 0–18">
+    <select id="daysFilter">
+      <option value="">any age</option>
+      <option value="1">today</option>
+      <option value="3">last 3 calendar days</option>
+      <option value="7">last 7 calendar days</option>
+      <option value="14">last 14 calendar days</option>
+      <option value="30">last 30 calendar days</option>
+    </select>
+    <button id="clearFilters" type="button">Clear</button>
+    <div id="pager">
+      <button id="prevPage" type="button">← Prev</button>
+      <span id="pageLabel"></span>
+      <button id="nextPage" type="button">Next →</button>
+    </div>
+  </div>
   <div id="linkbar"></div>
 </header>
 <main id="list"></main>
 
 <script>
 const GATES = {{ gates | tojson }};
-const EVENTS = {{ events | tojson }};  // states.ALL_EVENTS — lifecycle outcomes + 'note'
+const EVENTS = {{ events | tojson }};  // outcomes + followup_sent + note
 const CHANNELS = {{ channels | tojson }};  // states.ALL_CHANNELS — how the application went out
 const FEEDBACK_URL = (() => {
   let u = String({{ feedback_url | tojson }});
@@ -134,7 +183,13 @@ const ASSISTANT = (() => {
 })();
 const SEND_LABEL = ASSISTANT ? "Send to " + ASSISTANT : "Copy JD";
 const TODAY = {{ today | tojson }};
-let view = "today";
+let view = "action";
+let page = 1;
+const pageSize = 50;
+let pageMeta = {total: 0, pages: 0, page: 1, page_size: pageSize};
+let actionSections = [];
+let actionQueue = null;
+let actionQueueTitle = "";
 // localStorage access can throw outright (browser set to block all site data) — a top-level
 // throw would kill this whole script block, so route through a wrapper that degrades to
 // "works, just doesn't persist".
@@ -183,6 +238,16 @@ const dateInput = document.getElementById("date");
 const list = document.getElementById("list");
 const countEl = document.getElementById("count");
 const toggleDecidedBtn = document.getElementById("toggleDecided");
+const filtersEl = document.getElementById("filters");
+const queryInput = document.getElementById("query");
+const verdictFilter = document.getElementById("verdictFilter");
+const sourceFilter = document.getElementById("sourceFilter");
+const minScoreInput = document.getElementById("minScore");
+const daysFilter = document.getElementById("daysFilter");
+const clearFiltersBtn = document.getElementById("clearFilters");
+const prevPageBtn = document.getElementById("prevPage");
+const nextPageBtn = document.getElementById("nextPage");
+const pageLabel = document.getElementById("pageLabel");
 
 toggleDecidedBtn.addEventListener("click", () => {
   if (mutBusy || linkBusy) return;  // churn-avoidance while a mutation POST is mid-flight (see mutBusy)
@@ -195,10 +260,38 @@ tabs.forEach(t => t.addEventListener("click", () => {
   tabs.forEach(x => x.classList.remove("active"));
   t.classList.add("active");
   view = t.dataset.view;
+  actionQueue = null;
+  actionQueueTitle = "";
+  page = 1;
   dateInput.style.display = view === "today" ? "" : "none";
+  filtersEl.classList.remove("queue-only");
+  filtersEl.style.display = view === "action" ? "none" : "flex";
   load();
 }));
-dateInput.addEventListener("change", () => { if (view === "today") load(); });
+dateInput.addEventListener("change", () => { if (view === "today") { page = 1; load(); } });
+
+let filterTimer = null;
+function filtersChanged() {
+  page = 1;
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(load, 180);
+}
+queryInput.addEventListener("input", filtersChanged);
+[verdictFilter, sourceFilter, minScoreInput, daysFilter]
+  .forEach(el => el.addEventListener("change", filtersChanged));
+clearFiltersBtn.addEventListener("click", () => {
+  queryInput.value = "";
+  verdictFilter.value = "";
+  sourceFilter.value = "";
+  minScoreInput.value = "";
+  daysFilter.value = "";
+  page = 1;
+  load();
+});
+prevPageBtn.addEventListener("click", () => { if (page > 1) { page--; load(); } });
+nextPageBtn.addEventListener("click", () => {
+  if (pageMeta.pages && page < pageMeta.pages) { page++; load(); }
+});
 
 function fmtSalary(min, max) {
   if (!min && !max) return null;
@@ -261,7 +354,7 @@ function scoreLine(b) {
   }).join(" · ");
 }
 
-function card(j) {
+function card(j, actionSection = null) {
   const div = document.createElement("div");
   // Re-apply the in-flight lock: a card rebuilt while its POST is pending must not come back
   // with live buttons (double-fire) — see busyUrls.
@@ -370,6 +463,11 @@ function card(j) {
     enote.className = "note-in"; enote.placeholder = "note…";
     actions.appendChild(esel);
     actions.appendChild(enote);
+    if (actionSection === "followups_due") {
+      actions.appendChild(btn("Follow-up sent", "record", () => {
+        postEvent(div, j, {type: "followup_sent"});
+      }));
+    }
     actions.appendChild(btn("Record", "record", () => {
       const t = esel.value;
       if (!t) { alert("pick an event type first"); return; }
@@ -447,9 +545,9 @@ async function sendToAssistant(div, job_url) {
   }
 }
 
-function setCount(n, hidden = 0) {
-  countEl.textContent = n + " posting" + (n === 1 ? "" : "s")
-    + (hidden ? ` · ${hidden} decided hidden` : "");
+function setCount(n, hidden = 0, total = null) {
+  const shown = total != null && total !== n ? `${n} shown · ${total} total` : `${n} posting${n === 1 ? "" : "s"}`;
+  countEl.textContent = shown + (hidden ? ` · ${hidden} decided hidden on page` : "");
 }
 
 // Shared POST for the three mutation handlers — one copy of the headers and of the 30s
@@ -589,14 +687,10 @@ async function decide(div, j, action, gate, resume, channel) {
         if (await load()) window.scrollTo(0, y);
       }
     } else {
-      // backlog / applied / passed: every affected row leaves the view → drop those cards, and
-      // prune jobsData to match so render() stays a pure function of it. The count comes from
-      // the pruned model, not a second full-DOM walk.
-      list.querySelectorAll(".card").forEach(el => { if (affected.has(el.dataset.url)) el.remove(); });
-      jobsData = jobsData.filter(r => !affected.has(r.job_url));
-      const n = jobsData.length;
-      setCount(n);
-      if (n === 0) list.innerHTML = `<div class="empty">Nothing here.</div>`;
+      // Every non-Today surface is now server-owned: a decision can remove a row from a
+      // filtered page or from one Action Center queue and reveal the next eligible row.
+      // Refetch instead of locally pruning a 50-row window and leaving its total/page stale.
+      await load();
     }
   } catch (e) {
     alert("error: " + e);
@@ -629,6 +723,9 @@ async function postEvent(div, j, body) {
     // patch would land on a swapped-out array — the recorded outcome tag would silently
     // vanish (inviting a duplicate Record). Refetch the truth instead of patching.
     if (loadSeq !== seq0) { await load(); return; }
+    // Recording an outcome or followup_sent may remove an application from Follow-ups due.
+    // Its queue and total are server-owned, so refresh rather than leaving a stale card.
+    if (view === "action" || view === "action_queue") { await load(); return; }
     const affected = new Set((data.affected && data.affected.length) ? data.affected : [j.job_url]);
     // ONE patch site: j is itself a jobsData row and affected always contains it, so the
     // loop covers the clicked card too — a separate direct patch would just be a second
@@ -936,18 +1033,77 @@ function renderToggle() {
   toggleDecidedBtn.textContent = (hideDecided ? "Show " : "Hide ") + decided + " decided";
 }
 
+function renderPager() {
+  const pages = pageMeta.pages || 0;
+  pageLabel.textContent = pages ? `Page ${pageMeta.page} of ${pages}` : "No results";
+  prevPageBtn.disabled = pageMeta.page <= 1;
+  nextPageBtn.disabled = !pages || pageMeta.page >= pages;
+}
+
+function renderActionCenter() {
+  toggleDecidedBtn.style.display = "none";
+  list.innerHTML = "";
+  const total = actionSections.reduce((n, s) => n + s.total, 0);
+  setCount(jobsData.length, 0, total);
+  for (const section of actionSections) {
+    const wrap = document.createElement("section");
+    wrap.className = "action-section";
+    wrap.innerHTML = `<div class="action-head"><h2>${esc(section.title)}</h2>`
+      + `<span class="meta">${section.total} total · ${esc(section.description)}</span>`
+      + `${section.total > section.items.length ? '<button type="button" class="view-all">View all</button>' : ''}</div>`;
+    const viewAll = wrap.querySelector(".view-all");
+    if (viewAll) viewAll.addEventListener("click", () => openActionSection(section));
+    if (!section.items.length) {
+      const empty = document.createElement("div");
+      empty.className = "section-empty";
+      empty.textContent = "Nothing needs attention here.";
+      wrap.appendChild(empty);
+    } else {
+      section.items.forEach(j => wrap.appendChild(card(j, section.id)));
+    }
+    list.appendChild(wrap);
+  }
+}
+
+function openActionSection(section) {
+  view = "action_queue";
+  actionQueue = section.id;
+  actionQueueTitle = section.title;
+  page = 1;
+  dateInput.style.display = "none";
+  filtersEl.classList.add("queue-only");
+  filtersEl.style.display = "flex";
+  tabs.forEach(t => t.classList.toggle("active", t.dataset.view === "action"));
+  load();
+}
+
 function render() {
+  // A tab/page/filter change replaces the card collection.  Do not carry an index from a
+  // longer previous page into a shorter result set (k would otherwise address no card).
+  keyIndex = -1;
+  if (view === "action") { renderActionCenter(); return; }
   const visible = jobsData.filter(j => !isHiddenDecided(j));
   const hidden = jobsData.length - visible.length;
-  setCount(visible.length, hidden);
+  setCount(visible.length, hidden, pageMeta.total);
   renderToggle();
+  renderPager();
   list.innerHTML = "";
   if (!visible.length) {
     list.innerHTML = `<div class="empty">${hidden
       ? `All ${hidden} posting${hidden === 1 ? "" : "s"} decided — hidden.` : "Nothing here."}</div>`;
     return;
   }
-  visible.forEach(j => list.appendChild(card(j)));
+  if (view === "action_queue") {
+    const head = document.createElement("div");
+    head.className = "action-head";
+    head.innerHTML = `<h2>${esc(actionQueueTitle)}</h2><button type="button">Back to Action Center</button>`;
+    head.querySelector("button").addEventListener("click", () => {
+      view = "action"; actionQueue = null; actionQueueTitle = ""; page = 1;
+      filtersEl.classList.remove("queue-only"); filtersEl.style.display = "none"; load();
+    });
+    list.appendChild(head);
+  }
+  visible.forEach(j => list.appendChild(card(j, view === "action_queue" ? actionQueue : null)));
 }
 
 // Returns true when THIS load's rows reached the screen (false if superseded or failed), so a
@@ -960,19 +1116,37 @@ async function load() {
   // not repaint them under the new tab. render()/renderToggle() restore all three on success.
   toggleDecidedBtn.style.display = "none";
   jobsData = [];
+  actionSections = [];
   countEl.textContent = "";
   list.innerHTML = `<div class="empty">Loading…</div>`;
-  const params = new URLSearchParams({view});
-  if (view === "today") params.set("date", dateInput.value);
-  let rows;
+  const params = new URLSearchParams();
+  let url = "/api/actions";
+  if (view === "action_queue") {
+    params.set("page", String(page));
+    params.set("page_size", String(pageSize));
+    url = "/api/actions/" + encodeURIComponent(actionQueue) + "?" + params;
+  } else if (view !== "action") {
+    params.set("view", view);
+    params.set("page", String(page));
+    params.set("page_size", String(pageSize));
+    if (view === "today") params.set("date", dateInput.value);
+    if (queryInput.value.trim()) params.set("q", queryInput.value.trim());
+    if (verdictFilter.value) params.set("verdict", verdictFilter.value);
+    if (sourceFilter.value) params.set("source", sourceFilter.value);
+    if (minScoreInput.value !== "") params.set("min_score", minScoreInput.value);
+    if (daysFilter.value) params.set("days", daysFilter.value);
+    url = "/api/jobs?" + params;
+  }
+  let payload;
   try {  // narrow: a render() bug must not masquerade as a network failure
-    const res = await fetch("/api/jobs?" + params, {
+    const res = await fetch(url, {
       // Same wedged-server insurance as postJSON: a hung /api/jobs must fail into the catch
       // below, not pin loadState at "loading" (eternal spinner, disarmed toggle) forever.
       signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
         ? AbortSignal.timeout(30000) : undefined,
     });
-    rows = await res.json();
+    payload = await res.json();
+    if (!res.ok) throw new Error(payload.message || `HTTP ${res.status}`);
   } catch (e) {
     if (seq === loadSeq) {  // a superseded load's failure isn't this view's state
       loadState = "failed";
@@ -981,11 +1155,47 @@ async function load() {
     return false;
   }
   if (seq !== loadSeq) return false;  // a newer load() superseded this response — drop it
+  if (view !== "action" && payload.pages && page > payload.pages) {
+    page = payload.pages;
+    return load();
+  }
   loadState = "idle";
-  jobsData = rows;
+  if (view === "action") {
+    actionSections = payload.sections || [];
+    jobsData = actionSections.flatMap(s => s.items);
+    pageMeta = {total: jobsData.length, pages: 1, page: 1, page_size: jobsData.length};
+  } else {
+    jobsData = payload.items || [];
+    pageMeta = payload;
+    if (view === "action_queue") actionQueueTitle = payload.title || actionQueueTitle;
+    if (!payload.pages) page = 1;
+  }
   render();
   return true;
 }
+
+// Read-only keyboard triage: j/k move between the currently rendered cards and o opens
+// the selected posting.  Mutating shortcuts are deliberately omitted — decisions still
+// require a visible button click and retain the existing confirmation/prompt behavior.
+let keyIndex = -1;
+document.addEventListener("keydown", e => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const cards = [...list.querySelectorAll(".card")];
+  if (!cards.length || !["j", "k", "o"].includes(e.key.toLowerCase())) return;
+  e.preventDefault();
+  if (e.key.toLowerCase() === "o") {
+    if (keyIndex < 0) keyIndex = 0;
+    cards[Math.min(keyIndex, cards.length - 1)].querySelector(".links a")?.click();
+    return;
+  }
+  cards.forEach(c => c.classList.remove("key-selected"));
+  keyIndex = e.key.toLowerCase() === "j"
+    ? Math.min(keyIndex + 1, cards.length - 1)
+    : Math.max(keyIndex < 0 ? 0 : keyIndex - 1, 0);
+  cards[keyIndex].classList.add("key-selected");
+  cards[keyIndex].scrollIntoView({block: "center", behavior: "smooth"});
+});
 
 load();
 </script>

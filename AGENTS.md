@@ -35,10 +35,13 @@ re-export hub):
   `filters` (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
 - `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
+- `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
+  imports `report`/`chain`/`states`, performs no mutations, and keeps dashboard-query logic
+  out of both the decision service and Flask routes.
 - `pipeline.py` — the CLI/orchestrator: the `run` stage order, thin `cmd_*` wrappers over the
   chain service cores, and `main`.
-- `app.py` (Flask) + `templates/index.html` — the local triage UI (also a thin layer over the
-  chain service cores).
+- `app.py` (Flask) + `templates/index.html` — the local triage UI (a thin HTTP/presentation
+  layer over `workflow` reads and the `chain` service cores).
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach
@@ -79,7 +82,7 @@ python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]
 
 # Post-application outcome tracking (what happened AFTER applying — interview rounds, offer,
 # ghosted, …; --type note = bare note on any posting; --undo removes the chain's last event):
-python pipeline.py event   --url <id> --type <recruiter_screen|interview|offer|rejected_by_employer|ghosted|withdrew|note> [--date YYYY-MM-DD] [--note N] [--undo]
+python pipeline.py event   --url <id> --type <followup_sent|recruiter_screen|interview|offer|rejected_by_employer|ghosted|withdrew|note> [--date YYYY-MM-DD] [--note N] [--undo]
 
 # Manually link a duplicate the fingerprint missed (drifted title, or a cross-source cross-post,
 # e.g. LinkedIn<->Adzuna or LinkedIn<->an ATS board).
@@ -165,26 +168,30 @@ via Windows Task Scheduler.
   judgment); `chain.skip_evaluated_reposts`' SQL subquery mirrors that predicate, and the two carry
   cross-referencing comments — change one, change both.
 
-- **Outcome tracking is history + cache, both chain-scoped.** What happened after `applied`
-  (screen/interview/offer/ghosted/… + notes) lives in the append-only `app_events` table: an
+- **Application tracking is history + an outcome cache, both chain-scoped.** What happened
+  after `applied` (screen/interview/offer/ghosted/…, `followup_sent`, and notes) lives in the
+  append-only `app_events` table: an
   event is written ONCE, keyed to the chain's **canonical url at write time**, and always read
   chain-wide (`chain.chain_events`) — so a dupe merge unions both sides' histories with no data
   migration and unlink leaves rows where they sit. The chain's *current* outcome is denormalized
   onto every member (`jobs.outcome_status`/`outcome_date`) exactly like `app_status`;
   `chain._recompute_outcome` is the ONE writer of those two cache columns, and the cache is
-  always a pure function of (chain applied?, events) — latest non-note event wins, cleared while
-  not applied, restored on re-apply (undoing `applied` never deletes history).
+  always a pure function of (chain applied?, `states.APP_EVENTS`) — latest outcome event wins,
+  cleared while not applied, restored on re-apply (undoing `applied` never deletes history).
+  `followup_sent` is applied-only history but is NOT an outcome: it advances the Action Center's
+  7-day cadence (maximum two sends) without claiming the employer responded.
   `jobs.resume_variant` and `jobs.channel` are separate: applied-only fields written uniformly
   chain-wide by `propagate_app_status`/`set_resume`/`set_channel` (given → written; absent on a
   re-assert → inherited from the chain's stored value; chain leaves applied → cleared), with no
   history — NOT restored on re-apply. `channel` is a closed vocabulary (`states.ALL_CHANNELS`:
   direct | agency | referral, validated in chain, no CHECK); `resume_variant` is free text.
-  Lifecycle events require the
-  chain applied; `note` events attach anywhere. `app_events.event_type`/`jobs.outcome_status`
+  `states.APPLIED_ONLY_EVENTS` require the chain applied; `note` events attach anywhere.
+  `app_events.event_type`/`jobs.outcome_status`
   carry **no schema CHECK** on purpose (user-decision vocabulary, enforced in
   `chain.record_event` against `states.ALL_EVENTS` — see states.py's docstring); don't add one.
-  The follow-up predicate is pure SQL and pinned by a test:
-  `app_status='applied' AND outcome_status IS NULL AND status_date < cutoff`.
+  Follow-up eligibility is derived, never cached: applied + no employer outcome, then the
+  next due date is application/last-`followup_sent` date + 7 days; two sent follow-ups retire
+  the reminder. Events on former canonicals are mapped through current chain membership.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

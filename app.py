@@ -3,8 +3,9 @@
 Local web UI for triaging job postings — a faster alternative to the
 `applied` / `passed` / `reject` CLI commands.
 
-Launched via `python pipeline.py ui`. It is a thin Flask layer over the chain-service
-cores and the existing `jobs.db`: `mark_posting` / `reject_posting` (so repost-chain
+Launched via `python pipeline.py ui`. It is a thin Flask layer over workflow.py's bounded
+read models, the chain-service cores, and the existing `jobs.db`: `mark_posting` /
+`reject_posting` (so repost-chain
 propagation and the status lift behave exactly like the CLI wrappers in pipeline.py),
 and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
 linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
@@ -31,6 +32,7 @@ from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
                     VERDICT_RECRUITER_ONLY)
+from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_job_page
 
 app = Flask(__name__)
 
@@ -64,6 +66,7 @@ def row_to_dict(row, cap, dec):
     except (json.JSONDecodeError, TypeError):
         ev = {}
     bucket = row["bucket"]
+    row_keys = set(row.keys())
     return {
         "job_url": row["job_url"],
         "title": row["title"],
@@ -127,6 +130,13 @@ def row_to_dict(row, cap, dec):
         # so the list payload stays small.
         "has_description": bool(row["description"]),
         "truncated": bool(row["description"] and len(row["description"]) >= cap),
+        # Present only on the dedicated follow-up read model.  Keeping these derived fields
+        # out of jobs means the append-only event history remains the source of truth.
+        "followup_count": row["followup_count"] if "followup_count" in row_keys else None,
+        "last_followup_date": (row["last_followup_date"]
+                               if "last_followup_date" in row_keys else None),
+        "next_followup_date": (row["next_followup_date"]
+                               if "next_followup_date" in row_keys else None),
     }
 
 
@@ -213,7 +223,92 @@ def api_jobs():
     cap = cfg["settings"]["max_description_chars"]
     conn = connect_db(cfg)
     try:
-        return jsonify(jobs_for_view(conn, view, for_date, cap))
+        # Backward-compatible legacy contract: callers that do not ask for paging still get
+        # the historical bare array.  The local UI opts into the bounded envelope by sending
+        # page/page_size; scripts or old tabs already open during an upgrade keep working.
+        if "page" not in request.args and "page_size" not in request.args:
+            return jsonify(jobs_for_view(conn, view, for_date, cap))
+        try:
+            page = int(request.args.get("page", "1"))
+            page_size = int(request.args.get("page_size", str(DEFAULT_PAGE_SIZE)))
+            min_raw = request.args.get("min_score")
+            days_raw = request.args.get("days")
+            filters = {
+                "q": request.args.get("q", ""),
+                "source": request.args.get("source", ""),
+                "verdict": request.args.get("verdict", ""),
+                "min_score": int(min_raw) if min_raw not in (None, "") else None,
+                "days": int(days_raw) if days_raw not in (None, "") else None,
+            }
+            result = query_job_page(
+                conn, view, for_date=for_date, page=page, page_size=page_size,
+                filters=filters,
+            )
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "message": str(e)}), 400
+        decisions = effective_decisions(conn, result["rows"])
+        items = [row_to_dict(r, cap, decisions[r["job_url"]]) for r in result["rows"]]
+        return jsonify({
+            "items": items,
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+            "pages": result["pages"],
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/actions")
+def api_actions():
+    cfg = load_config()
+    cap = cfg["settings"]["max_description_chars"]
+    conn = connect_db(cfg)
+    try:
+        sections = action_center(conn)
+        payload = []
+        for section in sections:
+            decisions = effective_decisions(conn, section["rows"])
+            payload.append({
+                "id": section["id"],
+                "title": section["title"],
+                "description": section["description"],
+                "total": section["total"],
+                "items": [row_to_dict(r, cap, decisions[r["job_url"]])
+                          for r in section["rows"]],
+            })
+        return jsonify({"sections": payload})
+    finally:
+        conn.close()
+
+
+@app.route("/api/actions/<section_id>")
+def api_action_section(section_id):
+    """One bounded Action Center queue for the section's View all surface."""
+    cfg = load_config()
+    cap = cfg["settings"]["max_description_chars"]
+    conn = connect_db(cfg)
+    try:
+        try:
+            page = int(request.args.get("page", "1"))
+            page_size = int(request.args.get("page_size", str(DEFAULT_PAGE_SIZE)))
+            section = query_action_page(
+                conn, section_id, page=page, page_size=page_size,
+            )
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "message": str(e)}), 400
+        decisions = effective_decisions(conn, section["rows"])
+        return jsonify({
+            "id": section["id"],
+            "title": section["title"],
+            "description": section["description"],
+            "items": [row_to_dict(r, cap, decisions[r["job_url"]])
+                      for r in section["rows"]],
+            "total": section["total"],
+            "page": section["page"],
+            "page_size": section["page_size"],
+            "pages": section["pages"],
+        })
     finally:
         conn.close()
 
@@ -336,7 +431,7 @@ def api_decision():
 
 @app.route("/api/event", methods=["POST"])
 def api_event():
-    """Record (or with undo=true remove the last) post-application outcome event on a chain —
+    """Record (or with undo=true remove the last) post-application history event on a chain —
     thin layer over chain.record_event / undo_event, same request/response contract as
     /api/decision. An event never flips a card decided<->undecided, so `exempt` is just the
     clicked row (the interaction handle) and the hide-decided filter is unaffected."""

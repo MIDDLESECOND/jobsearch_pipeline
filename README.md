@@ -39,7 +39,7 @@ flowchart LR
     D --> E["Deterministic pre-filters<br/>salary floor, filters.yaml rules"]
     E --> F["LLM evaluation gate<br/>DeepSeek or Claude<br/>6 hard gates → fit score → bucket"]
     F --> G["Daily markdown report"]
-    F --> H["Local Flask triage UI<br/>applied / passed / reject"]
+    F --> H["Local Flask triage UI<br/>action queues / filter / decide"]
     H --> I[("SQLite jobs.db<br/>decisions follow reposts")]
     G --> I
 ```
@@ -69,6 +69,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
 | `report.py` | the daily markdown report |
+| `workflow.py` | bounded/filterable UI queries and Action Center queues |
 | `pipeline.py` | CLI orchestrator (stage order lives here) |
 | `app.py` + `templates/` | the local Flask triage UI |
 
@@ -195,9 +196,19 @@ python pipeline.py ui
 It opens `http://127.0.0.1:5000` in your browser. The page shows the same postings the report
 does, as cards with their verdict, score breakdown, bucket, flags and a link to the posting.
 Each card has **Applied** / **Passed** / **Reject** buttons (Reject has a gate dropdown), so a
-click does exactly what the matching CLI command does — including repost-chain propagation. Tabs
-switch between **Today** (with a date picker), the undecided **Backlog**, and your **Applied** /
-**Passed** history; **Undo** reverses a decision.
+click does exactly what the matching CLI command does — including repost-chain propagation. The
+opening **Action Center** groups fresh strong matches, recruiter-route candidates, applications
+due for follow-up, and evaluation errors. Other tabs switch between **Today** (with a date picker),
+the undecided **Backlog**, and your **Applied** / **Passed** history; **Undo** reverses a decision.
+Follow-ups use a 7-day cadence: click **Follow-up sent** to record the contact, move the next
+reminder seven days out, and retire the reminder after two sends. This history does not claim
+that the employer responded and does not change the role's outcome.
+
+History views are server-paged (50 cards at a time) instead of downloading the entire database.
+Use the filter row to search title/company/location, narrow by verdict or source, set a minimum
+fit score, or restrict age. **J/K** moves a visual selection through the current cards and **O**
+opens the selected posting; decision actions remain explicit clicks. Action Center sections
+show ten cards initially; **View all** opens the complete server-paged queue.
 
 It reads and writes the same `jobs.db`, makes no judgement of its own, and is local-only
 (single user, no login). It needs Flask — `pip install -r requirements.txt` covers it. The

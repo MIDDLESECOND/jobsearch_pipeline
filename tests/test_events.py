@@ -5,18 +5,18 @@ The invariants pinned here:
   * an event is written ONCE, keyed to the chain's canonical at write time, and read
     chain-wide — so histories union across dupe merges and survive unlinks;
   * the cached jobs.outcome_status/outcome_date columns are a pure recompute of
-    (chain applied?, events): latest non-note event wins, cleared while not applied,
+    (chain applied?, APP_EVENTS): latest outcome event wins, cleared while not applied,
     restored on re-apply (history is never destroyed by a decision toggle);
-  * lifecycle events require the chain applied; bare notes don't;
-  * the follow-up predicate (applied + outcome NULL + old status_date) is answerable in
-    pure SQL — the schema contract the future funnel view builds on.
+  * outcomes and followup_sent require the chain applied; bare notes don't;
+  * followup_sent never sets the outcome cache and can drive cadence independently.
 """
 
 from datetime import date
 
 import chain
 from conftest import make_job
-from states import APP_EVENTS, ALL_EVENTS, EVENT_NOTE
+from states import (APP_EVENTS, ALL_EVENTS, APPLIED_ONLY_EVENTS,
+                    EVENT_FOLLOWUP_SENT, EVENT_NOTE)
 
 TODAY = date.today().isoformat()
 
@@ -95,6 +95,25 @@ def test_note_event_attaches_anywhere_and_never_sets_outcome(conn):
     chain.record_event(conn, row, "interview", "2026-06-12")
     chain.record_event(conn, row, EVENT_NOTE, "2026-06-30", note="sent follow-up")
     assert _outcome(conn, "u2") == ("interview", "2026-06-12")  # the later note didn't win
+
+
+def test_followup_event_requires_applied_and_never_sets_outcome(conn):
+    row = make_job(conn, job_url="open")
+    ok, msg, _, _ = chain.record_event(conn, row, EVENT_FOLLOWUP_SENT, "2026-07-20")
+    assert not ok and "applied" in msg
+
+    make_job(conn, job_url="canon", company="Chain Co", app_status="applied",
+             status_date="2026-07-01")
+    relist = make_job(conn, job_url="relist", company="Chain Co", repost_of="canon",
+                      app_status="applied", status_date="2026-07-01")
+    ok, _, affected, _ = chain.record_event(
+        conn, relist, EVENT_FOLLOWUP_SENT, "2026-07-20", note="emailed recruiter"
+    )
+    assert ok and set(affected) == {"canon", "relist"}
+    event = conn.execute("SELECT job_url,event_type,note FROM app_events").fetchone()
+    assert tuple(event) == ("canon", EVENT_FOLLOWUP_SENT, "emailed recruiter")
+    assert _outcome(conn, "canon") == (None, None)
+    assert _outcome(conn, "relist") == (None, None)
 
 
 def test_undo_event_removes_last_recorded_and_recomputes(conn):
@@ -203,6 +222,10 @@ def test_undo_message_promises_restore_only_for_lifecycle_events(conn):
     chain.record_event(conn, row2, "interview", "2026-06-12")
     ok, msg, _, _ = chain.mark_posting(conn, row2, None)
     assert ok and "re-applying restores it" in msg
+    row3 = make_job(conn, job_url="u3", app_status="applied", status_date=TODAY)
+    chain.record_event(conn, row3, EVENT_FOLLOWUP_SENT, TODAY)
+    ok, msg, _, _ = chain.mark_posting(conn, row3, None)
+    assert ok and "restores" not in msg
 
 
 def test_unlink_warning_fires_for_events_keyed_to_former_canonical_member(conn):
@@ -285,9 +308,9 @@ def test_dupe_merge_unions_histories_and_outcome_differences_never_block(conn):
     assert _outcome(conn, "b") == ("interview", "2026-06-12")
 
 
-def test_followup_predicate_is_pure_sql(conn):
-    # The schema contract for the future funnel/follow-up view: "applied, no response, older
-    # than N days" must be answerable without joins. Seed one of each adjacent case.
+def test_no_response_base_predicate_is_pure_sql(conn):
+    # The base "applied with no employer response" predicate stays cheap. workflow.py adds
+    # followup_sent cadence history when deciding whether the reminder is due now.
     make_job(conn, job_url="due", app_status="applied", status_date="2026-06-01")
     make_job(conn, job_url="fresh", app_status="applied", status_date="2026-06-25")
     make_job(conn, job_url="answered", app_status="applied", status_date="2026-06-01",
@@ -302,8 +325,10 @@ def test_followup_predicate_is_pure_sql(conn):
 def test_vocabulary_shape(conn):
     # The UI select and CLI choices derive from these; 'note' must stay out of the
     # lifecycle set (it never sets an outcome) but inside the recordable set.
-    assert EVENT_NOTE not in APP_EVENTS
-    assert set(APP_EVENTS) | {EVENT_NOTE} == set(ALL_EVENTS)
+    assert EVENT_NOTE not in APPLIED_ONLY_EVENTS
+    assert EVENT_FOLLOWUP_SENT in APPLIED_ONLY_EVENTS
+    assert EVENT_FOLLOWUP_SENT not in APP_EVENTS
+    assert set(APPLIED_ONLY_EVENTS) | {EVENT_NOTE} == set(ALL_EVENTS)
 
 
 # --------------------------------------------------------------- channel (set_channel &

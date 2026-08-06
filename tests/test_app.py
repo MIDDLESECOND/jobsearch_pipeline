@@ -1,13 +1,14 @@
 """Flask triage-UI endpoints — the behavior the coming refactors must preserve.
 
-These pin the HTTP contract of app.py: view filtering (today/backlog/applied/passed and the
-backlog's chain-decided-relisting drop), decision propagation + the `affected` list the client
-uses to update sibling cards, the dupe link/undo/conflict paths, the clip payload, and the
-origin guard. Same synthetic-DB discipline as the rest of the suite (temp file via the shared
-schema builder + make_job) — never the real jobs.db, never the network.
+These pin the HTTP contract of app.py: legacy view filtering, bounded/filterable page envelopes,
+Action Center queues, the backlog's chain-decided-relisting drop, decision propagation + the
+`affected` list the client uses to update sibling cards, the dupe link/undo/conflict paths, the
+clip payload, and the origin guard. Same synthetic-DB discipline as the rest of the suite (temp
+file via the shared schema builder + make_job) — never the real jobs.db, never the network.
 """
 
 import sqlite3
+from datetime import date, timedelta
 
 import pytest
 
@@ -62,6 +63,17 @@ def client(db_path, monkeypatch):
 def _post(client, path, body, origin=None):
     headers = {"Origin": origin} if origin else {}
     return client.post(path, json=body, headers=headers)
+
+
+def test_homepage_exposes_action_center_filters_and_pager(client):
+    page = client.get("/")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert 'data-view="action"' in html
+    assert 'id="query"' in html
+    assert 'id="pageLabel"' in html
+    assert 'View all' in html
+    assert 'filtersEl.classList.add("queue-only")' in html
 
 
 # ------------------------------------------------------------------ /api/jobs
@@ -154,6 +166,65 @@ def test_applied_view_orders_by_status_date(client, seed):
     make_job(seed, job_url="p1", app_status="passed", status_date="2026-06-01")
     got = [j["job_url"] for j in client.get("/api/jobs?view=applied").get_json()]
     assert got == ["a_new", "a_old"]
+
+
+def test_paged_jobs_api_returns_envelope_and_filters(client, seed):
+    make_job(seed, job_url="u1", title="AI Architect", fit_score=17, source="ashby")
+    make_job(seed, job_url="u2", title="Data Analyst", fit_score=12, source="linkedin")
+    make_job(seed, job_url="u3", title="AI Engineer", fit_score=16, source="ashby")
+    got = client.get(
+        "/api/jobs?view=backlog&page=1&page_size=1&q=ai&source=ashby&min_score=14"
+    ).get_json()
+    assert set(got) == {"items", "total", "page", "page_size", "pages"}
+    assert got["total"] == 2 and got["page_size"] == 1 and got["pages"] == 2
+    assert got["items"][0]["job_url"] == "u1"
+
+
+def test_paged_jobs_api_rejects_bad_query_values(client, seed):
+    assert client.get("/api/jobs?view=unknown&page=1").status_code == 400
+    assert client.get("/api/jobs?view=backlog&page=zero").status_code == 400
+    assert client.get("/api/jobs?view=backlog&page=1&page_size=5000").status_code == 400
+    assert client.get("/api/jobs?view=backlog&page=1&min_score=high").status_code == 400
+
+
+def test_action_center_api_returns_card_payloads(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="cold", fit_score=17, first_seen=f"{today}T09:00:00")
+    make_job(seed, job_url="route", verdict="RECRUITER_ONLY", fit_score=15,
+             first_seen=f"{today}T10:00:00")
+    got = client.get("/api/actions").get_json()
+    by_id = {s["id"]: s for s in got["sections"]}
+    assert by_id["fresh_strong"]["items"][0]["job_url"] == "cold"
+    assert by_id["recruiter_route"]["items"][0]["job_url"] == "route"
+    assert "age_label" in by_id["fresh_strong"]["items"][0]
+
+
+def test_action_section_api_is_paged(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="cold-a", fit_score=17, first_seen=f"{today}T09:00:00")
+    make_job(seed, job_url="cold-b", fit_score=16, first_seen=f"{today}T08:00:00")
+    got = client.get("/api/actions/fresh_strong?page=1&page_size=1").get_json()
+    assert got["title"] == "Fresh strong matches"
+    assert got["total"] == 2 and got["pages"] == 2
+    assert len(got["items"]) == 1
+
+
+def test_followup_sent_api_advances_queue_without_setting_outcome(client, seed):
+    applied = (date.today() - timedelta(days=14)).isoformat()
+    make_job(seed, job_url="due", app_status="applied", status_date=applied)
+    before = client.get("/api/actions/followups_due?page=1&page_size=20").get_json()
+    assert [j["job_url"] for j in before["items"]] == ["due"]
+
+    recorded = _post(client, "/api/event", {"job_url": "due", "type": "followup_sent"})
+    assert recorded.get_json()["ok"] is True
+    assert recorded.get_json()["outcome_status"] is None
+    row = seed.execute(
+        "SELECT event_type FROM app_events WHERE job_url='due'"
+    ).fetchone()
+    assert row["event_type"] == "followup_sent"
+
+    after = client.get("/api/actions/followups_due?page=1&page_size=20").get_json()
+    assert after["items"] == [] and after["total"] == 0
 
 
 # -------------------------------------------------------------- /api/decision

@@ -230,6 +230,11 @@ def _link_rows(conn, root, entry_id):
 
 
 def _link_state(conn, root, entry_id):
+    entry = conn.execute(
+        "SELECT status,version FROM prep_entries WHERE id=?", (entry_id,)
+    ).fetchone()
+    if entry is None:
+        raise ValueError("prep entry not found")
     members = [row[0] for row in conn.execute(
         """SELECT job_url FROM jobs WHERE job_url=? OR repost_of=?
              ORDER BY job_url""",
@@ -241,6 +246,10 @@ def _link_state(conn, root, entry_id):
     # page for the retained canonical can survive a merge/split and disclose the entry to a
     # newly joined role without the user reviewing that changed scope.
     encoded = json.dumps({
+        # Link approval is also approval of the entry revision the user reviewed. Without
+        # this component, edit -> reconfirm can leave an old picker able to disclose newly
+        # changed private content even though the role-link rows themselves did not move.
+        "entry": (entry["status"], entry["version"]),
         "members": members,
         "links": [(row["job_url"], row["linked"], row["version"]) for row in rows],
     }, separators=(",", ":"), ensure_ascii=True).encode("ascii")
@@ -263,21 +272,31 @@ def role_entries(conn, row, *, include_unconfirmed=False):
 
 
 def role_entry_choices(conn, row, *, include_archived=True, limit=MAX_LIBRARY_ENTRIES):
-    _current_row, root = _current(conn, row)
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LIBRARY_ENTRIES:
         raise ValueError(f"limit must be from 1 to {MAX_LIBRARY_ENTRIES}")
-    where = "" if include_archived else "WHERE status<>'archived'"
-    # The role-link picker needs identity and state, not private prompts/responses/tags.
-    entries = [dict(item) for item in conn.execute(
-        f"""SELECT id,kind,title,status FROM prep_entries {where}
-             ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,
-                      updated_at DESC,id DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()]
-    for entry in entries:
-        entry.update({f"link_{key}": value for key, value in
-                      _link_state(conn, root, entry["id"]).items()})
-    return entries
+    owns_snapshot = not conn.in_transaction
+    if owns_snapshot:
+        conn.execute("BEGIN")
+    try:
+        _current_row, root = _current(conn, row)
+        where = "" if include_archived else "WHERE status<>'archived'"
+        # The role-link picker needs identity and state, not private prompts/responses/tags.
+        entries = [dict(item) for item in conn.execute(
+            f"""SELECT id,kind,title,status FROM prep_entries {where}
+                 ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,
+                          updated_at DESC,id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()]
+        for entry in entries:
+            entry.update({f"link_{key}": value for key, value in
+                          _link_state(conn, root, entry["id"]).items()})
+        if owns_snapshot:
+            conn.commit()
+        return entries
+    except Exception:
+        if owns_snapshot:
+            conn.rollback()
+        raise
 
 
 def set_role_link(conn, row, entry_id, *, linked, expected_linked,

@@ -172,6 +172,43 @@ def test_link_revision_rejects_retained_root_membership_changes(conn, membership
     assert role_entries(conn, current_right) == []
 
 
+def test_role_link_rejects_stale_entry_content_revision(conn):
+    row = make_job(conn, job_url="root")
+    entry = confirm_entry(conn, _story(conn)["id"], expected_version=1)
+    stale = next(
+        item for item in role_entry_choices(conn, row) if item["id"] == entry["id"]
+    )
+
+    changed = update_entry(
+        conn, entry["id"], expected_version=entry["version"], kind="story",
+        title="Sensitive replacement", prompt="New prompt",
+        response="New private story that the stale page never reviewed.", tags=["private"],
+    )
+    confirm_entry(conn, entry["id"], expected_version=changed["version"])
+
+    with pytest.raises(ValueError, match="changed since"):
+        set_role_link(
+            conn, row, entry["id"], linked=True, expected_linked=False,
+            expected_revision=stale["link_revision"], expected_root="root",
+        )
+    assert role_entries(conn, row) == []
+
+
+def test_role_entry_choices_preserves_a_callers_read_snapshot(conn):
+    row = make_job(conn, job_url="root")
+    entry = confirm_entry(conn, _story(conn)["id"], expected_version=1)
+    conn.execute("INSERT INTO meta(key,value) VALUES ('pending-prep-read','caller')")
+
+    choices = role_entry_choices(conn, row)
+
+    assert any(item["id"] == entry["id"] for item in choices)
+    assert conn.in_transaction
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='pending-prep-read'"
+    ).fetchone()[0] == "caller"
+    conn.rollback()
+
+
 def test_prep_context_includes_only_confirmed_and_linked_entries(conn):
     row = make_job(
         conn, job_url="root", title="AI PM", company="Acme",

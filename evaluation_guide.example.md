@@ -53,6 +53,8 @@ to recruiters instead of dying in an ATS.
 
 Evaluate *before* reading bullets or assessing skill fit. A single fail kills it.
 
+**Qualifications-column reading.** When the posting has a required/minimum qualifications column, gate on it; Preferred stays scoring input only. When the posting has NO required column — every qualification sits under "Preferred" / "Nice-to-Have" or similar — the Preferred block is the de facto screening bar and **gates as required**: apply the years-floor, domain, and tool gates to it directly. Nice-to-Have never gates, under either reading. This reading propagates everywhere the guide distinguishes required vs. preferred — the formal-leadership cap's boundary (a), the cold-apply bar, Part 3's required-vs-preferred call. **Emit the reading as a Part 1 header line on every evaluation** ("required present" / "preferred-only → gated as de facto required"), so a posting that buries a hard wall under a Preferred label can't default to PASS. Contrast with employment-type-unstated, which keeps its default-PASS: that rule covers a *missing* fact; this one covers a mislabeled column.
+
 | Gate | Question | PASS / FAIL | Notes |
 |---|---|---|---|
 | **Years floor** | Stated minimum ≤ ~5–6 yrs? (Tune to your own years of experience.) | | |
@@ -63,6 +65,8 @@ Evaluate *before* reading bullets or assessing skill fit. A single fail kills it
 | **Employment type** | Is the role permanent full-time (or whatever you require)? FAIL if it's contract, contract-to-hire, temporary, fixed-term, part-time, internship/co-op, or staffing-agency W2-contract. A recruiter posting a *permanent* placement is fine; the fail is the *engagement type*, not the intermediary. When unstated, default PASS but flag it. | | |
 
 *Location is not a hard gate in this example — relocation-willing. Capture relo/comp logistics in Part 4 instead.*
+
+**Unmeetable-stated-qualification rule.** A stated qualification the profile definitionally cannot meet is a gate FAIL even when no named gate's enum covers it — the gates ask "can this screen be cleared," not only "is there a floor." Two shapes: an experience **ceiling** ("recent graduate only," "0–2 years of experience" as a stated calibration, not merely a junior-coded title) and a **binary precondition** untrue of the profile and not satisfiable by start date. Under strict enum semantics both log as **`other`** with a one-line reason naming the unmeetable qualification — `years_floor` stays reserved for floors. Boundaries: (a) this does NOT touch the overqualification design — a junior-coded title with no stated ceiling still passes the gates and routes on fit; (b) if you are relocation-willing, most residency/location preconditions are satisfiable by start date and still PASS; the fail is for preconditions that cannot be made true; (c) the rule fires only on the posting's *own stated words*, never on an inferred calibration.
 
 ---
 

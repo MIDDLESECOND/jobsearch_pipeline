@@ -7,16 +7,50 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Guide surfaces reconverged: the 07-30 gate rules reach the pipeline
+
+Discovered while re-syncing the Claude.ai Project's uploaded guide: the repo guide and the
+Project's copy had drifted in BOTH directions, because each surface was receiving edits from a
+different workflow (repo ← Claude Code sessions, CHANGELOG'd; Project copy ← Claude.ai Project
+conversations, not CHANGELOG'd). Neither was a stale mirror of the other.
+
+- **Now in the production guide (was Project-copy-only, never CHANGELOG'd, so the pipeline has
+  never enforced it):** the **qualifications-column reading** (2026-07-30 — a posting with no
+  required column has its Preferred block gate as de facto required) and the
+  **unmeetable-stated-qualification rule** (2026-07-30 — a stated experience ceiling or an
+  unsatisfiable binary precondition is a gate FAIL logged as `other`). This is a judgment
+  change: postings that previously defaulted to PASS on a mislabeled column now fail the gates
+  before reaching the paid eval.
+- **Now in the Project copy (was repo-only):** the 2026-08-03 realignment — production-eval
+  disambiguation in `role_substance`/`ai_applied_vs_research`, the three-answer contract, the
+  non-scoring career-capital note, and the role-positioning note. Until this sync the Project's
+  guide still listed "evals/benchmarks" as disqualifying substance, i.e. it was GATE_FAILing the
+  production-eval roles the 08-03 decision makes a target.
+- Both surfaces now carry identical text, including the fit ≥ 14 bar. The Project's *uploaded*
+  file is a third surface that only a manual re-upload updates.
+
 ## 2026-08-07 — 0731 flash build: eval max_tokens 16000, cold-apply bar 15 → 14
 
 - DeepSeek's silently cut-over V4-Flash-0731 build reasons ~2.5× longer per eval (out-tokens/eval
-  ~1.2k → ~3.4k; per-eval cost doubled, no price change). The old `max_tokens: 8000` was sized for
-  the pre-0731 2–4k thinking budget; the new tail blows through it, truncating the answer to empty
-  and burning 30–100 billed "no JSON object" retries/day. Raised to 16000 in `_call_deepseek`.
+  ~1.2k → ~3.4k; per-eval cost doubled, no price change). `max_tokens` raised 8000 → 16000 in
+  `_call_deepseek`: a measured completion on one posting spent 9,888 output tokens (9,398 of them
+  reasoning), which the old cap would have truncated to an empty answer.
+- **Correction to the first version of this entry (measured, not inferred):** the raise does NOT
+  explain most of the 30–100 daily "no JSON object" retries, and does not eliminate them. Probing
+  the recurring case three times reproduced the failure once (1/3): that attempt returned
+  `finish_reason: "stop"` with **362 reasoning tokens and zero content tokens** — the model ends
+  normally and simply emits no answer, nowhere near any cap. Empty-answer retries are a 0731 build
+  behavior, not a truncation; each one re-bills the full ~13.7k-token prompt. Treat the cap raise
+  as removing one of two causes.
+- Likewise **do not read a single green backtest as a fix**: the run right after the raise went
+  8/8, a later run on the same build reproduced the same case's failure (7/8 + 1 error). Same
+  lesson as the 08-01 boundary-variance finding — one run cannot establish a fix or a drift.
 - The same build also scores gates-passed roles ~1 point lower (daily fit-score mean 10.9 → 9.6;
   backtest re-scores of identical postings confirm the level shift). Routing and gates are intact —
-  backtest_v2 8/8 green post-fix, artifact-depth/leadership caps firing correctly — so this is a
-  scale drift, not a judgment break. Standing-allocation cold-apply bar lowered fit ≥ 15 → ≥ 14
+  across three backtest runs the artifact-depth and leadership caps fired correctly every time and
+  no anchor changed side — so this is a scale drift, not a judgment break. The same three runs also
+  show the noise band on identical postings: one case scored 11 / 13 / 15, another 16 / 17 / 16, and
+  one swung GATE_FAIL ↔ RECRUITER_ONLY. Standing-allocation cold-apply bar lowered fit ≥ 15 → ≥ 14
   (guide, three sites) to keep the bar's real-world strictness unchanged on the new scale.
 - Watch item: eval_json verbosity was still climbing daily a week after cutover; if the scale keeps
   sliding, revisit the bar rather than the scoring rules.

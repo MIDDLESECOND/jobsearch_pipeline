@@ -40,10 +40,12 @@ from an identified upstream implementation:
 - canonical-at-write/current-chain ownership across duplicate merge and unlink operations;
 - role notes implemented by exposing the existing append-only `app_events` history;
 - the CSV export schema, chain-deduped summary rules, and spreadsheet-formula neutralization;
-- star tombstones, monotonic versions, and stale-tab/ABA protection; and
+- star tombstones, monotonic versions, and stale-tab/ABA protection;
 - the separation between scheduled interview plans and completed interview outcome events;
 - per-target pipeline run evidence, privacy-minimized failure categories, and the descriptive
-  first-storage/current-chain search-yield model.
+  first-storage/current-chain search-yield model; and
+- the draft/confirmed lifecycle, reusable prep-entry bank, versioned role-relevance links, and
+  least-disclosure rule that keeps private interview stories out of outreach briefs.
 
 ## Maintenance rule
 

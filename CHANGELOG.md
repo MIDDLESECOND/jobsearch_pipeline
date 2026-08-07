@@ -7,6 +7,18 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Confirmed interview-story and application-answer library
+
+- Added local `prep_entries` drafts for reusable interview stories and application answers, plus
+  versioned `prep_entry_roles` relevance links that follow current duplicate chains.
+- Only entries the user has explicitly confirmed and linked to a role enter its copied interview
+  context. Editing confirmed content or restoring an archive returns it to draft for re-review.
+- Kept the library out of ordinary job-card payloads and external outreach briefs. Prep context
+  labels selected notes as untrusted, user-maintained claims and asks the drafting assistant to
+  flag conflicts instead of inventing or silently reconciling details.
+- Retained archived content and link tombstones with optimistic versions so stale tabs and ABA
+  changes cannot silently overwrite newer state.
+
 ## 2026-08-07 — Pipeline health and search-yield evidence
 
 - Added durable `pipeline_runs` and per-target `pipeline_fetch_attempts` records for each LinkedIn

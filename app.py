@@ -43,6 +43,9 @@ from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, downloa
                        material_summaries, prep_context_bundle, snapshot_jd)
 from outreach import (CONTACT_KINDS, OUTREACH_PURPOSES, add_contact, chain_contacts,
                       contact_summaries, outreach_context_bundle, remove_contact)
+from prep_library import (ENTRY_KINDS, MAX_LIBRARY_ENTRIES, archive_entry, confirm_entry,
+                          create_entry, list_entries, restore_entry, role_entry_choices,
+                          set_role_link, update_entry)
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
@@ -325,6 +328,7 @@ def index():
         contact_kinds=list(CONTACT_KINDS),
         outreach_purposes=list(OUTREACH_PURPOSES),
         interview_modes=list(INTERVIEW_MODES),
+        prep_entry_kinds=list(ENTRY_KINDS),
         max_description_chars=cfg["settings"]["max_description_chars"],
         searches=cfg["searches"],
         today=date.today().isoformat(),
@@ -448,6 +452,118 @@ def api_health():
     conn = connect_db(cfg)
     try:
         return jsonify(health_snapshot(conn, cfg, days=days, run_limit=run_limit))
+    finally:
+        conn.close()
+
+
+@app.route("/api/prep-items", methods=["GET", "POST"])
+def api_prep_items():
+    """Bounded global prep library; content is lazy-loaded outside role-card payloads."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    if request.method == "GET":
+        try:
+            limit = int(request.args.get("limit", str(MAX_LIBRARY_ENTRIES)))
+            include_archived = request.args.get("include_archived", "0") == "1"
+            if not 1 <= limit <= MAX_LIBRARY_ENTRIES:
+                raise ValueError(f"limit must be from 1 to {MAX_LIBRARY_ENTRIES}")
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        conn = connect_db(load_config())
+        try:
+            return jsonify({
+                "ok": True,
+                "entries": list_entries(
+                    conn, include_archived=include_archived, limit=limit,
+                ),
+            })
+        finally:
+            conn.close()
+
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    conn = connect_db(load_config())
+    try:
+        action = body.get("action", "create")
+        try:
+            if action == "create":
+                entry = create_entry(
+                    conn, kind=body.get("kind"), title=body.get("title"),
+                    prompt=body.get("prompt"), response=body.get("response"),
+                    tags=body.get("tags", []),
+                )
+            elif action == "update":
+                entry = update_entry(
+                    conn, body.get("entry_id"), expected_version=body.get("expected_version"),
+                    kind=body.get("kind"), title=body.get("title"),
+                    prompt=body.get("prompt"), response=body.get("response"),
+                    tags=body.get("tags", []),
+                )
+            elif action == "confirm":
+                entry = confirm_entry(
+                    conn, body.get("entry_id"), expected_version=body.get("expected_version"),
+                )
+            elif action == "archive":
+                entry = archive_entry(
+                    conn, body.get("entry_id"), expected_version=body.get("expected_version"),
+                )
+            elif action == "restore":
+                entry = restore_entry(
+                    conn, body.get("entry_id"), expected_version=body.get("expected_version"),
+                )
+            else:
+                return jsonify({"ok": False, "message": "unknown prep-entry action"}), 400
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, "entry": entry}), 201 if action == "create" else 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/prep-links", methods=["GET", "POST"])
+def api_prep_links():
+    """Read or set absolute prep-entry relevance for a current duplicate chain."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True) if request.method == "POST" else {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    job_url = body.get("job_url") if request.method == "POST" else request.args.get("job_url")
+    if not isinstance(job_url, str) or not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        if request.method == "GET":
+            choices = role_entry_choices(conn, row, include_archived=True)
+            return jsonify({
+                "ok": True,
+                # The role-link dialog renders identity/state only. Full private responses
+                # stay behind the separately requested global-library endpoint.
+                "entries": [{
+                    key: item[key] for key in (
+                        "id", "kind", "title", "status", "link_linked",
+                        "link_revision", "link_root",
+                    )
+                } for item in choices],
+            })
+        try:
+            state = set_role_link(
+                conn, row, body.get("entry_id"), linked=body.get("linked"),
+                expected_linked=body.get("expected_linked"),
+                expected_revision=body.get("expected_revision"),
+                expected_root=body.get("expected_root"),
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, **state})
     finally:
         conn.close()
 

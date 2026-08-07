@@ -142,6 +142,33 @@ def _check_snapshot(conn) -> None:
                 "pipeline fetch attempt references a missing pipeline run: "
                 + ", ".join(str(row[0]) for row in attempt_orphans[:5])
             )
+    # Prep-library links live entirely inside SQLite, but a dangling owner, interaction, or
+    # entry would silently hide confirmed role context after restore.  Older archives do not
+    # have this table, so preserve format-v1 compatibility by checking conditionally.
+    has_prep_links = conn.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='prep_entry_roles'"""
+    ).fetchone()
+    if has_prep_links:
+        prep_orphans = conn.execute(
+            """SELECT pr.entry_id,pr.job_url,
+                      CASE WHEN pe.id IS NULL THEN 'entry'
+                           WHEN owner.job_url IS NULL THEN 'owner'
+                           ELSE 'interaction' END AS missing
+                 FROM prep_entry_roles pr
+                 LEFT JOIN prep_entries pe ON pe.id=pr.entry_id
+                 LEFT JOIN jobs owner ON owner.job_url=pr.job_url
+                 LEFT JOIN jobs interaction ON interaction.job_url=pr.interaction_url
+                WHERE pe.id IS NULL OR owner.job_url IS NULL OR interaction.job_url IS NULL
+                ORDER BY pr.entry_id,pr.job_url"""
+        ).fetchall()
+        if prep_orphans:
+            raise BackupError(
+                "prep library link references missing data: "
+                + ", ".join(
+                    f"{row[0]}/{row[1]} ({row[2]})" for row in prep_orphans[:5]
+                )
+            )
 
 
 def _counts(conn) -> dict[str, int]:

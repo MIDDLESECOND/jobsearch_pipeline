@@ -66,6 +66,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `chain.py` | repost/dedup chains, decision propagation, outcome tracking |
 | `core.py` | config, SQLite schema + inline migrations, shared parsing |
 | `materials.py` | submitted packet storage, text extraction, ATS checks, prep context |
+| `prep_library.py` | confirmed reusable interview stories/Q&A and role-relevance links |
 | `outreach.py` | chain-scoped role contacts and no-send outreach drafting briefs |
 | `tasks.py` | chain-scoped next actions, due dates, completion, and rescheduling |
 | `interviews.py` | chain-scoped interview schedules and local `.ics` export |
@@ -313,8 +314,15 @@ SHA-256 under the local, gitignored `application_materials/` directory; SQLite k
 chain-scoped relations and file/ATS metadata—not extracted resume or cover-letter text.
 The PDF check reports a missing/blank text layer, missing email or phone, and a conservative text-
 fragmentation warning. The reading-order signal is a heuristic, not proof of how every ATS parses
-the page. **Copy prep context** puts the frozen JD, actual submitted documents, and all prior
-events/notes on the clipboard. Packet chips distinguish available, missing, and checksum-failed
+the page. **Copy prep context** puts the frozen JD, actual submitted documents, all prior
+events/notes, and only the confirmed **Story & answer bank** entries explicitly linked to that
+role on the clipboard. New or edited entries remain drafts until **Confirm facts** is used;
+archiving retains the local record and role links but removes the entry from every context until
+it is restored and reconfirmed. The per-card **Prep library** control changes role relevance,
+while the global bank remains lazy-loaded and absent from normal
+job-list responses. Private prep entries are deliberately excluded from outreach briefs, and
+confirmation records the user's review—not independent verification. Packet chips distinguish
+available, missing, and checksum-failed
 objects; a partial Prep Context carries the same warning instead of claiming the full packet was
 copied. This drafts context only—it never sends a message or changes status.
 

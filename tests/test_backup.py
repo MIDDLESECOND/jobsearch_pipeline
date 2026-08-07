@@ -139,6 +139,34 @@ def test_backup_rejects_orphaned_pipeline_fetch_attempt(conn, tmp_path):
         create_backup(conn, tmp_path / "orphan-attempt.zip", created_at=NOW)
 
 
+@pytest.mark.parametrize("missing", ["entry", "owner", "interaction"])
+def test_backup_rejects_orphaned_prep_library_links(conn, tmp_path, missing):
+    make_job(conn, job_url="owner")
+    make_job(conn, job_url="interaction", repost_of="owner")
+    conn.execute(
+        """INSERT INTO prep_entries
+           (kind,title,prompt,response,tags_json,status,created_at,updated_at,confirmed_at,version)
+           VALUES ('story','Evidence',NULL,'Truth','[]','confirmed',
+                   '2026-08-07T00:00:00+00:00','2026-08-07T00:00:00+00:00',
+                   '2026-08-07T00:00:00+00:00',1)"""
+    )
+    entry_id = conn.execute("SELECT id FROM prep_entries").fetchone()[0]
+    conn.execute(
+        """INSERT INTO prep_entry_roles
+           (entry_id,job_url,interaction_url,linked,linked_at,version)
+           VALUES (?,?,?,1,'2026-08-07T00:00:00+00:00',1)""",
+        (entry_id, "owner", "interaction"),
+    )
+    if missing == "entry":
+        conn.execute("DELETE FROM prep_entries WHERE id=?", (entry_id,))
+    else:
+        conn.execute("DELETE FROM jobs WHERE job_url=?", (missing,))
+    conn.commit()
+
+    with pytest.raises(BackupError, match="prep library link references missing data"):
+        create_backup(conn, tmp_path / "orphan-prep.zip", created_at=NOW)
+
+
 def test_backup_refuses_existing_destination_and_uncommitted_source(conn, tmp_path):
     archive = tmp_path / "evidence.zip"
     archive.write_bytes(b"keep me")

@@ -222,6 +222,7 @@ def outreach_context_bundle(conn, row, *, contact_id, purpose, cfg=None):
         # concurrent duplicate merge/unlink.
         evidence = prep_context_bundle(
             conn, current, cfg, context_title="APPLICATION EVIDENCE",
+            include_library=False,
         )
         purpose_text = {
             "application_follow_up": (

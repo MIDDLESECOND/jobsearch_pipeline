@@ -29,7 +29,10 @@ re-export hub):
   shape's producer and consumers can't drift). The foundation; imports only `chain` and `states`.
 - `materials.py` — application-packet evidence: automatic JD snapshots, content-addressed
   resume/cover-letter storage, document extraction + ATS diagnostics, chain-scoped packet reads,
-  downloads, and interview-prep clipboard context. Imports `core` and `chain`.
+  downloads, and interview-prep clipboard context. Imports `core`, `chain`, and `prep_library`.
+- `prep_library.py` — reusable, user-authored interview stories/application answers plus
+  versioned role-relevance links. Only confirmed + linked entries may enter prep context; edits
+  return confirmed content to draft. Imports only the standard library.
 - `backup.py` — verified, non-overwriting evidence-unit archives containing one SQLite snapshot
   plus exactly the material objects catalogued by that snapshot. Verification is read-only; the
   module deliberately does not restore archives. Imports `materials` plus the standard library.
@@ -278,6 +281,17 @@ via Windows Task Scheduler.
   outcome within 14 days—no separate completion state—and prep context is read-only clipboard
   text from the frozen JD, actual documents, and chain event history. ATS reading-order output is
   explicitly heuristic; it must not be presented as proof of any vendor parser's behavior.
+
+- **Prep-library claims require confirmation and role relevance.** `prep_entries` is a global,
+  reusable local bank; `prep_entry_roles` maps relevance through canonical-at-write/current-chain
+  ownership. Draft, archived, or unlinked content never enters interview prep. Editing confirmed
+  content and restoring archived content return it to draft and clear confirmation. Role-link
+  mutations are absolute and versioned; unchecking on a merged chain clears all active owner links
+  without moving rows, while a duplicate-chain split by itself restores each link's original
+  ownership boundary. Prep content is user-maintained evidence, not generated biography or
+  independently verified truth. It remains
+  behind the clipboard context's untrusted-data boundary and is deliberately excluded from
+  outreach briefs to minimize disclosure.
 
 - **Role contacts are local evidence; outreach is review-only.** `job_contacts` rows store the
   canonical URL at write time plus the exact interaction posting and are mapped through that

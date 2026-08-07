@@ -561,6 +561,40 @@ def _role_stars_table_sql():
     """
 
 
+def _prep_entries_table_sql():
+    """Reusable user-authored prep notes; vocabularies are enforced in prep_library.py."""
+    return """
+        CREATE TABLE IF NOT EXISTS prep_entries (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind         TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            prompt       TEXT,
+            response     TEXT NOT NULL,
+            tags_json    TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            confirmed_at TEXT,
+            version      INTEGER NOT NULL DEFAULT 1
+        )
+    """
+
+
+def _prep_entry_roles_table_sql():
+    """Versioned role relevance, canonical-at-write and current-chain at read time."""
+    return """
+        CREATE TABLE IF NOT EXISTS prep_entry_roles (
+            entry_id       INTEGER NOT NULL,
+            job_url        TEXT NOT NULL,
+            interaction_url TEXT NOT NULL,
+            linked         INTEGER NOT NULL DEFAULT 1,
+            linked_at      TEXT NOT NULL,
+            version        INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (entry_id, job_url)
+        )
+    """
+
+
 def _dupe_candidate_dismissals_table_sql():
     """Versioned review state for pairs the user compared.
 
@@ -702,6 +736,8 @@ def get_db(cfg):
     conn.execute(_job_tasks_table_sql())
     conn.execute(_job_interviews_table_sql())
     conn.execute(_role_stars_table_sql())
+    conn.execute(_prep_entries_table_sql())
+    conn.execute(_prep_entry_roles_table_sql())
     conn.execute(_dupe_candidate_dismissals_table_sql())
     conn.execute(_pipeline_runs_table_sql())
     conn.execute(_pipeline_fetch_attempts_table_sql())
@@ -731,6 +767,10 @@ def get_db(cfg):
                  "ON job_interviews(status,starts_at,job_url)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_role_stars_at "
                  "ON role_stars(starred_at,job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prep_entries_status_updated "
+                 "ON prep_entries(status,updated_at,id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prep_entry_roles_chain "
+                 "ON prep_entry_roles(job_url,linked,entry_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started "
                  "ON pipeline_runs(started_at,id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_fetch_run_source "

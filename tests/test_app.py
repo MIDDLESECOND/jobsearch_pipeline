@@ -99,11 +99,90 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert "Star role" in html and "Unstar" in html
     assert "Activity ▸" in html and 'fetch("/api/timeline?job_url="' in html
     assert 'data-view="health">Health &amp; yield' in html
+    assert 'data-view="prep">Story &amp; answer bank' in html
+    assert 'id="prepEntryDialog"' in html and 'id="prepLinkDialog"' in html
+    assert 'url = "/api/prep-items?include_archived=1"' in html
+    assert 'fetch("/api/prep-links?job_url="' in html
+    assert "prepLinkTarget !== target" in html
     assert 'url = "/api/health?" + params' in html
     assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
     assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
     assert '<option value="AI leadership">AI leadership</option>' in html
     assert '<option value="manual">Manual intake</option>' in html
+
+
+# ----------------------------------------------------------- /api/prep-items
+
+def test_prep_library_api_requires_confirmation_and_role_link_before_context(
+        client, seed):
+    row = make_job(
+        seed, job_url="prep-role", app_status="applied", status_date="2026-08-05",
+    )
+    created = _post(client, "/api/prep-items", {
+        "action": "create", "kind": "story", "title": "Launch recovery",
+        "prompt": "Tell me about a difficult launch.",
+        "response": "I reduced scope and shipped the critical path.",
+        "tags": ["delivery"],
+    })
+    assert created.status_code == 201
+    draft = created.get_json()["entry"]
+    assert draft["status"] == "draft" and draft["version"] == 1
+
+    before = client.get("/api/prep?job_url=prep-role").get_json()["text"]
+    assert "Launch recovery" not in before
+    confirmed = _post(client, "/api/prep-items", {
+        "action": "confirm", "entry_id": draft["id"], "expected_version": 1,
+    }).get_json()["entry"]
+    choices = client.get("/api/prep-links?job_url=prep-role").get_json()["entries"]
+    choice = next(item for item in choices if item["id"] == draft["id"])
+    assert choice["status"] == "confirmed" and choice["link_linked"] is False
+    assert set(choice) == {
+        "id", "kind", "title", "status", "link_linked", "link_revision", "link_root",
+    }
+
+    linked = _post(client, "/api/prep-links", {
+        "job_url": row["job_url"], "entry_id": draft["id"], "linked": True,
+        "expected_linked": False, "expected_revision": choice["link_revision"],
+        "expected_root": choice["link_root"],
+    })
+    assert linked.status_code == 200 and linked.get_json()["linked"] is True
+    after = client.get("/api/prep?job_url=prep-role").get_json()["text"]
+    assert "Launch recovery" in after
+
+    edited = _post(client, "/api/prep-items", {
+        "action": "update", "entry_id": draft["id"],
+        "expected_version": confirmed["version"], "kind": "story",
+        "title": "Launch recovery", "prompt": None,
+        "response": "Edited details require review.", "tags": [],
+    }).get_json()["entry"]
+    assert edited["status"] == "draft"
+    assert "Launch recovery" not in client.get(
+        "/api/prep?job_url=prep-role"
+    ).get_json()["text"]
+
+
+def test_prep_library_api_is_lazy_bounded_and_origin_guarded(client, seed):
+    make_job(seed, job_url="prep-role")
+    assert client.get("/api/prep-items?limit=0").status_code == 400
+    assert client.get("/api/prep-links").status_code == 400
+    assert client.get("/api/prep-links?job_url=missing").status_code == 404
+    assert client.post("/api/prep-items", json=[]).status_code == 400
+    assert client.post("/api/prep-links", json=[]).status_code == 400
+    assert _post(client, "/api/prep-links", {
+        "job_url": "prep-role", "entry_id": True, "linked": True,
+        "expected_linked": False, "expected_revision": 0,
+        "expected_root": "prep-role",
+    }).status_code == 400
+    refused = _post(
+        client, "/api/prep-items",
+        {"kind": "story", "title": "x", "response": "y", "tags": []},
+        origin="http://evil.example",
+    )
+    assert refused.status_code == 403
+
+    jobs = client.get("/api/jobs?view=today&page=1&page_size=50&date=2026-06-01")
+    serialized = jobs.get_data(as_text=True)
+    assert "prep_entries" not in serialized and "Launch recovery" not in serialized
 
 
 # ---------------------------------------------------------------- /api/intake

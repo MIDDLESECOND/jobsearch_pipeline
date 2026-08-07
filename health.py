@@ -421,6 +421,7 @@ def _run_history(conn, limit):
     ).fetchall()
     sources_by_run = {row["id"]: [] for row in runs}
     attempts_by_run = {row["id"]: [] for row in runs}
+    attempt_totals_by_run = {row["id"]: 0 for row in runs}
     if runs:
         placeholders = ",".join("?" for _ in runs)
         for row in conn.execute(
@@ -453,6 +454,9 @@ def _run_history(conn, limit):
                 "error_kinds": sorted((row["error_kinds"] or "").split(","))
                                if row["error_kinds"] else [],
             })
+            attempt_totals_by_run[row["run_id"]] += (
+                int(row["attempted"]) + int(row["skipped"])
+            )
         for row in conn.execute(
             f"""SELECT id,run_id,source_family,target_kind,target_label,started_at,ended_at,
                         status,skip_reason,error_kind,returned_count,eligible_count,
@@ -478,6 +482,10 @@ def _run_history(conn, limit):
         "duration_seconds": _duration_seconds(row["started_at"], row["ended_at"]),
         "sources": sources_by_run[row["id"]],
         "attempts": attempts_by_run[row["id"]],
+        "attempts_total": attempt_totals_by_run[row["id"]],
+        "attempts_truncated": (
+            len(attempts_by_run[row["id"]]) < attempt_totals_by_run[row["id"]]
+        ),
     } for row in runs]
 
 

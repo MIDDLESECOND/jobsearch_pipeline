@@ -110,6 +110,8 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert "jdDiffLeft.value !== leftId || jdDiffRight.value !== rightId" in html
     assert "Selections changed; compare again." in html
     assert 'url = "/api/health?" + params' in html
+    assert "latestRun.attempts_truncated" in html
+    assert "target attempts; older details were omitted" in html
     assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
     assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
     assert '<option value="AI leadership">AI leadership</option>' in html
@@ -1283,6 +1285,8 @@ def test_health_api_returns_aggregates_without_private_posting_or_error_text(
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["runs"][0]["status"] == "degraded"
+    assert payload["runs"][0]["attempts_total"] == 1
+    assert payload["runs"][0]["attempts_truncated"] is False
     assert payload["search_effectiveness"]["total"] >= 1
     serialized = repr(payload)
     assert "Private title" not in serialized

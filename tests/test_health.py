@@ -90,6 +90,44 @@ def test_run_lifecycle_persists_bounded_structured_source_facts(conn):
         )
 
 
+def test_run_history_marks_globally_bounded_attempt_details_as_partial(conn, monkeypatch):
+    import health
+    from health import finish_pipeline_run, health_snapshot, start_pipeline_run
+
+    older = start_pipeline_run(conn, trigger="manual", run_date="2026-08-06")
+    finish_pipeline_run(conn, older, status="succeeded")
+    newer = start_pipeline_run(conn, trigger="manual", run_date="2026-08-07")
+    finish_pipeline_run(conn, newer, status="succeeded")
+    rows = []
+    for run_id, prefix in ((older, "old"), (newer, "new")):
+        for index in range(2):
+            rows.append((
+                run_id, "linkedin", "search", f"{prefix}-{index}",
+                "2026-08-07T09:00:00+00:00", "2026-08-07T09:01:00+00:00",
+                "success", 0, 0, 0, 0,
+            ))
+    conn.executemany(
+        """INSERT INTO pipeline_fetch_attempts
+           (run_id,source_family,target_kind,target_label,started_at,ended_at,status,
+            returned_count,eligible_count,inserted_count,repost_count)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        rows,
+    )
+    conn.commit()
+    monkeypatch.setattr(health, "MAX_ATTEMPTS_IN_RESPONSE", 3)
+
+    runs = health_snapshot(
+        conn, _cfg(), today=date(2026, 8, 7), days=30, run_limit=2,
+    )["runs"]
+
+    assert [(run["id"], len(run["attempts"])) for run in runs] == [
+        (newer, 2), (older, 1),
+    ]
+    assert [(run["attempts_total"], run["attempts_truncated"]) for run in runs] == [
+        (2, False), (2, True),
+    ]
+
+
 def test_search_effectiveness_dedupes_chains_and_includes_configured_zero_rows(conn):
     from health import health_snapshot
 

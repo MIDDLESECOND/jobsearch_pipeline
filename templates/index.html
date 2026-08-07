@@ -2671,8 +2671,12 @@ function renderHealth() {
 
   const attemptPanel = document.createElement("section");
   attemptPanel.className = "health-panel";
-  const attempts = runs[0]?.attempts || [];
-  attemptPanel.innerHTML = `<h2>Latest run targets</h2>` + (attempts.length
+  const latestRun = runs[0] || {};
+  const attempts = latestRun.attempts || [];
+  const attemptCompleteness = latestRun.attempts_truncated
+    ? `<div class="meta">Showing ${attempts.length} of ${Number(latestRun.attempts_total || 0)} target attempts; older details were omitted by the response limit.</div>`
+    : "";
+  attemptPanel.innerHTML = `<h2>Latest run targets</h2>${attemptCompleteness}` + (attempts.length
     ? attempts.map(attempt => {
         const counts = attempt.status === "success"
           ? ` · ${attempt.returned_count == null ? "?" : Number(attempt.returned_count)} returned`

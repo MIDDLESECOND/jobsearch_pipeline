@@ -294,7 +294,9 @@ via Windows Task Scheduler.
   ownership boundary. Prep content is user-maintained evidence, not generated biography or
   independently verified truth. It remains
   behind the clipboard context's untrusted-data boundary and is deliberately excluded from
-  outreach briefs to minimize disclosure.
+  outreach briefs to minimize disclosure. A role-link revision binds the entry version/status,
+  the complete current chain membership, and retained link-row versions, so an old picker cannot
+  attach newly edited/reconfirmed private content or silently broaden it across a merge/split.
 
 - **JD differences are derived evidence, not a new history store.** `jd_diff.py` reads each
   current-chain posting's first-stored description plus every immutable `jd_snapshot` owned by the
@@ -348,7 +350,10 @@ via Windows Task Scheduler.
   discovery, the current effective decision, append-only application events/material links, current
   contact/task/interview records, and the current star through each owner posting's present chain
   root. It emits only timestamps the owning tables actually retain and is bounded to the latest
-  entries. A snoozed task does not pretend its current due date was the original due date; a mutable
+  entries. Legacy naive timestamps mean the machine-local wall clock used by their producers;
+  aware timestamps retain their offsets. Both the SQL pre-limit ordering and final Python ordering
+  normalize those values to the same UTC instant. A snoozed task does not pretend its current due
+  date was the original due date; a mutable
   interview contributes only its creation and the one latest `updated_at`; an unstarred tombstone
   has no fabricated unstar time. `/api/events` remains the append-only application-event contract.
 
@@ -365,6 +370,8 @@ via Windows Task Scheduler.
   posting and cohort only chains first seen inside the selected window. Merge/unlink can therefore
   change current-chain counts; none of these are causal rankings. Never store raw query/request
   URLs, exception messages, credentials, JD text, or private role evidence in the run tables/API.
+  Target-attempt detail is response-bounded; each run returns its full attempt count and an explicit
+  truncation flag so an omitted tail is never presented as complete.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

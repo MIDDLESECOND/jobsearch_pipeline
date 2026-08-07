@@ -275,12 +275,15 @@ discovery, the current decision, application events and notes, packet attachment
 interview schedules, and the current star. The view follows the role's current duplicate chain and
 is capped to keep a large history from bloating every card request. It does not create another event
 store or infer missing history: mutable task/interview/star tables contribute only the timestamps
-they actually retain.
+they actually retain. Older local timestamps without an offset and newer UTC-aware timestamps are
+normalized to actual instants before both per-category limits and the final ordering are applied.
 
 Open **Health & yield** for structured pipeline evidence. Each configured LinkedIn search,
 Adzuna query, and ATS board is recorded as succeeded, failed, or intentionally skipped; zero new
 postings is not treated as a failure. Recent runs show target counts and categorized failures
-without storing raw exception messages, request URLs, credentials, or posting text. The yield table
+without storing raw exception messages, request URLs, credentials, or posting text. If the bounded
+response omits older target-detail rows, the UI reports the displayed and total counts instead of
+presenting a partial list as complete. The yield table
 uses a selectable `first_seen` cohort and deduplicates current role chains. Its source/search credit
 splits two facts: posting volume belongs to each stored row's own source/search; role, strong-match,
 and applied counts assign each current chain once to its earliest stored posting, and only when that

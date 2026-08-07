@@ -24,11 +24,18 @@ identifier was present at that revision; normal copyright restrictions therefore
 These mappings describe influence at the product-pattern level. They do not imply that every
 detail of a resulting feature came from the named project.
 
-The source-influenced feature bundle audited for this record is commit `6714f91`. A separate
-security change, commit `94e2317` on the local security-review branch, is a project-specific
-defensive fix that redacts Adzuna query-string credentials from logged request failures. No
-open-source feature implementation was identified as its inspiration. Its commit metadata
-separately records the AI-assisted authorship used for that change.
+The source-influenced implementations audited for this record map to these commits:
+
+- `6714f91`: the Job Trail / Applic / JobSync-informed interview, shortlist, and review-workflow
+  additions;
+- `292b821`: the Candidex / Jobtra-informed portable evidence-backup boundary;
+- `2dea7cb`: the Candidex-informed explicit manual-intake path; and
+- `82bc8b1`: the JobSync-informed bounded unified Activity view.
+
+A separate security change, commit `94e2317` on the local security-review branch, is a
+project-specific defensive fix that redacts Adzuna query-string credentials from logged request
+failures. No open-source feature implementation was identified as its inspiration. Its commit
+metadata separately records the AI-assisted authorship used for that change.
 
 ## Independently designed project-specific behavior
 

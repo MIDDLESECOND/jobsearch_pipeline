@@ -7,6 +7,17 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Verified evidence-unit backups
+
+- Added `pipeline.py backup` to create a non-overwriting ZIP containing one consistent SQLite
+  snapshot and exactly the immutable application-material objects catalogued by that snapshot.
+- Added a versioned JSON manifest with database/object sizes and SHA-256 digests. Creation fails
+  closed on missing, corrupt, invalid, duplicated, or path-escaping material metadata.
+- Added `backup --verify` to cross-check ZIP membership, hashes, SQLite integrity, material links,
+  object catalog, and manifest counts without loading private config or mutating live data.
+- Kept restore deliberately out of scope: a valid archive is evidence that the backup is coherent,
+  not authorization to overwrite the active database and object store.
+
 ## 2026-08-06 — Explicit starred-role shortlist
 
 - Added chain-scoped manual stars and a bounded **Starred roles** Action Center queue, independent

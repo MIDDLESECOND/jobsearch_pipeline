@@ -173,6 +173,7 @@ Command Prompt) opened in the project folder. The commands:
 | `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. The only one that hits the network/API (costs money). |
 | `report` | Rebuild a report from the database — **free**, no fetching, no API calls. Defaults to today; `--date YYYY-MM-DD` for a past day. |
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
+| `backup` | Create and independently verify a ZIP containing the SQLite snapshot plus its catalogued application materials. `--verify PATH` rechecks one without restoring it. |
 | `ui` | Launch a **local web UI** for triaging postings by clicking instead of typing (see §4). |
 | `applied --url X` | Mark a posting as **applied-to**. |
 | `passed --url X` | Mark a posting as **reviewed & decided no**. |
@@ -190,6 +191,8 @@ python pipeline.py passed  --url 4431386393 --undo   # oops, undo it
 python pipeline.py report                      # refresh the report after marking
 python pipeline.py report --date 2026-06-10    # rebuild a past day's report
 python pipeline.py stats                        # counts
+python pipeline.py backup                       # verified evidence ZIP under backups/
+python pipeline.py backup --verify backups\jobsearch-evidence-YYYYMMDD-HHMMSS.zip
 python pipeline.py prune --days 90 --vacuum     # (occasional) clear old rejected postings' text, shrink jobs.db
 ```
 
@@ -297,6 +300,16 @@ For a complete backup, stop the UI and make sure no pipeline or scheduled run is
 same directory before restarting the tool. The database without the object store retains attachment
 metadata but loses the JD/document bytes; the object store without the database loses their role and
 chain relationships. Reports are not a substitute for either part.
+
+Prefer `python pipeline.py backup`: it writes a timestamped ZIP under the gitignored `backups/`
+directory, uses SQLite's online-backup API for a consistent database snapshot, and includes exactly
+the immutable material objects named by that snapshot. It refuses missing, corrupt, duplicate, or
+path-escaping object metadata. The archive is not reported successful until hashes, SQLite
+integrity, link/catalog agreement, and ZIP membership pass an independent verification. Use
+`python pipeline.py backup --verify PATH` to recheck one later. Verification never restores or
+overwrites live evidence; restoration remains an explicit offline operation. The ZIP contains the
+same private job, contact, event, and submitted-document evidence as the live store. Keep it local
+and protected; it is not the redacted CSV export and must not be attached to issues or committed.
 
 History views are server-paged (50 cards at a time) instead of downloading the entire database.
 Use the filter row to search title/company/location, narrow by verdict or source, set a minimum

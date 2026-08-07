@@ -30,6 +30,9 @@ re-export hub):
 - `materials.py` — application-packet evidence: automatic JD snapshots, content-addressed
   resume/cover-letter storage, document extraction + ATS diagnostics, chain-scoped packet reads,
   downloads, and interview-prep clipboard context. Imports `core` and `chain`.
+- `backup.py` — verified, non-overwriting evidence-unit archives containing one SQLite snapshot
+  plus exactly the material objects catalogued by that snapshot. Verification is read-only; the
+  module deliberately does not restore archives. Imports `materials` plus the standard library.
 - `outreach.py` — manually verified role contacts plus clipboard-only outreach drafting briefs.
   Contacts follow canonical-at-write/current-chain reads; briefs reuse packet/event evidence and
   never send messages. Imports `chain` and `materials`.
@@ -94,6 +97,8 @@ python pipeline.py run                    # full cycle: fetch → error requeue 
 #   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; bare `run` always executes
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
+python pipeline.py backup [--output PATH]          # create + verify an evidence ZIP
+python pipeline.py backup --verify PATH            # read-only validation; never restores
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
 python pipeline.py applied --url <id> [--resume V] [--channel C] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral)
@@ -170,6 +175,14 @@ via Windows Task Scheduler.
   of the database whenever a process has it open — copy/back up the evidence unit only when nothing has
   it open (a clean close checkpoints and removes them), and never delete a hot `-wal` (it holds
   committed rows).
+  `pipeline.py backup` is the safe operational path: SQLite's backup API creates a consistent
+  database snapshot, then only the immutable objects catalogued by that snapshot are copied. The
+  manifest records sizes and SHA-256 digests, and creation succeeds only after an independent
+  verification pass cross-checks ZIP membership, database integrity, links, catalog, and object
+  bytes. Existing destinations are never overwritten. There is intentionally no automatic restore;
+  validating an archive does not authorize replacing live evidence. Backup ZIPs contain the full
+  private evidence unit, stay under the gitignored `backups/` directory by default, and must never
+  be published or attached as diagnostics.
 
 - **Dedup is two-layer and guards against double-applying.** Beyond the `job_url` primary key, a
   content fingerprint (normalized company+location + **exact** normalized title) catches LinkedIn

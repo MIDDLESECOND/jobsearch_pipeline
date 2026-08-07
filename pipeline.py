@@ -23,6 +23,8 @@ Usage:
                                                 #   ghosted, …; --type note = bare note) [--date D] [--note N]
                                                 #   --undo removes the chain's last recorded event
   python pipeline.py prune [--days 90] [--vacuum]  # clear old rejected postings' descriptions; shrink jobs.db
+  python pipeline.py backup [--output PATH]        # verified jobs.db + application_materials ZIP
+  python pipeline.py backup --verify PATH          # validate an existing backup without restoring it
   # add --undo to applied / passed / reject to clear what you set
 
 Requires the API key for the configured provider (config.yaml): DEEPSEEK_API_KEY by default,
@@ -38,7 +40,8 @@ from datetime import date, datetime, timedelta
 # This module is the CLI/orchestrator ONLY: it imports exactly what `run` and the cmd_*
 # wrappers call. Consumers (app.py, the tests, backtest_v2 / compare_models) import the real
 # modules directly — do not re-export names here for them.
-from core import load_config, get_db, run_log, meta_get, meta_set
+from core import BASE_DIR, load_config, get_db, run_log, meta_get, meta_set
+from backup import BackupError, create_backup, verify_backup
 from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
                     STATUS_SALARY_FILTERED)
 from chain import (
@@ -117,6 +120,20 @@ def cmd_prune(conn, days, vacuum):
         print("[prune] VACUUM…")
         conn.execute("VACUUM")
         print("[prune] done — file compacted")
+
+
+def cmd_backup(conn, output=None):
+    """Create and independently verify a non-overwriting evidence-unit archive."""
+    destination = output or (
+        BASE_DIR / "backups" /
+        f"jobsearch-evidence-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    )
+    summary = create_backup(conn, destination)
+    print(
+        f"[backup] verified {destination} — {summary['jobs']} job(s), "
+        f"{summary['material_objects']} material object(s)"
+    )
+    return destination, summary
 
 
 def cmd_mark(conn, url, status, resume=None, channel=None):
@@ -374,7 +391,8 @@ def _cooldown_active(last_ok_iso, now, minutes=COOLDOWN_MINUTES):
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
-                                        "expired", "reject", "event", "dupe", "prune", "ui"])
+                                        "expired", "reject", "event", "dupe", "prune",
+                                        "backup", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
                                    "`event`: the date the event happened (default today)")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / "
@@ -398,10 +416,18 @@ def main():
                     help="`prune`: also VACUUM so the freed pages shrink jobs.db on disk "
                          "(under WAL the shrink lands at checkpoint — i.e. once no other "
                          "process, e.g. the web UI, has the DB open)")
+    ap.add_argument("--output", help="`backup`: destination ZIP (default: backups/ with timestamp)")
+    ap.add_argument("--verify", dest="verify_backup_path",
+                    help="`backup`: verify this archive without restoring or opening config.yaml")
     ap.add_argument("--scheduled", action="store_true",
                     help=f"`run`: invoked by the scheduler — skip (no-op) if the last successful "
                          f"run ended < {COOLDOWN_MINUTES} min ago; a bare `run` always executes")
     args = ap.parse_args()
+
+    if args.command != "backup" and (args.output or args.verify_backup_path):
+        ap.error("--output/--verify are only valid with `backup`")
+    if args.command == "backup" and args.output and args.verify_backup_path:
+        ap.error("`backup` accepts either --output or --verify, not both")
 
     # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's
     # age-label anchor parses it strictly, so a typo'd date must die here with a usable
@@ -420,6 +446,18 @@ def main():
             print("[ui] Flask is required — run: pip install -r requirements.txt", file=sys.stderr)
             return
         app.serve()
+        return
+
+    if args.command == "backup" and args.verify_backup_path:
+        try:
+            summary = verify_backup(args.verify_backup_path)
+        except (BackupError, OSError) as exc:
+            print(f"[backup] verification failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(
+            f"[backup] verified {args.verify_backup_path} — {summary['jobs']} job(s), "
+            f"{summary['material_objects']} material object(s)"
+        )
         return
 
     # A broken config dies HERE with the collected problem list (core.validate_config) —
@@ -539,6 +577,12 @@ def main():
         cmd_dupe(conn, args.url, args.of, args.undo, args.yes)
     elif args.command == "prune":
         cmd_prune(conn, args.days, args.vacuum)
+    elif args.command == "backup":
+        try:
+            cmd_backup(conn, args.output)
+        except (BackupError, OSError) as exc:
+            print(f"[backup] failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

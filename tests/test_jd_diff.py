@@ -149,7 +149,8 @@ def test_new_snapshot_header_normalizes_multiline_metadata_without_leaking_it(co
     values[field] = values[field] + "\nInjected metadata"
     row = make_job(
         conn, job_url="private-url", description="Only JD body", app_status="applied",
-        status_date="2026-08-05", **values,
+        status_date="2026-08-05", title=values["title"], company=values["company"],
+        location=values["location"],
     )
     materials.snapshot_jd(conn, row, _cfg(conn))
 

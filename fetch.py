@@ -26,7 +26,7 @@ from posting_store import insert_posting as _insert_posting
 
 # ---------------------------------------------------------------------- fetch
 
-def fetch_new_jobs(cfg, conn):
+def fetch_new_jobs(cfg, conn) -> FetchSummary:
     """Run every configured search; insert unseen postings as status='new'."""
     from jobspy import scrape_jobs  # imported here so `report` works even if jobspy breaks
 
@@ -273,7 +273,7 @@ def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
         return json.load(resp).get("results", [])
 
 
-def fetch_adzuna(cfg, conn):
+def fetch_adzuna(cfg, conn) -> FetchSummary:
     """Fetch postings from the Adzuna API for every search that defines an `adzuna:` block;
     insert unseen ones as status='new', source='adzuna'. No-op (with a notice) if the
     ADZUNA_APP_ID / ADZUNA_APP_KEY credentials are absent, so `run` still works without it."""
@@ -634,7 +634,7 @@ def _ats_get(url):
         return json.load(resp)
 
 
-def fetch_ats(cfg, conn):
+def fetch_ats(cfg, conn) -> FetchSummary:
     """Fetch postings from company ATS boards (the Greenhouse/Lever/Ashby public JSON APIs)
     for every company under settings.ats.companies; insert unseen postings matching the shared
     title/location filters as status='new', source='<board>'. No credentials — the gate is

@@ -19,14 +19,23 @@ MAX_ATTEMPTS_IN_RESPONSE = 1_000
 _RUN_STATUSES = {"running", "succeeded", "degraded", "failed", "interrupted", "skipped"}
 _ATTEMPT_STATUSES = {"success", "failed", "skipped"}
 _SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$")
-_ACTIVE_RUN_ID = ContextVar("pipeline_health_run_id", default=None)
+_ACTIVE_RUN_ID: ContextVar[int | None] = ContextVar(
+    "pipeline_health_run_id", default=None,
+)
 
 
 class FetchSummary(int):
     """Inserted count plus source-unit outcomes, while remaining integer-compatible."""
 
-    def __new__(cls, inserted, *, units, successes, failures,
-                skipped_reason=None, error_type=None):
+    units: int
+    successes: int
+    failures: int
+    skipped_reason: str | None
+    error_type: str | None
+
+    def __new__(cls, inserted: int, *, units: int, successes: int, failures: int,
+                skipped_reason: str | None = None,
+                error_type: str | None = None) -> "FetchSummary":
         values = (inserted, units, successes, failures)
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
                for value in values):

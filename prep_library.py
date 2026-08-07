@@ -55,6 +55,8 @@ def _normalize(kind, title, prompt, response, tags):
     seen = set()
     for tag in tags:
         normalized = _text(tag, "tag", required=True, maximum=MAX_TAG_CHARS)
+        if normalized is None:  # Required text either raises above or returns a string.
+            raise RuntimeError("required tag normalization returned no value")
         key = normalized.casefold()
         if key not in seen:
             seen.add(key)
@@ -64,7 +66,7 @@ def _normalize(kind, title, prompt, response, tags):
 
 def _entry(row):
     if row is None:
-        return None
+        raise RuntimeError("prep entry row unexpectedly missing")
     value = dict(row)
     try:
         tags = json.loads(value.pop("tags_json") or "[]")

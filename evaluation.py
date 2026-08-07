@@ -225,6 +225,13 @@ def _call_anthropic(client, model, system_prompt, user_msg):
             getattr(u, "cache_creation_input_tokens", 0) or 0)
 
 
+# The one production knob for DeepSeek reasoning depth. Module-level so probe
+# scripts can mirror the EXACT production request shape by reference instead of
+# hardcoding a copy that silently goes stale when this changes (noise_probe's
+# "prod" condition measured the wrong tier for ten minutes the day this landed).
+DEEPSEEK_EFFORT = "low"
+
+
 def _call_deepseek(api_key, model, system_prompt, user_msg):
     """Return (text, fresh_in_tok, out_tok, cache_read_tok, cache_write_tok).
     V4 is a reasoning model — it thinks before the JSON answer, so max_tokens must
@@ -246,7 +253,7 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": model, "max_tokens": 16000, "temperature": 0,
-            "reasoning_effort": "low",
+            "reasoning_effort": DEEPSEEK_EFFORT,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": user_msg}],

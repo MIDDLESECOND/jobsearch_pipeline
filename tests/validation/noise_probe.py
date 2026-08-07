@@ -54,7 +54,9 @@ RESULTS_DIR = Path(__file__).with_name("results")
 MAX_TOKENS = 16000
 TIMEOUT = 300
 EFFORT_BODY = {
-    "prod": {},                                   # exactly what production sends
+    # "prod" mirrors _call_deepseek BY REFERENCE — a hardcoded copy here measured
+    # the wrong tier within minutes of the production effort changing.
+    "prod": {"reasoning_effort": evaluation.DEEPSEEK_EFFORT},
     "high": {"reasoning_effort": "high"},
     "low": {"reasoning_effort": "low"},
     "none": {"thinking": {"type": "disabled"}},

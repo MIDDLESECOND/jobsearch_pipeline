@@ -226,6 +226,21 @@ def main():
         ok = verdict in accepted
 
         extra_lines = []
+        # Output-contract assertion (2026-08-07, with the gate_results schema
+        # addition): every case, whatever its expected verdict, must come back with
+        # an explicit PASS/FAIL for all six gates and no self-contradiction between
+        # the gate table and the verdict. This is where "the model silently skipped
+        # a gate" becomes a red — production only flags it (assistive), the
+        # regression guard is the enforcement point.
+        gr = res.get("gate_results") or {}
+        missing = [g for g in evaluation.GATE_NAMES if gr.get(g) not in ("PASS", "FAIL")]
+        if missing:
+            ok = False
+            extra_lines.append(f"gate_results INCOMPLETE — no explicit verdict for {missing}")
+        if "gate-results-inconsistent" in (res.get("flags") or []):
+            ok = False
+            extra_lines.append("gate_results INCONSISTENT with the verdict "
+                               f"(gate_results={gr}, failed_gate={res.get('failed_gate')})")
         if extra:
             if "flag" in extra:
                 hit = any(_norm(extra["flag"]) in _norm(f) for f in flags)

@@ -145,6 +145,87 @@ def test_unknown_verdict_becomes_gate_fail():
     assert r["bucket"] is None
 
 
+# ----- gate_results: the per-gate output contract (schema addition 2026-08-07) ---
+# Normalization is assistive and never verdict-changing: a malformed diagnostics
+# field must not re-bucket a role, it must earn a flag the human (and backtest) sees.
+
+def _gr(**overrides):
+    gr = {g: "PASS" for g in evaluation.GATE_NAMES}
+    gr.update(overrides)
+    return gr
+
+
+def test_gate_results_complete_and_consistent_passes_clean():
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), gate_results=_gr())
+    assert r["gate_results"] == _gr()
+    assert "gate-results-incomplete" not in r["flags"]
+    assert "gate-results-inconsistent" not in r["flags"]
+
+
+def test_gate_results_missing_gate_flags_incomplete_without_touching_verdict():
+    partial = _gr()
+    del partial["work_auth"]
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), gate_results=partial)
+    assert r["verdict"] == "PASS"          # assistive: never re-routes
+    assert r["gate_results"]["work_auth"] is None
+    assert "gate-results-incomplete" in r["flags"]
+
+
+def test_gate_results_absent_entirely_flags_incomplete():
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3))
+    assert all(v is None for v in r["gate_results"].values())
+    assert "gate-results-incomplete" in r["flags"]
+
+
+def test_gate_results_non_dict_fails_soft():
+    # Same container-type discipline as score_breakdown: runs outside the retry
+    # try/except, so a list/string here must degrade, never throw.
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              gate_results=["years_floor: PASS"])
+    assert all(v is None for v in r["gate_results"].values())
+    assert "gate-results-incomplete" in r["flags"]
+
+
+def test_gate_results_case_and_whitespace_normalized():
+    r = _norm(verdict="GATE_FAIL", failed_gate="years_floor",
+              gate_results=_gr(years_floor=" fail "))
+    assert r["gate_results"]["years_floor"] == "FAIL"
+    assert "gate-results-inconsistent" not in r["flags"]
+
+
+def test_gate_fail_whose_named_gate_reads_pass_is_inconsistent():
+    r = _norm(verdict="GATE_FAIL", failed_gate="years_floor", gate_results=_gr())
+    assert r["verdict"] == "GATE_FAIL"
+    assert "gate-results-inconsistent" in r["flags"]
+
+
+def test_gate_fail_other_with_all_gates_passing_is_consistent():
+    # The unmeetable-qualification rule fails OUTSIDE the six named gates: an
+    # "other" failed_gate with six PASSes is the documented shape, not a conflict.
+    r = _norm(verdict="GATE_FAIL", failed_gate="other", gate_results=_gr())
+    assert "gate-results-inconsistent" not in r["flags"]
+
+
+def test_pass_verdict_with_an_explicit_gate_fail_is_inconsistent_but_uncapped():
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              gate_results=_gr(employment_type="FAIL"))
+    assert r["verdict"] == "PASS"          # flag, don't re-route
+    assert "gate-results-inconsistent" in r["flags"]
+
+
+def test_gate_results_junk_value_reads_as_missing():
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              gate_results=_gr(role_substance="N/A"))
+    assert r["gate_results"]["role_substance"] is None
+    assert "gate-results-incomplete" in r["flags"]
+
+
+def test_gate_results_preserves_existing_flags():
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              gate_results=_gr(), flags=["management-drift"])
+    assert r["flags"] == ["management-drift"]
+
+
 # ----- retryable-vs-fatal error classification + the error-row requeue -----------
 
 class _HttpxStyleError(Exception):

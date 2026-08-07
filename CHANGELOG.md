@@ -7,6 +7,25 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Schema: per-gate explicit results (`gate_results` in eval output)
+
+- The eval output contract now requires an explicit PASS/FAIL for **each of the six hard
+  gates by name**, on every evaluation — including gate failures (the remaining gates are
+  still reported) and trivially-satisfied gates. Motivation: the documented failure mode of
+  long rule documents is *silent omission* — a model can skip a rule while narrating
+  compliance (the 07-21 matcher-line decay was this mechanism), and a bare verdict carries
+  no trace of it. A structured per-gate field turns a skipped gate into a visible hole.
+- `normalize_result` normalizes the field case/whitespace-insensitively and adds
+  **assistive flags only**: `gate-results-incomplete` (a gate has no explicit verdict) and
+  `gate-results-inconsistent` (the gate table contradicts the verdict — with the exception
+  that `failed_gate: "other"` alongside six PASSes is the documented shape of the
+  unmeetable-qualification rule, not a conflict). Deliberately **never verdict-changing**,
+  unlike the depth/leadership caps: auto-capping on a diagnostics field would let one
+  hallucinated FAIL string re-bucket a clean role.
+- `backtest_v2` is the enforcement point: an incomplete or self-contradictory gate table
+  fails the case even when the verdict matched. Old `eval_json` rows lack the field and are
+  unaffected (nothing re-reads them through the new path).
+
 ## 2026-08-07 — Guide surfaces reconverged: the 07-30 gate rules reach the pipeline
 
 Discovered while re-syncing the Claude.ai Project's uploaded guide: the repo guide and the

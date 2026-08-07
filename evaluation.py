@@ -74,6 +74,7 @@ even if the total is 16-18 and every other line is strong. Never "PASS" a depth-
 Respond with ONLY a JSON object, no markdown fences, no preamble:
 {{
   "verdict": "PASS" or "GATE_FAIL" or "RECRUITER_ONLY",
+  "gate_results": {{"years_floor": "PASS" or "FAIL", "domain_requirement": "PASS" or "FAIL", "role_substance": "PASS" or "FAIL", "tool_requirement": "PASS" or "FAIL", "work_auth": "PASS" or "FAIL", "employment_type": "PASS" or "FAIL"}} — MANDATORY: give an explicit verdict for EVERY one of the six gates by name, even on a GATE_FAIL (evaluate the remaining gates anyway) and even when a gate is trivially satisfied. A gate you did not consider must be reported, not omitted.,
   "failed_gate": null or one of ["years_floor","domain_requirement","role_substance","tool_requirement","work_auth","employment_type"],
   "gate_notes": "one short sentence on the decisive gate finding",
   "fit_score": null or integer 0-18 (set whenever gates pass — i.e. for PASS and RECRUITER_ONLY),
@@ -152,6 +153,41 @@ def normalize_result(result):
     bucket = result.get("bucket")
     if bucket not in (1, 2, 3, None):
         result["bucket"] = None
+
+    # Per-gate explicit results (schema addition 2026-08-07). Rationale: the failure
+    # mode of long rule documents is SILENT omission — a model can skip a gate while
+    # narrating compliance, and nothing in a bare verdict shows it (the 07-21
+    # matcher-line decay was this mechanism; DriftBench measured models restating
+    # rules they were violating). A structured per-gate field turns a skipped gate
+    # into a visible None that backtest_v2 asserts on. Normalization here is
+    # assistive and NEVER verdict-changing (unlike the depth/leadership caps): a
+    # malformed or inconsistent gate_results earns a flag for the human, because
+    # auto-capping on a diagnostics field would let one hallucinated FAIL string
+    # bucket-1 a clean role. Same no-throw discipline as the caps — this runs
+    # outside the retry loop, so every access fails soft.
+    gr = result.get("gate_results")
+    gr = gr if isinstance(gr, dict) else {}
+    norm_gr = {}
+    for gate in GATE_NAMES:
+        v = gr.get(gate)
+        v = v.strip().upper() if isinstance(v, str) else None
+        norm_gr[gate] = v if v in ("PASS", "FAIL") else None
+    result["gate_results"] = norm_gr
+
+    flags = result.get("flags")
+    flags = flags if isinstance(flags, list) else []
+    if any(v is None for v in norm_gr.values()):
+        flags.append("gate-results-incomplete")
+    explicit_fails = {g for g, v in norm_gr.items() if v == "FAIL"}
+    failed_gate = result.get("failed_gate")
+    if verdict == VERDICT_GATE_FAIL:
+        # failed_gate "other" (the unmeetable-qualification rule) legitimately fails
+        # OUTSIDE the six named gates — all six reading PASS is consistent there.
+        if failed_gate in GATE_NAMES and norm_gr.get(failed_gate) == "PASS":
+            flags.append("gate-results-inconsistent")
+    elif explicit_fails:
+        flags.append("gate-results-inconsistent")
+    result["flags"] = flags
 
     result["verdict"] = verdict
     return result

@@ -72,6 +72,8 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `exports.py` | chain-deduped, spreadsheet-safe local CSV summaries |
 | `watchlist.py` | explicit chain-scoped starred roles and stale-tab protection |
 | `dupe_candidates.py` | review-only cross-source duplicate suggestions + ignored pairs |
+| `posting_store.py` | shared normalized insertion for fetched and manual postings |
+| `intake.py` | validated, explicit local intake of externally found roles |
 | `filters.py` | deterministic pre-eval filters (salary, hard rules) |
 | `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
@@ -219,6 +221,13 @@ opening **Action Center** groups fresh strong matches, recruiter-route candidate
 scheduled interviews, recent screens/interviews needing preparation, possible cross-source
 duplicates, user-defined next actions that are due, applications due for follow-up, and evaluation
 errors.
+Use **Add role** for a posting found outside the configured sources. Choose the configured search
+track whose salary floor should apply, then paste its http(s) URL, title, company, and any available
+location, posted date, salary, and JD text. The app stores it locally as
+`source=manual`, refuses to overwrite an existing exact URL, and applies the same fingerprint/repost
+linking as fetched roles. It does not scrape that page or call the LLM when you save; the row enters
+`status=new`, and the next normal pipeline run applies the current deterministic filters and
+evaluation in the established order.
 Other tabs switch between **Today** (with a date picker),
 the undecided **Backlog**, your **Applied** / **Passed** history, and **Funnel**; **Undo** reverses
 a decision. Funnel ranges cover 30/90/180/365 calendar days or all current applications. It counts

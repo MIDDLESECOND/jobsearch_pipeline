@@ -7,6 +7,18 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Explicit manual role intake
+
+- Added a local **Add role** form for jobs found outside configured LinkedIn, Adzuna, or ATS
+  sources. A configured search track, URL, title, and company are required; location, posted date,
+  salary range, and pasted JD text are optional. ATS-only configs use a neutral manual track.
+- Extracted the fetched-posting insertion tail into one shared store path, so manual rows use the
+  same normalization, exact-URL dedup, fingerprint, repost-linking, and `status='new'` transition.
+- Saving never fetches the supplied URL, spends on an LLM call, or overwrites an existing row. The
+  next normal pipeline run applies current filters, repost skips, and evaluation in order.
+- Added strict field, http(s)-URL, embedded-credential, date, salary, description-loss, transaction,
+  same-origin API, and UI-contract regression coverage.
+
 ## 2026-08-07 — Verified evidence-unit backups
 
 - Added `pipeline.py backup` to create a non-overwriting ZIP containing one consistent SQLite

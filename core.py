@@ -409,7 +409,7 @@ def _jobs_table_sql(name, if_not_exists=False):
             filter_source TEXT,   -- NULL | manual | rule:<name>  (hard-fail override)
             filter_gate  TEXT,    -- which gate the override represents
             filter_date  TEXT,    -- date the override was set
-            source       TEXT     -- where the posting came from: 'linkedin' | 'adzuna' | an ATS board ('greenhouse' | 'lever' | 'ashby')
+            source       TEXT     -- linkedin | adzuna | greenhouse | lever | ashby | manual
         )
     """
 
@@ -731,7 +731,7 @@ def _migrate(conn):
         ("filter_source", "TEXT"),  # NULL | manual | rule:<name>
         ("filter_gate", "TEXT"),
         ("filter_date", "TEXT"),
-        ("source", "TEXT"),  # 'linkedin' | 'adzuna' | 'greenhouse' | 'lever' | 'ashby' — multi-source provenance
+        ("source", "TEXT"),  # linkedin | adzuna | greenhouse | lever | ashby | manual
         # Outcome-tracking cache (v4): the chain's post-application state, denormalized onto
         # every member like app_status so readers/SQL need no join. Always a pure recompute
         # of (chain applied?, app_events) — chain._recompute_outcome is the ONE writer.

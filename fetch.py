@@ -2,10 +2,10 @@
 """The three posting source families: the LinkedIn scrape (python-jobspy guest endpoints), the
 Adzuna REST API, and the per-company ATS board APIs (Greenhouse/Lever/Ashby — public, no auth).
 All insert unseen postings as status='new' and are otherwise source-agnostic from then on — the
-`source` column is provenance only. Imports core (the API-key resolver), chain (the
-fingerprint/repost helpers), states (STATUS_NEW), and filters (_pattern_matches, so the ATS
-title/location filters speak the same pattern dialect as filters.yaml); nothing depends back
-on this module except pipeline's `run`.
+`source` column is provenance only. Imports core (the API-key resolver), posting_store (the
+shared normalize/fingerprint/insert path), and filters (_pattern_matches, so the ATS title/location
+filters speak the same pattern dialect as filters.yaml); nothing depends back on this module
+except pipeline's `run`.
 """
 
 import html
@@ -17,10 +17,9 @@ from urllib import parse
 from datetime import datetime
 
 from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
-from chain import _norm_company, _norm_title, _fingerprint, _find_repost
 from filters import _pattern_matches, validate_pattern  # one pattern dialect + validator
 # for filters.yaml AND settings.ats
-from states import STATUS_NEW
+from posting_store import insert_posting as _insert_posting
 
 
 # ---------------------------------------------------------------------- fetch
@@ -128,35 +127,6 @@ def _linkedin_date(v):
     it and exactly wrong here. Non-date-ish values (None/NaT/nan) degrade to ""."""
     s = str(v or "")
     return s[:10] if re.match(r"\d{4}-\d{2}-\d{2}", s) else ""
-
-
-def _insert_posting(conn, *, url, title, company, location, search_name, tier,
-                    date_posted, first_seen, salary_min, salary_max, description, source):
-    """The shared normalize → fingerprint → repost-link → INSERT tail of every fetcher, so
-    the jobs column list exists exactly once and the sources can't drift (same reasoning as
-    chain.effective_decision having a single implementation). The job_url-conflict skip is
-    dedup layer one; _find_repost is layer two. ON CONFLICT(job_url) DO NOTHING rather than
-    INSERT OR IGNORE on purpose: OR IGNORE swallows EVERY constraint violation, which would
-    turn a CHECK(status/verdict) violation on a fresh DB (see core.get_db) into a silent
-    row drop — this form ignores only the PK duplicate and stays loud for real defects.
-    (Upsert syntax needs SQLite >= 3.24, 2018.) Returns (inserted, repost_of) — inserted
-    is 0 or 1."""
-    norm_company = _norm_company(company)
-    norm_title = _norm_title(title)
-    fingerprint = _fingerprint(company, location)
-    repost_of = _find_repost(conn, fingerprint, norm_title, exclude_url=url)
-    cur = conn.execute(
-        """INSERT INTO jobs
-           (job_url, title, company, location, search_name, tier, date_posted,
-            first_seen, salary_min, salary_max, description, status,
-            norm_company, norm_title, fingerprint, repost_of, source)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(job_url) DO NOTHING""",
-        (url, title, company, location, search_name, tier, date_posted, first_seen,
-         salary_min, salary_max, description, STATUS_NEW, norm_company, norm_title,
-         fingerprint, repost_of, source),
-    )
-    return cur.rowcount, repost_of
 
 
 # ---------------------------------------------------------------- Adzuna fetch

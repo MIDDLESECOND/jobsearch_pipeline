@@ -51,9 +51,14 @@ re-export hub):
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core` and `states`.
+- `posting_store.py` — the one normalize/fingerprint/repost-link/insert path shared by fetched
+  and manually entered postings. Imports only `chain` and `states`.
+- `intake.py` — validated, explicit local intake for roles found outside configured sources. It
+  never fetches or evaluates; new rows enter the normal pipeline as `status='new'`. Imports
+  `core` and `posting_store`.
 - `fetch.py` — the three sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API,
-  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards). Imports `core`, `chain`, `states`, and
-  `filters` (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
+  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards). Imports `core`, `posting_store`, and `filters`
+  (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
 - `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
@@ -87,6 +92,13 @@ returns every open role, so the config-side `title_any` (required) and `location
 filters are what keep irrelevant roles out of the DB and the paid eval. ATS descriptions are full
 text; salaries are stored NULL ("unstated" — kept by the salary filter, same convention as Adzuna's
 predicted salaries).
+
+Manual intake is an explicit fourth provenance value, not a fourth fetcher. The local UI accepts
+an http(s) posting URL plus user-pasted fields, binds it to a configured search track so the same
+salary floor applies, refuses exact-URL overwrites, and uses the shared posting-store path so
+fingerprint/repost behavior cannot drift from fetched rows. It does not scrape the supplied URL or
+spend on evaluation immediately. The row starts `new` and reaches the
+current salary/hard filters, repost skips, and evaluator in the next normal run.
 
 ## Commands
 

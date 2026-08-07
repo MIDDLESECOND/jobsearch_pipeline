@@ -47,7 +47,9 @@ def client(db_path, monkeypatch):
     """Test client with config + DB pointed at the temp file. Routes open (and close) their
     own connection per request, exactly like production."""
     cfg = {"settings": {"db_path": db_path, "max_description_chars": CAP,
-                        "feedback_project_url": ""}}
+                        "feedback_project_url": ""},
+           "searches": [{"name": "AI leadership", "tier": "primary",
+                         "min_salary": 150000}]}
 
     def fresh_conn(_cfg=None):
         # The REAL production opener (row factory, busy timeout), so the endpoint tests
@@ -95,6 +97,82 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert "Save role note" in html
     assert 'href="/api/export/roles.csv"' in html and "Export CSV" in html
     assert "Star role" in html and "Unstar" in html
+    assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
+    assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
+    assert '<option value="AI leadership">AI leadership</option>' in html
+    assert '<option value="manual">Manual intake</option>' in html
+
+
+# ---------------------------------------------------------------- /api/intake
+
+def test_manual_intake_api_creates_a_new_unevaluated_source_row(client, db_path):
+    response = _post(client, "/api/intake", {
+        "job_url": "https://careers.example.test/roles/42",
+        "title": "AI Platform Lead",
+        "company": "Example Co",
+        "location": "Remote",
+        "date_posted": "2026-08-06",
+        "salary_min": 180000,
+        "salary_max": 220000,
+        "description": "Own the AI platform and its reliable delivery.",
+        "search_name": "AI leadership",
+    })
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload == {
+        "ok": True,
+        "job_url": "https://careers.example.test/roles/42",
+        "repost_of": None,
+        "message": "Role added; the next pipeline run will process it through current rules.",
+    }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE job_url=?", (payload["job_url"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["source"] == "manual"
+    assert row["status"] == "new"
+    assert row["verdict"] is None and row["eval_json"] is None
+    assert row["description"] == "Own the AI platform and its reliable delivery."
+
+
+def test_manual_intake_api_rejects_duplicates_bad_json_and_cross_origin(
+    client, seed
+):
+    make_job(seed, job_url="https://careers.example.test/roles/42",
+             title="Existing", description="keep")
+    duplicate = _post(client, "/api/intake", {
+        "job_url": "https://careers.example.test/roles/42",
+        "title": "Replacement",
+        "company": "Example Co",
+        "search_name": "AI leadership",
+    })
+    assert duplicate.status_code == 409
+    assert "already exists" in duplicate.get_json()["message"]
+    assert seed.execute(
+        "SELECT title FROM jobs WHERE job_url='https://careers.example.test/roles/42'"
+    ).fetchone()[0] == "Existing"
+
+    malformed = client.post("/api/intake", json=["not", "an", "object"])
+    assert malformed.status_code == 400
+    invalid = _post(client, "/api/intake", {
+        "job_url": "javascript:alert(1)", "title": "Bad", "company": "Bad",
+        "search_name": "AI leadership",
+    })
+    assert invalid.status_code == 400
+    assert "http" in invalid.get_json()["message"]
+    refused = _post(
+        client,
+        "/api/intake",
+        {"job_url": "https://example.test/2", "title": "Role", "company": "Co",
+         "search_name": "AI leadership"},
+        origin="https://evil.example",
+    )
+    assert refused.status_code == 403
 
 
 def test_funnel_api_returns_chain_scoped_snapshot_and_validates_range(client, seed):

@@ -37,6 +37,7 @@ from exports import roles_csv
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
 from interviews import (INTERVIEW_MODES, add_interview, chain_interviews,
                         change_interview, interview_ics, interview_summaries)
+from intake import PostingAlreadyExists, add_manual_posting
 from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, download_info,
                        material_summaries, prep_context_bundle, snapshot_jd)
 from outreach import (CONTACT_KINDS, OUTREACH_PURPOSES, add_contact, chain_contacts,
@@ -322,6 +323,8 @@ def index():
         contact_kinds=list(CONTACT_KINDS),
         outreach_purposes=list(OUTREACH_PURPOSES),
         interview_modes=list(INTERVIEW_MODES),
+        max_description_chars=cfg["settings"]["max_description_chars"],
+        searches=cfg["searches"],
         today=date.today().isoformat(),
         feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
     )
@@ -440,6 +443,38 @@ def api_export_roles_csv():
         content, content_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.route("/api/intake", methods=["POST"])
+def api_intake():
+    """Add one explicitly pasted external role; never fetch or evaluate implicitly."""
+    if not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        try:
+            row = add_manual_posting(
+                conn,
+                body,
+                searches=cfg["searches"],
+                max_description_chars=cfg["settings"]["max_description_chars"],
+            )
+        except PostingAlreadyExists as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 409
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({
+            "ok": True,
+            "job_url": row["job_url"],
+            "repost_of": row["repost_of"],
+            "message": "Role added; the next pipeline run will process it through current rules.",
+        }), 201
+    finally:
+        conn.close()
 
 
 @app.route("/api/star", methods=["POST"])

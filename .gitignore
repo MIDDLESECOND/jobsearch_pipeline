@@ -48,8 +48,10 @@ compare_results*.json
 arbitration_*.json
 stratified_results*.json
 followup_results*.json
-# Local-only data companions for the public validation scripts (name real postings)
+# Local-only data companions for the public validation scripts (name real postings,
+# or — for the guide variants a probe compares — carry the private profile/judgment text)
 tests/validation/*.local.json
+tests/validation/*.local.md
 
 # ---- Local validation tools (read the private jobs.db; name real search targets) ----
 tests/validation/investigate_adzuna_churn.py

@@ -37,10 +37,13 @@ changes to *how postings are judged* do.
 
 ### Why
 
-Open-source application trackers including Job Trail, Applic, and Candidex make upcoming
-interview dates visible instead of burying them in notes. The useful subset here is a local,
-chain-scoped schedule beside the existing application evidence—not an external calendar
-integration and not a second representation of events that have already happened.
+Open-source application trackers including [Job Trail](https://github.com/aplaza1/job-trail),
+[Applic](https://github.com/rpunia29/applic), and
+[Candidex](https://github.com/sebai-dhia/candidex) make upcoming interview dates visible instead
+of burying them in notes. The useful subset here is a local, chain-scoped schedule beside the
+existing application evidence—not an external calendar integration and not a second
+representation of events that have already happened. Reviewed revisions, licenses, and the
+adopted/rejected boundary are recorded in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 
 ### Changes (schema/workflow only; evaluation judgment unchanged)
 
@@ -107,9 +110,11 @@ status.
 
 The fixed application follow-up cadence covers one standard workflow but cannot represent the
 other concrete commitments around a role: prepare questions, request a referral, send a portfolio,
-or check a deadline. Open-source trackers such as JobSync make tasks and upcoming work first-class;
-the useful subset here is explicit local next actions, not general project management or another
-notification service.
+or check a deadline. Open-source trackers such as
+[JobSync](https://github.com/Gsync/jobsync) make tasks and upcoming work first-class; the useful
+subset here is explicit local next actions, not general project management or another notification
+service. Reviewed revision and license details are recorded in
+[ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 
 ### Changes (schema/workflow only; evaluation judgment unchanged)
 

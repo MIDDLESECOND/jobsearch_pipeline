@@ -308,6 +308,10 @@ via Windows Task Scheduler.
 - **Personal files are gitignored; `*.example.*` are the committed templates** (`config.yaml`,
   `profile.md`, `evaluation_guide.md`, `filters.yaml`, `jobs.db`, `reports/`, `logs/`). When changing
   the *shape* of config or filters, update the matching `.example` file.
+- **External design inspiration is provenance, not a dependency.** Record the official repository,
+  exact reviewed revision, observed license, adopted and rejected ideas, and any copied or adapted
+  code/assets in `ACKNOWLEDGEMENTS.md` before pushing an inspired feature. Do not imply a stronger
+  source relationship than the evidence supports.
 - **Windows environment**: PowerShell/cmd; API keys via `setx` with a registry-read fallback
   (`_ensure_api_key`): `DEEPSEEK_API_KEY` (default eval provider) or `ANTHROPIC_API_KEY`, plus
   `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` for the optional Adzuna source.

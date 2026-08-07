@@ -102,6 +102,13 @@ waking hours since — see §5): 13,268 postings fetched and deduped as of early
 - PASS means "worth your read," not "apply." The tool compresses triage; it doesn't
   replace judgment.
 
+## Open-source inspiration
+
+Design inspiration, reviewed upstream revisions, licenses, and the boundaries of what was and was
+not adopted are recorded in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md). The implementation is
+independently written for this repository; no source code or assets from those projects are
+bundled.
+
 ---
 
 # Setup & usage (Windows)

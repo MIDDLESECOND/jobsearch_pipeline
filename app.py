@@ -39,6 +39,8 @@ from health import MAX_HEALTH_DAYS, MAX_RUN_HISTORY, health_snapshot
 from interviews import (INTERVIEW_MODES, add_interview, chain_interviews,
                         change_interview, interview_ics, interview_summaries)
 from intake import PostingAlreadyExists, add_manual_posting
+from jd_diff import (JD_DIFF_MAX_CONTEXT, JDDiffTooLarge, JDEvidenceUnavailable,
+                     jd_diff_bundle, jd_versions_bundle)
 from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, download_info,
                        material_summaries, prep_context_bundle, snapshot_jd)
 from outreach import (CONTACT_KINDS, OUTREACH_PURPOSES, add_contact, chain_contacts,
@@ -564,6 +566,65 @@ def api_prep_links():
         except ValueError as exc:
             return jsonify({"ok": False, "message": str(exc)}), 400
         return jsonify({"ok": True, **state})
+    finally:
+        conn.close()
+
+
+@app.route("/api/jd-versions")
+def api_jd_versions():
+    """Lazy metadata for stored posting observations and verified application snapshots."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        try:
+            return jsonify(jd_versions_bundle(
+                conn, row, cfg,
+                description_cap=cfg["settings"]["max_description_chars"],
+            ))
+        except JDDiffTooLarge as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 422
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+    finally:
+        conn.close()
+
+
+@app.route("/api/jd-diff")
+def api_jd_diff():
+    """Return one complete bounded text diff selected by opaque current-chain version IDs."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    try:
+        context = int(request.args.get("context", "3"))
+        if not 0 <= context <= JD_DIFF_MAX_CONTEXT:
+            raise ValueError(f"context must be 0..{JD_DIFF_MAX_CONTEXT}")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        try:
+            return jsonify(jd_diff_bundle(
+                conn, row, left_id=request.args.get("left"),
+                right_id=request.args.get("right"), context=context, cfg=cfg,
+                description_cap=cfg["settings"]["max_description_chars"],
+            ))
+        except JDDiffTooLarge as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 422
+        except JDEvidenceUnavailable as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 409
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
     finally:
         conn.close()
 

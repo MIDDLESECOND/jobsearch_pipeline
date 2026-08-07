@@ -179,24 +179,24 @@
   #intakeForm textarea { min-height: 12rem; resize: vertical; }
   #intakeForm .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
   #intakeForm .form-actions { display: flex; justify-content: flex-end; gap: .5rem; }
-  #prepEntryDialog, #prepLinkDialog { width: min(44rem, calc(100vw - 2rem)); border: 0;
+  #prepEntryDialog, #prepLinkDialog, #jdDiffDialog { width: min(44rem, calc(100vw - 2rem)); border: 0;
     border-radius: 10px; padding: 0; background: #fff; color: #1a1a1a;
     box-shadow: 0 18px 55px rgba(15, 23, 42, .25); }
-  #prepEntryDialog::backdrop, #prepLinkDialog::backdrop { background: rgba(15, 23, 42, .48); }
-  #prepEntryForm, #prepLinkForm { padding: 1.1rem; display: grid; gap: .75rem; }
-  #prepEntryForm h2, #prepLinkForm h2 { margin: 0; font-size: 1.05rem; }
-  #prepEntryForm .form-hint, #prepLinkForm .form-hint { margin: -.35rem 0 0;
+  #prepEntryDialog::backdrop, #prepLinkDialog::backdrop, #jdDiffDialog::backdrop { background: rgba(15, 23, 42, .48); }
+  #prepEntryForm, #prepLinkForm, #jdDiffForm { padding: 1.1rem; display: grid; gap: .75rem; }
+  #prepEntryForm h2, #prepLinkForm h2, #jdDiffForm h2 { margin: 0; font-size: 1.05rem; }
+  #prepEntryForm .form-hint, #prepLinkForm .form-hint, #jdDiffForm .form-hint { margin: -.35rem 0 0;
     color: #667085; font-size: .8rem; }
   #prepEntryForm label { display: grid; gap: .25rem; color: #344054; font-size: .8rem; }
   #prepEntryForm input, #prepEntryForm select, #prepEntryForm textarea { width: 100%;
     padding: .45rem .55rem; border: 1px solid #d0d4da; border-radius: 6px;
     background: #fff; color: #1a1a1a; font: inherit; }
   #prepEntryForm textarea { min-height: 8rem; resize: vertical; }
-  #prepEntryForm .form-actions, #prepLinkForm .form-actions { display: flex;
+  #prepEntryForm .form-actions, #prepLinkForm .form-actions, #jdDiffForm .form-actions { display: flex;
     justify-content: flex-end; gap: .5rem; }
   @media (max-width: 520px) {
     #contactForm .form-row, #interviewForm .form-row,
-    #intakeForm .form-row { grid-template-columns: 1fr; }
+    #intakeForm .form-row, .jd-diff-selects { grid-template-columns: 1fr; }
   }
   .tag.out-recruiter_screen { background: #dbeafe; color: #1e40af; }
   .tag.out-interview { background: #fde68a; color: #78350f; }
@@ -257,6 +257,15 @@
                    align-items: start; padding: .55rem 0; border-top: 1px solid #edf0f3; }
   .prep-link-row:first-child { border-top: 0; }
   .prep-link-row small { display: block; color: #667085; margin-top: .15rem; }
+  .jd-diff-selects { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+  .jd-diff-selects label { display: grid; gap: .25rem; font-size: .8rem; color: #344054; }
+  .jd-diff-hunk { border: 1px solid #d9dee6; border-radius: 7px; overflow: hidden;
+                  margin: .55rem 0; }
+  .jd-diff-line { margin: 0; padding: .18rem .45rem; white-space: pre-wrap;
+                  overflow-wrap: anywhere; font: .78rem ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .jd-diff-line.context { background: #f8fafc; color: #556; }
+  .jd-diff-line.removed { background: #fef2f2; color: #991b1b; }
+  .jd-diff-line.added { background: #f0fdf4; color: #166534; }
   @media (max-width: 800px) {
     .funnel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .funnel-panels { grid-template-columns: 1fr; }
@@ -534,6 +543,26 @@
     </div>
   </form>
 </dialog>
+<dialog id="jdDiffDialog" aria-labelledby="jdDiffDialogTitle">
+  <form id="jdDiffForm" method="dialog">
+    <h2 id="jdDiffDialogTitle">Compare stored JD versions</h2>
+    <p class="form-hint">Literal stored-text evidence only—not a live-page check or an interpretation of employer intent.</p>
+    <div class="jd-diff-selects">
+      <label>Baseline
+        <select id="jdDiffLeft"></select>
+      </label>
+      <label>Comparison
+        <select id="jdDiffRight"></select>
+      </label>
+    </div>
+    <div id="jdDiffStatus" class="meta"></div>
+    <div id="jdDiffResult"></div>
+    <div class="form-actions">
+      <button id="jdDiffClose" type="button" class="undo">Close</button>
+      <button id="jdDiffRun" type="button" class="record">Compare selected</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const GATES = {{ gates | tojson }};
@@ -662,6 +691,13 @@ const prepEntrySave = document.getElementById("prepEntrySave");
 const prepLinkDialog = document.getElementById("prepLinkDialog");
 const prepLinkList = document.getElementById("prepLinkList");
 const prepLinkClose = document.getElementById("prepLinkClose");
+const jdDiffDialog = document.getElementById("jdDiffDialog");
+const jdDiffLeft = document.getElementById("jdDiffLeft");
+const jdDiffRight = document.getElementById("jdDiffRight");
+const jdDiffStatus = document.getElementById("jdDiffStatus");
+const jdDiffResult = document.getElementById("jdDiffResult");
+const jdDiffClose = document.getElementById("jdDiffClose");
+const jdDiffRun = document.getElementById("jdDiffRun");
 
 intakeOpen.addEventListener("click", () => intakeDialog.showModal());
 intakeCancel.addEventListener("click", () => intakeDialog.close());
@@ -701,7 +737,7 @@ let prepEntrySubmitting = false;
 let prepLinkTarget = null;
 
 function openPrepEntryDialog(entry = null) {
-  if (prepEntryDialog.open || prepLinkDialog.open) return;
+  if (prepEntryDialog.open || prepLinkDialog.open || jdDiffDialog.open) return;
   prepEntryForm.reset();
   document.getElementById("prepEntryDialogTitle").textContent = entry
     ? "Edit prep entry" : "Add prep entry";
@@ -767,7 +803,7 @@ async function changePrepEntry(entry, action) {
 }
 
 async function openPrepLinkDialog(div, j) {
-  if (prepEntryDialog.open || prepLinkDialog.open) return;
+  if (prepEntryDialog.open || prepLinkDialog.open || jdDiffDialog.open) return;
   const target = {div, j};
   prepLinkTarget = target;
   prepLinkList.textContent = "Loading local prep library…";
@@ -828,6 +864,129 @@ prepLinkClose.addEventListener("click", () => prepLinkDialog.close());
 prepLinkDialog.addEventListener("close", () => { prepLinkTarget = null; });
 prepLinkDialog.addEventListener("cancel", event => {
   event.preventDefault(); prepLinkDialog.close();
+});
+
+let jdDiffTarget = null;
+
+function addDiffLine(container, prefix, text, kind) {
+  const line = document.createElement("pre");
+  line.className = "jd-diff-line " + kind;
+  line.textContent = prefix + text;
+  container.appendChild(line);
+}
+
+function renderJDComparison(comparison) {
+  jdDiffResult.textContent = "";
+  if (!comparison) {
+    jdDiffResult.textContent = "At least two available stored versions are needed."; return;
+  }
+  const summary = document.createElement("div"); summary.className = "meta";
+  summary.textContent = `${comparison.left.label} → ${comparison.right.label} · `
+    + `${comparison.stats.added_lines} added line(s), ${comparison.stats.removed_lines} removed line(s)`;
+  jdDiffResult.appendChild(summary);
+  if (comparison.metadata_changes.length) {
+    const meta = document.createElement("div"); meta.className = "history";
+    comparison.metadata_changes.forEach(change => {
+      const line = document.createElement("div");
+      line.textContent = `${change.field}: ${change.before ?? "—"} → ${change.after ?? "—"}`;
+      meta.appendChild(line);
+    });
+    jdDiffResult.appendChild(meta);
+  }
+  if (comparison.same_after_normalization) {
+    const same = document.createElement("p");
+    same.textContent = "No textual difference after the declared conservative normalization.";
+    jdDiffResult.appendChild(same);
+  }
+  comparison.hunks.forEach(hunk => {
+    const block = document.createElement("div"); block.className = "jd-diff-hunk";
+    hunk.context_before.forEach(line => addDiffLine(block, "  ", line, "context"));
+    hunk.removed.forEach(line => addDiffLine(block, "- ", line, "removed"));
+    hunk.added.forEach(line => addDiffLine(block, "+ ", line, "added"));
+    hunk.context_after.forEach(line => addDiffLine(block, "  ", line, "context"));
+    jdDiffResult.appendChild(block);
+  });
+  const definition = document.createElement("p"); definition.className = "form-hint";
+  definition.textContent = comparison.normalization
+    + ". Stored text diff only; no semantic category or employer intent is inferred.";
+  jdDiffResult.appendChild(definition);
+}
+
+async function runJDComparison(target = jdDiffTarget) {
+  if (!target || jdDiffTarget !== target || !jdDiffDialog.open
+      || !jdDiffLeft.value || !jdDiffRight.value) return;
+  const leftId = jdDiffLeft.value;
+  const rightId = jdDiffRight.value;
+  const seq = (target.compareSeq || 0) + 1; target.compareSeq = seq;
+  jdDiffRun.disabled = true; jdDiffResult.textContent = "";
+  jdDiffStatus.textContent = "Comparing verified stored evidence…";
+  const params = new URLSearchParams({
+    job_url: target.j.job_url, left: leftId, right: rightId, context: "3",
+  });
+  const url = "/api/jd-diff?" + params.toString();
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.message || "could not compare JD versions");
+    if (jdDiffTarget !== target || target.compareSeq !== seq || !jdDiffDialog.open) return;
+    if (jdDiffLeft.value !== leftId || jdDiffRight.value !== rightId) {
+      jdDiffStatus.textContent = "Selections changed; compare again."; return;
+    }
+    renderJDComparison(data.comparison);
+    jdDiffStatus.textContent = "Complete bounded diff of the selected stored records.";
+  } catch (error) {
+    if (jdDiffTarget === target && target.compareSeq === seq && jdDiffDialog.open) {
+      jdDiffResult.textContent = "";
+      jdDiffStatus.textContent = (jdDiffLeft.value !== leftId || jdDiffRight.value !== rightId)
+        ? "Selections changed; compare again."
+        : "Comparison unavailable: " + String(error);
+    }
+  } finally {
+    if (jdDiffTarget === target && target.compareSeq === seq) jdDiffRun.disabled = false;
+  }
+}
+
+async function openJDDiffDialog(div, j) {
+  if (jdDiffDialog.open || prepEntryDialog.open || prepLinkDialog.open) return;
+  const target = {div, j, compareSeq: 0}; jdDiffTarget = target;
+  jdDiffLeft.textContent = ""; jdDiffRight.textContent = "";
+  jdDiffResult.textContent = ""; jdDiffStatus.textContent = "Loading stored versions…";
+  jdDiffRun.disabled = true; jdDiffDialog.showModal();
+  try {
+    const res = await fetch("/api/jd-versions?job_url=" + encodeURIComponent(j.job_url));
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.message || "could not load JD versions");
+    if (jdDiffTarget !== target || !jdDiffDialog.open) return;
+    for (const version of data.versions) {
+      for (const select of [jdDiffLeft, jdDiffRight]) {
+        const option = document.createElement("option");
+        option.value = version.id;
+        option.textContent = version.label + ` · ${version.availability}`
+          + ` · ${version.completeness}`;
+        option.disabled = version.availability !== "available";
+        select.appendChild(option);
+      }
+    }
+    if (data.default_left && data.default_right) {
+      jdDiffLeft.value = data.default_left; jdDiffRight.value = data.default_right;
+      jdDiffRun.disabled = false;
+      jdDiffStatus.textContent = data.definition;
+      await runJDComparison(target);
+    } else {
+      jdDiffStatus.textContent = "At least two available stored versions are needed. " + data.definition;
+    }
+  } catch (error) {
+    if (jdDiffTarget === target && jdDiffDialog.open) {
+      jdDiffStatus.textContent = "Failed to load: " + String(error);
+    }
+  }
+}
+
+jdDiffRun.addEventListener("click", () => runJDComparison());
+jdDiffClose.addEventListener("click", () => jdDiffDialog.close());
+jdDiffDialog.addEventListener("close", () => { jdDiffTarget = null; });
+jdDiffDialog.addEventListener("cancel", event => {
+  event.preventDefault(); jdDiffDialog.close();
 });
 
 toggleDecidedBtn.addEventListener("click", () => {
@@ -1188,6 +1347,7 @@ function card(j, actionSection = null) {
   actions.appendChild(btn("Activity ▸", "undo", ev =>
     toggleHistory(div, j, ev.currentTarget)));
   actions.appendChild(btn("Prep library", "undo", () => openPrepLinkDialog(div, j)));
+  actions.appendChild(btn("Compare JD versions", "undo", () => openJDDiffDialog(div, j)));
 
   actions.appendChild(btn("Add next action", "undo", () => openTaskDialog(div, j)));
   const roleTasks = j.tasks || [];

@@ -104,11 +104,86 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert 'url = "/api/prep-items?include_archived=1"' in html
     assert 'fetch("/api/prep-links?job_url="' in html
     assert "prepLinkTarget !== target" in html
+    assert 'id="jdDiffDialog"' in html and "Compare JD versions" in html
+    assert 'fetch("/api/jd-versions?job_url="' in html
+    assert 'url = "/api/jd-diff?" + params.toString()' in html
+    assert "jdDiffLeft.value !== leftId || jdDiffRight.value !== rightId" in html
+    assert "Selections changed; compare again." in html
     assert 'url = "/api/health?" + params' in html
     assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
     assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
     assert '<option value="AI leadership">AI leadership</option>' in html
     assert '<option value="manual">Manual intake</option>' in html
+
+
+# ------------------------------------------------------------- /api/jd-diff
+
+def test_jd_version_api_is_lazy_opaque_and_returns_only_explicit_diff_text(client, seed):
+    make_job(
+        seed, job_url="jd-old", title="Old", description="<script>old private JD</script>",
+    )
+    make_job(
+        seed, job_url="jd-new", title="New", repost_of="jd-old",
+        first_seen="2026-06-02T00:00:00", description="new private JD",
+    )
+    seed.execute(
+        """INSERT INTO job_contacts
+           (job_url,interaction_url,name,role,kind,email,profile_url,note,created_at)
+           VALUES ('jd-old','jd-old','Secret Contact',NULL,'other','secret@example.test',
+                   NULL,NULL,'2026-06-01T00:00:00')"""
+    )
+    seed.commit()
+
+    listed = client.get("/api/jd-versions?job_url=jd-old")
+    assert listed.status_code == 200
+    payload = listed.get_json()
+    assert payload["default_left"] and payload["default_right"]
+    assert len(payload["versions"]) == 2
+    serialized = listed.get_data(as_text=True)
+    assert "jd-old" not in serialized and "jd-new" not in serialized
+    assert "old private JD" not in serialized and "Secret Contact" not in serialized
+    assert set(payload["versions"][0]) == {
+        "id", "kind", "label", "source", "observed_at", "availability",
+        "completeness", "title", "location", "possibly_truncated",
+    }
+
+    diff = client.get(
+        "/api/jd-diff", query_string={
+            "job_url": "jd-old", "left": payload["default_left"],
+            "right": payload["default_right"], "context": 2,
+        },
+    )
+    assert diff.status_code == 200
+    body = diff.get_json()["comparison"]
+    assert "<script>old private JD</script>" in repr(body["hunks"])
+    assert body["complete"] is True
+    assert "Secret Contact" not in diff.get_data(as_text=True)
+
+
+def test_jd_diff_api_rejects_cross_chain_ids_and_resource_overflow(client, seed):
+    make_job(seed, job_url="left-old", title="Left old", description="Left")
+    make_job(seed, job_url="left-new", title="Left new", repost_of="left-old",
+             first_seen="2026-06-02T00:00:00", description="Changed")
+    make_job(seed, job_url="other", title="Other", description="Other")
+    left = client.get("/api/jd-versions?job_url=left-old").get_json()
+    other = client.get("/api/jd-versions?job_url=other").get_json()["versions"][0]["id"]
+    refused = client.get("/api/jd-diff", query_string={
+        "job_url": "left-old", "left": left["default_left"], "right": other,
+    })
+    assert refused.status_code == 400
+    assert "current role chain" in refused.get_json()["message"]
+    assert client.get("/api/jd-diff?job_url=left-old&context=11").status_code == 400
+
+    seed.execute("UPDATE jobs SET description=? WHERE job_url='left-old'", ("x" * 50001,))
+    seed.commit()
+    versions = client.get("/api/jd-versions?job_url=left-old").get_json()["versions"]
+    oversized = next(item for item in versions if item["availability"] == "too_large")
+    available = next(item for item in versions if item["availability"] == "available")
+    too_large = client.get("/api/jd-diff", query_string={
+        "job_url": "left-old", "left": oversized["id"], "right": available["id"],
+    })
+    assert too_large.status_code == 422
+    assert "too large" in too_large.get_json()["message"]
 
 
 # ----------------------------------------------------------- /api/prep-items

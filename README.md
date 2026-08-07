@@ -67,6 +67,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `core.py` | config, SQLite schema + inline migrations, shared parsing |
 | `materials.py` | submitted packet storage, text extraction, ATS checks, prep context |
 | `prep_library.py` | confirmed reusable interview stories/Q&A and role-relevance links |
+| `jd_diff.py` | bounded stored-posting/application-snapshot text comparisons |
 | `outreach.py` | chain-scoped role contacts and no-send outreach drafting briefs |
 | `tasks.py` | chain-scoped next actions, due dates, completion, and rescheduling |
 | `interviews.py` | chain-scoped interview schedules and local `.ics` export |
@@ -325,6 +326,15 @@ confirmation records the user's review—not independent verification. Packet ch
 available, missing, and checksum-failed
 objects; a partial Prep Context carries the same warning instead of claiming the full packet was
 copied. This drafts context only—it never sends a message or changes status.
+
+**Compare JD versions** is a separate, lazy read of the current duplicate chain. It lists
+first-stored posting observations and every application-time JD snapshot, rechecking snapshot
+bytes against their stored SHA-256 before use. The dialog uses opaque version IDs and returns only
+literal line additions/removals plus exact title, company, location, and salary-field differences;
+it does not fetch the live page, infer employer intent, or label a change as a new responsibility
+or qualification. Pure newline/trailing-space noise is normalized conservatively. Missing,
+corrupt, too-large, possibly truncated, and Adzuna-snippet evidence stays explicitly labeled;
+resource limits fail closed instead of returning a diff that looks complete.
 
 **Export CSV** downloads one row per current duplicate chain with its role, source URLs, effective
 decision, manual star, outcome, resume/channel, open-task summary, and upcoming-interview summary. Formula-like

@@ -33,6 +33,9 @@ re-export hub):
 - `prep_library.py` — reusable, user-authored interview stories/application answers plus
   versioned role-relevance links. Only confirmed + linked entries may enter prep context; edits
   return confirmed content to draft. Imports only the standard library.
+- `jd_diff.py` — bounded, read-only comparison of current-chain stored posting observations and
+  checksum-verified application JD snapshots. It emits literal structured line changes, not
+  semantic interpretations, and imports `materials` plus the standard library.
 - `backup.py` — verified, non-overwriting evidence-unit archives containing one SQLite snapshot
   plus exactly the material objects catalogued by that snapshot. Verification is read-only; the
   module deliberately does not restore archives. Imports `materials` plus the standard library.
@@ -292,6 +295,16 @@ via Windows Task Scheduler.
   independently verified truth. It remains
   behind the clipboard context's untrusted-data boundary and is deliberately excluded from
   outreach briefs to minimize disclosure.
+
+- **JD differences are derived evidence, not a new history store.** `jd_diff.py` reads each
+  current-chain posting's first-stored description plus every immutable `jd_snapshot` owned by the
+  chain. Snapshot bytes are freshly size/hash checked; missing/corrupt/oversized evidence is never
+  replaced with current `jobs.description`. Version IDs exposed to the browser are opaque hashes,
+  and list responses never include URLs or body text. A diff uses conservative line normalization,
+  hard input/line/matrix/operation/output limits, and explicit +/- records. It must not call a live
+  page, persist a diff, infer semantic categories or employer intent, or alter decisions, tasks,
+  evaluation, materials, or other workflow state. Merge/unlink scope follows the snapshot owner's
+  current root, not its historical interaction URL.
 
 - **Role contacts are local evidence; outreach is review-only.** `job_contacts` rows store the
   canonical URL at write time plus the exact interaction posting and are mapped through that

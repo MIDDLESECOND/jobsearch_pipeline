@@ -43,9 +43,11 @@ from an identified upstream implementation:
 - star tombstones, monotonic versions, and stale-tab/ABA protection;
 - the separation between scheduled interview plans and completed interview outcome events;
 - per-target pipeline run evidence, privacy-minimized failure categories, and the descriptive
-  first-storage/current-chain search-yield model; and
+  first-storage/current-chain search-yield model;
 - the draft/confirmed lifecycle, reusable prep-entry bank, versioned role-relevance links, and
-  least-disclosure rule that keeps private interview stories out of outreach briefs.
+  least-disclosure rule that keeps private interview stories out of outreach briefs; and
+- opaque, bounded, checksum-verified JD evidence comparison and its strict separation from live
+  page checks or semantic interpretations of employer intent.
 
 ## Maintenance rule
 

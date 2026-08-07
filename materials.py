@@ -9,6 +9,7 @@ manual duplicate merges and unlinks need no material-row rewrites.
 
 import hashlib
 import json
+import os
 import re
 import zipfile
 from datetime import datetime
@@ -28,6 +29,7 @@ UPLOAD_KINDS = ("resume", "cover_letter")
 ALL_KINDS = UPLOAD_KINDS + ("jd_snapshot",)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_EXTRACTED_CHARS = 500_000
+MAX_JD_SNAPSHOT_READ_BYTES = 250_000
 STORAGE_AVAILABLE = "available"
 STORAGE_MISSING = "missing"
 STORAGE_CORRUPT = "corrupt"
@@ -224,6 +226,11 @@ def _current_posting(conn, row):
     return current
 
 
+def _snapshot_header_value(value):
+    """Keep the human-readable v1 envelope unambiguous for untrusted metadata."""
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+
+
 def snapshot_jd(conn, row, cfg=None):
     """Freeze the exact posting text when a chain is marked applied.
 
@@ -236,12 +243,14 @@ def snapshot_jd(conn, row, cfg=None):
     _begin_write(conn)
     try:
         posting = _current_posting(conn, row)
+        # Keep the established readable envelope, but prevent untrusted metadata controls from
+        # creating fake header records or moving the URL into what a reader treats as JD body.
         text = "\n".join([
             "JOB DESCRIPTION SNAPSHOT",
-            f"Title: {posting['title'] or ''}",
-            f"Company: {posting['company'] or ''}",
-            f"Location: {posting['location'] or ''}",
-            f"URL: {posting['job_url']}",
+            f"Title: {_snapshot_header_value(posting['title'])}",
+            f"Company: {_snapshot_header_value(posting['company'])}",
+            f"Location: {_snapshot_header_value(posting['location'])}",
+            f"URL: {_snapshot_header_value(posting['job_url'])}",
             "",
             posting["description"] or "[No job description was stored]",
         ])
@@ -472,6 +481,120 @@ def material_summaries(conn, rows):
 
 def chain_materials(conn, row):
     return material_summaries(conn, [row])[_root_url(row)]
+
+
+def jd_snapshot_records(conn, row, cfg=None, *, limit=100):
+    """Enumerate every current-chain JD snapshot with freshly verified text.
+
+    This intentionally does not use ``chain_materials`` (latest-per-kind) or cached integrity:
+    a diff must retain unavailable historical versions and must rehash bytes read for this
+    response.  ``_text`` is internal evidence for jd_diff.py and must not be serialized by the
+    list endpoint.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("JD snapshot limit must be 1..500")
+    current = _current_posting(conn, row)
+    root_url = _root_url(current)
+    raw_rows = conn.execute(
+        """SELECT am.id,am.job_url,am.interaction_url,am.attached_at,
+                  am.object_sha256,mo.extension,mo.size_bytes,mo.stored_path,
+                  interaction.source AS interaction_source
+             FROM application_materials am
+             JOIN jobs owner ON owner.job_url=am.job_url
+             LEFT JOIN jobs interaction ON interaction.job_url=am.interaction_url
+             LEFT JOIN material_objects mo ON mo.sha256=am.object_sha256
+            WHERE COALESCE(owner.repost_of,owner.job_url)=? AND am.kind='jd_snapshot'
+            ORDER BY julianday(am.attached_at),am.attached_at,am.id LIMIT ?""",
+        (root_url, limit),
+    ).fetchall()
+    root = material_root(cfg, conn)
+    records = []
+    for raw in raw_rows:
+        status = STORAGE_AVAILABLE
+        text = None
+        if raw["stored_path"] is None:
+            status = STORAGE_MISSING
+        else:
+            try:
+                path = _safe_object_path(root, raw["stored_path"])
+            except (TypeError, OSError):
+                path = None
+            if path is None:
+                status = STORAGE_CORRUPT
+            else:
+                try:
+                    # Open once, fstat that handle, then read at most the declared resource
+                    # boundary. A path replacement between a pre-check and read cannot swap in
+                    # an unbounded object or make us hash different bytes than we decoded.
+                    with path.open("rb") as handle:
+                        actual_size = os.fstat(handle.fileno()).st_size
+                        if actual_size > MAX_JD_SNAPSHOT_READ_BYTES:
+                            status = "too_large"
+                            data = None
+                        elif (not isinstance(raw["size_bytes"], int)
+                              or actual_size != raw["size_bytes"]):
+                            status = STORAGE_CORRUPT
+                            data = None
+                        else:
+                            data = handle.read(MAX_JD_SNAPSHOT_READ_BYTES + 1)
+                    if status == "too_large":
+                        pass
+                    elif (data is None or len(data) != raw["size_bytes"]
+                          or hashlib.sha256(data).hexdigest() != raw["object_sha256"]):
+                        status = STORAGE_CORRUPT
+                    else:
+                        text = data.decode("utf-8")
+                except FileNotFoundError:
+                    status = STORAGE_MISSING
+                except (OSError, UnicodeDecodeError, TypeError):
+                    status = STORAGE_CORRUPT
+        parsed = False
+        title = None
+        company = None
+        location = None
+        body = text
+        snapshot_format = "legacy_unparsed"
+        if text is not None:
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            if normalized.startswith("JOB DESCRIPTION SNAPSHOT\n"):
+                # v1 did not escape metadata. Match through the exact historical interaction URL
+                # so embedded newlines do not make the header (and its URL) part of the JD body.
+                match = None
+                expected_urls = [str(raw["interaction_url"])]
+                safe_url = _snapshot_header_value(raw["interaction_url"])
+                if safe_url not in expected_urls:
+                    expected_urls.append(safe_url)
+                for expected_url in expected_urls:
+                    pattern = re.compile(
+                        r"\AJOB DESCRIPTION SNAPSHOT\nTitle: (.*?)\nCompany: (.*?)"
+                        r"\nLocation: (.*?)\nURL: " + re.escape(expected_url)
+                        + r"\n\n(.*)\Z",
+                        re.DOTALL,
+                    )
+                    match = pattern.match(normalized)
+                    if match:
+                        break
+                if match:
+                    parsed = True
+                    snapshot_format = "snapshot_v1"
+                    title = match.group(1) or None
+                    company = match.group(2) or None
+                    location = match.group(3) or None
+                    body = match.group(4)
+        records.append({
+            "attachment_id": raw["id"],
+            "owner_url": raw["job_url"],
+            "interaction_url": raw["interaction_url"],
+            "attached_at": raw["attached_at"],
+            "posting_source": raw["interaction_source"],
+            "storage_status": status,
+            "format": snapshot_format if parsed else "legacy_unparsed",
+            "title": title,
+            "company": company,
+            "location": location,
+            "_text": body,
+        })
+    return records
 
 
 def _object_text(conn, attachment_id, cfg=None):

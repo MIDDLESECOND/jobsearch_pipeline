@@ -24,11 +24,13 @@ changes to *how postings are judged* do.
   it is a *different judge* — 50–60% agreement, systematically harsher, GATE_FAILs most of
   what high/low pass. Determinism is worthless if it's a different verdict.
 - Verdict-level anchors re-verified at low effort via backtest_v2 before landing.
-- **Open calibration note:** the cold-apply bar was set to 14 this morning against the
-  high-effort scale (gap to mean ≈ 4.1, matching the historical 15-on-10.9). On low's scale
-  the same bar-14 gap narrows to ≈ 3.4 (slightly looser eligibility), while bar-15 would be
-  ≈ 4.4 (slightly tighter). Left at **14** pending a user decision — cold applies remain
-  minimum-insurance volume behind the freshness + FTE legs and human triage either way.
+- **Calibration decided (user, same day): bar restored to 15.** The morning's 15 → 14 move
+  compensated for the high-effort scale (gap to mean ≈ 4.1, matching the historical
+  15-on-10.9); with low's scale back at ≈ 10.6, bar-15's gap is 4.4 (slightly conservative)
+  vs bar-14's 3.4 (looser than the bar has ever been). Guide updated at all three sites,
+  mirror re-synced. Net of the whole day: the bar is back where it started and the scale
+  moved most of the way back under it — the two changes must be read together in any
+  historical fit-threshold analysis.
 
 ## 2026-08-07 — Schema: per-gate explicit results (`gate_results` in eval output)
 

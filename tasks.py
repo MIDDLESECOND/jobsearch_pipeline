@@ -74,7 +74,7 @@ def _begin_write(conn):
     conn.execute("BEGIN IMMEDIATE")
 
 
-def add_task(conn, row, *, title, due_date, note=""):
+def add_task(conn, row, *, title: object, due_date: object, note: object = ""):
     """Add one explicit next action and return its transaction-consistent chain snapshot."""
     title = _text(title, "title", _MAX_TITLE, required=True)
     due_date = _due_date(due_date)

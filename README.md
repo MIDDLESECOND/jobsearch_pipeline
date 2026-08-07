@@ -68,6 +68,10 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `materials.py` | submitted packet storage, text extraction, ATS checks, prep context |
 | `outreach.py` | chain-scoped role contacts and no-send outreach drafting briefs |
 | `tasks.py` | chain-scoped next actions, due dates, completion, and rescheduling |
+| `interviews.py` | chain-scoped interview schedules and local `.ics` export |
+| `exports.py` | chain-deduped, spreadsheet-safe local CSV summaries |
+| `watchlist.py` | explicit chain-scoped starred roles and stale-tab protection |
+| `dupe_candidates.py` | review-only cross-source duplicate suggestions + ignored pairs |
 | `filters.py` | deterministic pre-eval filters (salary, hard rules) |
 | `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
@@ -201,9 +205,10 @@ It opens `http://127.0.0.1:5000` in your browser. The page shows the same postin
 does, as cards with their verdict, score breakdown, bucket, flags and a link to the posting.
 Each card has **Applied** / **Passed** / **Reject** buttons (Reject has a gate dropdown), so a
 click does exactly what the matching CLI command does — including repost-chain propagation. The
-opening **Action Center** groups fresh strong matches, recruiter-route candidates, recent
-screens/interviews needing preparation, user-defined next actions that are due, applications due
-for follow-up, and evaluation errors.
+opening **Action Center** groups fresh strong matches, recruiter-route candidates, upcoming
+scheduled interviews, recent screens/interviews needing preparation, possible cross-source
+duplicates, user-defined next actions that are due, applications due for follow-up, and evaluation
+errors.
 Other tabs switch between **Today** (with a date picker),
 the undecided **Backlog**, your **Applied** / **Passed** history, and **Funnel**; **Undo** reverses
 a decision. Funnel ranges cover 30/90/180/365 calendar days or all current applications. It counts
@@ -215,6 +220,18 @@ Follow-ups use a 7-day cadence: click **Follow-up sent** to record the contact, 
 reminder seven days out, and retire the reminder after two sends. This history does not claim
 that the employer responded and does not change the role's outcome.
 
+**Possible duplicates** is deliberately a review queue, not another automatic dedup rule. It
+compares recent postings from different sources only when normalized company and exact normalized
+title agree, then shows both locations, dates, source links, and description previews. **Same role
+— link** uses the existing guarded manual-merge path; **Not the same role** stores the reviewed
+root pair locally so it stays hidden. Ignored pairs remain available under **Review ignored** and
+can be restored. If another tab or a merge changes that review state first, the stale action is
+refused using the pair's persistent review version—even if the state changed away and back—and the
+queue refreshes instead of overwriting the newer judgment. No suggestion changes status, skips
+evaluation, or propagates a decision until you explicitly confirm the merge. The comparison API
+returns only those visible posting fields; it does not read or return contacts, tasks, application
+materials, interview details, or evaluation/decision card data.
+
 Each role card can also keep recruiter, hiring-manager, or referral contacts. Contacts are
 chain-scoped: manually linking duplicate postings unifies their contact lists, while unlinking
 restores contacts recorded on the formerly separate roots. **Draft outreach** copies a factual
@@ -225,6 +242,16 @@ pipeline never sends the message or records **Follow-up sent** automatically; re
 draft, send it yourself, and record the event only after it actually went out. Contact email,
 profile URL, and notes stay in the local SQLite database.
 
+**Save role note** is available on every card, including roles that have not been applied to.
+Notes use the existing append-only, chain-scoped event history, so duplicate merges show one
+combined timeline and unlink preserves the canonical-at-write ownership. Saving a note does not
+change the role's application decision, evaluation, or outcome.
+
+Use **Star role** as a manual shortlist that is deliberately independent of the evaluator's score.
+The star follows the current duplicate chain, appears on sibling cards, and adds one canonical card
+to the **Starred roles** Action Center queue. Unstarring removes only that explicit priority marker;
+it does not pass, reject, apply to, or otherwise mutate the role.
+
 Use **Add next action** on any role card for a concrete task and due date—for example, preparing
 questions, requesting a referral, or sending a portfolio. Open tasks appear on every member of the
 role's duplicate chain; tasks due today or earlier also appear under **Next actions due** in the
@@ -232,6 +259,14 @@ Action Center. **Done** and **Cancel task** retain a closed local record, while 
 selected task by 1, 3, or 7 days (an overdue task moves forward from today). These reminders stay
 inside the local UI: the pipeline does not send email, create calendar events, or infer tasks from
 an LLM response.
+
+On an Applied card, **Schedule interview** records a timezone-aware round with its duration, mode,
+location or meeting URL, and preparation note. Upcoming rounds appear on every member of the
+role's duplicate chain and in the next-14-days **Upcoming interviews** queue; card times are shown
+in the browser's local timezone. **Calendar .ics** downloads a file you can import yourself.
+Editing and cancellation stay local and retain the record. Scheduling does not write Google or
+Outlook Calendar, send a reminder, or automatically record an `interview` outcome—the schedule is
+a plan, while the outcome event remains something you record after it happens.
 
 Marking a role **Applied** freezes the exact stored JD at that moment. On an Applied card, attach
 the actual resume and cover letter you submitted (PDF, DOCX, TXT, or Markdown), then open those
@@ -244,6 +279,11 @@ the page. **Copy prep context** puts the frozen JD, actual submitted documents, 
 events/notes on the clipboard. Packet chips distinguish available, missing, and checksum-failed
 objects; a partial Prep Context carries the same warning instead of claiming the full packet was
 copied. This drafts context only—it never sends a message or changes status.
+
+**Export CSV** downloads one row per current duplicate chain with its role, source URLs, effective
+decision, manual star, outcome, resume/channel, open-task summary, and upcoming-interview summary. Formula-like
+cells are neutralized before spreadsheet use. Descriptions, contacts, notes, event history, and
+submitted documents are intentionally excluded: this is a portable summary, not a backup.
 
 For a complete backup, stop the UI and make sure no pipeline or scheduled run is active, then copy
 `jobs.db` **and** its adjacent `application_materials/` directory together. Restore both to that

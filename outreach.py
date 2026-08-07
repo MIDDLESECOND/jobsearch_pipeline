@@ -99,8 +99,8 @@ def _begin_write(conn):
     conn.execute("BEGIN IMMEDIATE")
 
 
-def add_contact(conn, row, *, name, role="", kind="other", email="",
-                profile_url="", note=""):
+def add_contact(conn, row, *, name: object, role: object = "", kind: object = "other",
+                email: object = "", profile_url: object = "", note: object = ""):
     """Attach a verified person and return its transaction-consistent chain snapshot."""
     name = _text(name, "name", _MAX_NAME, required=True)
     role = _text(role, "role", _MAX_ROLE)

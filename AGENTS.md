@@ -35,6 +35,16 @@ re-export hub):
   never send messages. Imports `chain` and `materials`.
 - `tasks.py` — user-defined role next actions with due dates and open/completed/cancelled state.
   Tasks follow canonical-at-write/current-chain reads and import only the standard library.
+- `interviews.py` — explicit interview schedules plus local iCalendar export. Schedules follow
+  canonical-at-write/current-chain reads and import only the standard library.
+- `exports.py` — local chain-deduped CSV role summaries. It composes chain decisions, tasks, and
+  interviews under one read snapshot and neutralizes spreadsheet-formula cells.
+- `watchlist.py` — explicit manual role priority. Stars follow canonical-at-write/current-chain
+  reads, use absolute optimistic state, and do not alter decisions or evaluation.
+- `dupe_candidates.py` — recent cross-source duplicate suggestions plus persistent reviewed-pair
+  dismissals. It derives candidates without mutation and never links chains on its own;
+  `confirm_candidate` transactionally validates preview/dismissal state before reusing the guarded
+  `chain.dupe_*` cores. Imports `chain` plus the standard library.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
   `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
   only `core` and `states`.
@@ -44,7 +54,7 @@ re-export hub):
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
 - `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
-  imports `report`/`chain`/`states`, performs no mutations, and keeps dashboard-query logic
+  imports `report`/`chain`/`states`/`dupe_candidates`, performs no mutations, and keeps dashboard-query logic
   out of both the decision service and Flask routes.
 - `funnel.py` — chain-scoped application-funnel aggregation over current applied decisions
   and append-only outcome history. It imports only `states`, performs no mutations, maps
@@ -175,7 +185,19 @@ via Windows Task Scheduler.
   (`manual` / `manual:<prev_url>`) so undo can reconstruct the split — without any fuzzy matching (the
   user asserts the duplicate; code only records and propagates it). CLI and UI share one core
   (`dupe_resolve` / `dupe_commit` / `dupe_unlink`) in `chain.py`; the guard/conflict logic lives
-  there, not in either front-end. **The "what has the user decided about this role's chain?" question
+  there, not in either front-end. The Action Center's **Possible duplicates** queue is a separate,
+  review-only discovery layer: it considers recent cross-source rows with exact normalized
+  company+title, shows both postings, and never links or skips anything automatically. Its API
+  serializes only the posting fields rendered by that comparison; it does not load or expose role
+  contacts, tasks, application materials, interview details, or evaluation/decision card data. A confirmed
+  pair goes through `dupe_candidates.confirm_candidate` and the same `dupe_resolve` /
+  `dupe_commit` guards. A rejected suggestion is
+  stored as an ordered current-root pair in `dupe_candidate_dismissals`; it can be restored, and a
+  later root-changing merge may surface changed evidence again rather than inheriting a stale
+  dismissal. Review rows retain a monotonic version even after restore; ignore/restore requests
+  carry the preview roots, expected dismissal state, and expected review version. All three are
+  revalidated under `BEGIN IMMEDIATE`, so a stale tab cannot hide a changed pair or overwrite a
+  newer review, including an ABA sequence. **The "what has the user decided about this role's chain?" question
   has exactly one implementation — `chain.effective_decision` — used by the report (`_repost_info`),
   the web UI (`row_to_dict`), and the dupe conflict guard, so the three can't drift.** The same
   function owns the chain-level verdict reading (`chain_verdict`/`chain_fit_score`: the most
@@ -201,6 +223,8 @@ via Windows Task Scheduler.
   history — NOT restored on re-apply. `channel` is a closed vocabulary (`states.ALL_CHANNELS`:
   direct | agency | referral, validated in chain, no CHECK); `resume_variant` is free text.
   `states.APPLIED_ONLY_EVENTS` require the chain applied; `note` events attach anywhere.
+  The local UI exposes that note path on every role card; it must not be hidden behind applied-only
+  outcome controls or treated as an outcome.
   `app_events.event_type`/`jobs.outcome_status`
   carry **no schema CHECK** on purpose (user-decision vocabulary, enforced in
   `chain.record_event` against `states.ALL_EVENTS` — see states.py's docstring); don't add one.
@@ -243,6 +267,24 @@ via Windows Task Scheduler.
   be explicitly reopened. Mutations use an optimistic version so a stale browser tab cannot
   overwrite newer task state. Do not derive tasks from LLM output, send external notifications,
   or silently treat a task mutation as an application/outcome event.
+
+- **Interview schedules are plans, not outcomes.** `job_interviews` rows use the same
+  canonical-at-write/current-chain read model as tasks, contacts, packets, and events. Only applied
+  chains can add or mutate a schedule; future scheduled rounds enter the bounded
+  `upcoming_interviews` Action Center queue, one card per current chain. Store starts as normalized
+  UTC instants, display them in the browser's timezone, and retain cancelled records. Mutations use
+  optimistic versions and refresh ownership under `BEGIN IMMEDIATE`. `.ics` is a local download
+  for explicit user import. Do not write Google/Outlook calendars, send reminders, infer schedules
+  from LLM output, or convert a scheduled plan into an `interview` outcome event automatically.
+
+- **Stars are manual priority, not judgment.** `role_stars` maps canonical-at-write markers through
+  current duplicate chains. Merge unions starred state; unlink restores the original owner without
+  rewriting rows. The `starred_roles` Action Center queue shows one current canonical per starred
+  chain. Star/unstar uses an absolute expected-state guard under `BEGIN IMMEDIATE` so stale tabs
+  cannot invert a newer choice. Do not derive stars from fit scores or let them change application,
+  filter, outcome, task, or event state. Unstar retains a versioned tombstone; each actual
+  star/unstar transition receives a monotonic version, and the UI sends its expected version so
+  stale tabs cannot overwrite a newer choice even after the state changes away and back.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

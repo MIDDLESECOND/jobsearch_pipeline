@@ -8,7 +8,7 @@ file via the shared schema builder + make_job) — never the real jobs.db, never
 """
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import pytest
@@ -87,6 +87,14 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert "Basic checks passed" in html
     assert "ATS ✓" not in html
     assert 'input.value = ""' in html
+    assert "Possible duplicates" in html
+    assert "Not the same role" in html
+    assert "Review ignored" in html
+    assert "Schedule interview" in html
+    assert 'id="interviewDialog"' in html and 'id="interviewForm"' in html
+    assert "Save role note" in html
+    assert 'href="/api/export/roles.csv"' in html and "Export CSV" in html
+    assert "Star role" in html and "Unstar" in html
 
 
 def test_funnel_api_returns_chain_scoped_snapshot_and_validates_range(client, seed):
@@ -115,6 +123,61 @@ def test_funnel_config_error_is_not_misreported_as_bad_query(client, monkeypatch
     monkeypatch.setattr(webapp, "load_config", bad_config)
     response = client.get("/api/funnel?days=90")
     assert response.status_code == 500
+
+
+def test_role_csv_export_is_downloadable_and_chain_deduped(client, seed):
+    make_job(seed, job_url="root", app_status="applied", status_date=date.today().isoformat())
+    make_job(seed, job_url="relist", repost_of="root", app_status="applied",
+             status_date=date.today().isoformat())
+
+    response = client.get("/api/export/roles.csv")
+
+    assert response.status_code == 200 and response.mimetype == "text/csv"
+    assert "attachment;" in response.headers["Content-Disposition"]
+    assert response.get_data(as_text=True).count("\n") == 2
+
+
+def test_star_api_updates_chain_cards_and_action_queue(client, seed):
+    make_job(seed, job_url="root")
+    make_job(seed, job_url="relist", repost_of="root")
+
+    response = _post(client, "/api/star", {
+        "job_url": "relist", "starred": True, "expected_starred": False,
+        "expected_star_version": 0,
+    })
+    assert response.status_code == 200 and response.get_json()["starred"] is True
+    starred_version = response.get_json()["star_version"]
+    card = client.get("/api/jobs?view=today&date=2026-06-01").get_json()[0]
+    assert card["starred"] is True and card["starred_at"]
+    queue = client.get("/api/actions/starred_roles?page=1&page_size=20").get_json()
+    assert queue["total"] == 1 and queue["items"][0]["job_url"] == "root"
+
+    stale = _post(client, "/api/star", {
+        "job_url": "root", "starred": False, "expected_starred": False,
+        "expected_star_version": 0,
+    })
+    assert stale.status_code == 409 and "refresh" in stale.get_json()["message"]
+    cleared = _post(client, "/api/star", {
+        "job_url": "root", "starred": False, "expected_starred": True,
+        "expected_star_version": starred_version,
+    })
+    assert cleared.status_code == 200 and cleared.get_json()["starred"] is False
+
+
+def test_star_api_validates_origin_and_boolean_state(client, seed):
+    make_job(seed, job_url="root")
+    assert _post(client, "/api/star", ["bad"]).status_code == 400
+    assert _post(client, "/api/star", {
+        "job_url": "root", "starred": True, "expected_starred": False,
+    }).status_code == 400
+    assert _post(client, "/api/star", {
+        "job_url": "root", "starred": "yes", "expected_starred": False,
+        "expected_star_version": 0,
+    }).status_code == 400
+    assert _post(client, "/api/star", {
+        "job_url": "root", "starred": True, "expected_starred": False,
+        "expected_star_version": 0,
+    }, origin="http://evil.example").status_code == 403
 
 
 # ------------------------------------------------------------------ /api/jobs
@@ -248,6 +311,202 @@ def test_action_section_api_is_paged(client, seed):
     assert got["title"] == "Fresh strong matches"
     assert got["total"] == 2 and got["pages"] == 2
     assert len(got["items"]) == 1
+
+
+def test_interview_schedule_api_card_queue_and_ics(client, seed):
+    today = date.today()
+    row = make_job(seed, job_url="applied", title="AI Lead", company="Acme",
+                   app_status="applied", status_date=today.isoformat())
+    starts = datetime.now().astimezone() + timedelta(days=2)
+    response = _post(client, "/api/interviews", {
+        "job_url": row["job_url"], "action": "add", "title": "Technical round",
+        "starts_at": starts.isoformat(), "duration_minutes": 60, "mode": "video",
+        "meeting_url": "https://meet.example.com/room", "location": "", "note": "Prepare",
+    })
+    assert response.status_code == 200
+    item = response.get_json()["interview"]
+    assert item["version"] == 0
+
+    card = client.get("/api/jobs?view=applied&page=1&page_size=20").get_json()["items"][0]
+    assert card["interviews"][0]["id"] == item["id"]
+    queue = client.get("/api/actions/upcoming_interviews?page=1&page_size=20").get_json()
+    assert queue["total"] == 1 and queue["items"][0]["job_url"] == "applied"
+
+    calendar = client.get(
+        f"/api/interviews/{item['id']}.ics?job_url=applied"
+    )
+    assert calendar.status_code == 200
+    assert calendar.mimetype == "text/calendar"
+    assert "BEGIN:VCALENDAR" in calendar.get_data(as_text=True)
+
+    updated = _post(client, "/api/interviews", {
+        "job_url": "applied", "action": "update", "interview_id": item["id"],
+        "expected_version": item["version"], "title": "Final round",
+        "starts_at": (starts + timedelta(days=1)).isoformat(),
+        "duration_minutes": 75, "mode": "onsite", "location": "HQ",
+        "meeting_url": "", "note": "Bring ID",
+    }).get_json()["interview"]
+    assert updated["version"] == 1 and updated["title"] == "Final round"
+
+    cancelled = _post(client, "/api/interviews", {
+        "job_url": "applied", "action": "cancel", "interview_id": item["id"],
+        "expected_version": updated["version"],
+    }).get_json()["interview"]
+    assert cancelled["status"] == "cancelled"
+    assert client.get("/api/actions/upcoming_interviews?page=1&page_size=20").get_json()["total"] == 0
+
+
+def test_interview_api_validates_body_origin_and_applied_state(client, seed):
+    make_job(seed, job_url="passed", app_status="passed", status_date=date.today().isoformat())
+    assert _post(client, "/api/interviews", ["not", "an", "object"]).status_code == 400
+    assert _post(client, "/api/interviews", {
+        "job_url": "passed", "action": "add", "title": "Round",
+        "starts_at": "2026-08-10T15:00:00+00:00", "duration_minutes": 60,
+        "mode": "video",
+    }, origin="http://evil.example").status_code == 403
+    refused = _post(client, "/api/interviews", {
+        "job_url": "passed", "action": "add", "title": "Round",
+        "starts_at": "2026-08-10T15:00:00+00:00", "duration_minutes": 60,
+        "mode": "video",
+    })
+    assert refused.status_code == 400 and "applied chain" in refused.get_json()["message"]
+
+
+def test_possible_duplicates_api_compares_confirms_dismisses_and_restores(
+        client, seed, monkeypatch):
+    today = date.today().isoformat()
+    make_job(seed, job_url="li", company="Acme Inc", title="Sr Data Analyst",
+             source="linkedin", location="New York, NY",
+             description="LinkedIn version of the job", first_seen=f"{today}T09:00:00")
+    make_job(seed, job_url="adz", company="Acme", title="Senior Data Analyst",
+             source="adzuna", location="Grand Central, Manhattan",
+             description="Adzuna version of the job", first_seen=f"{today}T10:00:00")
+
+    def refuse_full_card_serialization(*args, **kwargs):
+        raise AssertionError("duplicate suggestions must not load full role cards")
+
+    monkeypatch.setattr(webapp, "rows_to_dicts", refuse_full_card_serialization)
+
+    section = client.get(
+        "/api/actions/possible_duplicates?page=1&page_size=20"
+    ).get_json()
+    assert section["total"] == 1
+    pair = section["items"][0]
+    expected_side_keys = {
+        "job_url", "title", "company", "location", "source",
+        "first_seen", "date_posted", "description_preview",
+    }
+    assert set(pair["left"]) == expected_side_keys
+    assert set(pair["right"]) == expected_side_keys
+    assert {pair["left"]["job_url"], pair["right"]["job_url"]} == {"li", "adz"}
+    assert pair["left"]["description_preview"]
+    assert pair["same_location"] is False
+
+    dismissed = _post(client, "/api/dupe-candidate", {
+        "left_url": "li", "right_url": "adz", "dismissed": True,
+        "expected_roots": ["adz", "li"], "expected_dismissed": False,
+        "expected_review_version": 0,
+    })
+    assert dismissed.status_code == 200 and dismissed.get_json()["dismissed"] is True
+    active = client.get("/api/actions/possible_duplicates?page=1&page_size=20").get_json()
+    ignored = client.get(
+        "/api/actions/possible_duplicates?page=1&page_size=20&dismissed=1"
+    ).get_json()
+    assert active["total"] == 0 and active["dismissed_total"] == 1
+    assert ignored["total"] == 1 and ignored["items"][0]["dismissed_at"]
+
+    stale_restore = _post(client, "/api/dupe-candidate", {
+        "left_url": "li", "right_url": "adz", "dismissed": False,
+        "expected_roots": ["adz", "li"], "expected_dismissed": False,
+        "expected_review_version": 0,
+    })
+    assert stale_restore.status_code == 409
+    assert "review changed" in stale_restore.get_json()["message"]
+    assert client.get(
+        "/api/actions/possible_duplicates?page=1&page_size=20&dismissed=1"
+    ).get_json()["total"] == 1
+
+    restored = _post(client, "/api/dupe-candidate", {
+        "left_url": "li", "right_url": "adz", "dismissed": False,
+        "expected_roots": ["adz", "li"], "expected_dismissed": True,
+        "expected_review_version": 1,
+    })
+    assert restored.status_code == 200 and restored.get_json()["dismissed"] is False
+    active_again = client.get(
+        "/api/actions/possible_duplicates?page=1&page_size=20"
+    ).get_json()["items"][0]
+    assert active_again["review_version"] == 2
+    assert active_again["dismissed_at"] is None
+
+    confirmed = _post(client, "/api/dupe", {
+        "job_url": "adz", "of": "li", "expected_roots": ["adz", "li"],
+    })
+    assert confirmed.get_json()["ok"] is True
+    assert client.get(
+        "/api/actions/possible_duplicates?page=1&page_size=20"
+    ).get_json()["total"] == 0
+
+
+def test_dupe_candidate_confirmation_refuses_changed_preview_roots(client, seed):
+    make_job(seed, job_url="left", company="Acme", source="linkedin")
+    make_job(seed, job_url="right", company="Acme", source="adzuna")
+    make_job(seed, job_url="new-root", company="Acme", source="ashby",
+             first_seen="2026-05-01T09:00:00")
+    seed.execute("UPDATE jobs SET repost_of='new-root' WHERE job_url='right'")
+    seed.commit()
+
+    response = _post(client, "/api/dupe", {
+        "job_url": "right", "of": "left",
+        "expected_roots": ["left", "right"],
+    }).get_json()
+
+    assert response["ok"] is False
+    assert "changed since preview" in response["message"]
+    assert seed.execute(
+        "SELECT repost_of FROM jobs WHERE job_url='left'"
+    ).fetchone()["repost_of"] is None
+
+
+def test_dupe_candidate_confirmation_cannot_override_newer_dismissal(client, seed):
+    make_job(seed, job_url="left", company="Acme", title="Analyst",
+             source="linkedin", first_seen=date.today().isoformat() + "T09:00:00")
+    make_job(seed, job_url="right", company="Acme", title="Analyst",
+             source="adzuna", first_seen=date.today().isoformat() + "T10:00:00")
+    assert _post(client, "/api/dupe-candidate", {
+        "left_url": "left", "right_url": "right", "dismissed": True,
+        "expected_roots": ["left", "right"], "expected_dismissed": False,
+        "expected_review_version": 0,
+    }).get_json()["ok"] is True
+
+    response = _post(client, "/api/dupe", {
+        "job_url": "right", "of": "left",
+        "expected_roots": ["left", "right"],
+    }).get_json()
+
+    assert response["ok"] is False
+    assert "reviewed as different roles" in response["message"]
+    assert seed.execute(
+        "SELECT repost_of FROM jobs WHERE job_url='right'"
+    ).fetchone()["repost_of"] is None
+
+
+def test_dupe_candidate_mutation_validates_body_and_origin(client, seed):
+    malformed = _post(client, "/api/dupe-candidate", ["not", "an", "object"])
+    assert malformed.status_code == 400
+    assert malformed.is_json and "object" in malformed.get_json()["message"]
+    assert _post(client, "/api/dupe-candidate", {
+        "left_url": "a", "right_url": "b", "dismissed": True,
+    }).status_code == 400
+    assert _post(client, "/api/dupe-candidate", {
+        "left_url": "a", "right_url": "b", "dismissed": "yes",
+        "expected_roots": ["a", "b"], "expected_dismissed": False,
+        "expected_review_version": 0,
+    }).status_code == 400
+    assert _post(client, "/api/dupe-candidate", {
+        "left_url": "a", "right_url": "b", "dismissed": True,
+        "expected_roots": ["a", "b"], "expected_dismissed": False,
+        "expected_review_version": 0,
+    }, origin="http://evil.example").status_code == 403
 
 
 def test_followup_sent_api_advances_queue_without_setting_outcome(client, seed):
@@ -680,6 +939,21 @@ def test_event_refused_on_unapplied_chain(client, seed):
     assert seed.execute("SELECT COUNT(*) FROM app_events").fetchone()[0] == 0
 
 
+def test_role_note_is_available_before_application_and_reads_chain_wide(client, seed):
+    make_job(seed, job_url="root")
+    make_job(seed, job_url="relist", repost_of="root")
+
+    response = _post(client, "/api/event", {
+        "job_url": "relist", "type": "note", "note": "Verify the team charter",
+    })
+    assert response.status_code == 200 and response.get_json()["ok"] is True
+    assert seed.execute(
+        "SELECT app_status FROM jobs WHERE job_url='root'"
+    ).fetchone()[0] is None
+    assert client.get("/api/events?job_url=root").get_json()[0]["note"] == \
+        "Verify the team charter"
+
+
 def test_events_timeline_and_guards(client, seed):
     make_job(seed, job_url="c1", app_status="applied", status_date="2026-06-01")
     _post(client, "/api/event", {"job_url": "c1", "type": "recruiter_screen",
@@ -694,6 +968,12 @@ def test_events_timeline_and_guards(client, seed):
     resp = _post(client, "/api/event", {"job_url": "c1", "type": "offer"},
                  origin="http://evil.example")
     assert resp.status_code == 403
+
+
+def test_event_api_rejects_non_object_json(client, seed):
+    make_job(seed, job_url="c1")
+    response = _post(client, "/api/event", ["not", "an", "object"])
+    assert response.status_code == 400 and response.get_json()["ok"] is False
 
 
 # ------------------------------------------------------------------ /api/dupe
@@ -722,6 +1002,8 @@ def test_dupe_conflicting_decisions_refused(client, seed):
 
 def test_dupe_bad_request(client, seed):
     assert _post(client, "/api/dupe", {"job_url": "x"}).status_code == 400
+    malformed = _post(client, "/api/dupe", ["not", "an", "object"])
+    assert malformed.status_code == 400 and malformed.is_json
 
 
 # ------------------------------------------------------------------ /api/clip

@@ -16,6 +16,7 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 from xml.etree import ElementTree
 
 from chain import chain_events
@@ -394,6 +395,8 @@ def attach_upload(conn, row, kind, filename, data, cfg):
         )
         attachment_id = _attach(conn, posting, kind, digest, safe_name)
         item = attachment_summary(conn, attachment_id)
+        if item is None:
+            raise RuntimeError("attached material disappeared before it could be read back")
         conn.commit()
         return item
     except Exception:
@@ -401,7 +404,7 @@ def attach_upload(conn, row, kind, filename, data, cfg):
         raise
 
 
-def _summary(conn, raw, cfg=None):
+def _summary(conn, raw, cfg=None) -> dict[str, Any]:
     ats = {}
     try:
         ats = json.loads(raw["ats_json"] or "{}")
@@ -423,7 +426,7 @@ def _summary(conn, raw, cfg=None):
     }
 
 
-def attachment_summary(conn, attachment_id):
+def attachment_summary(conn, attachment_id) -> dict[str, Any] | None:
     raw = conn.execute(
         """SELECT am.*,mo.media_type,mo.size_bytes,mo.stored_path,
                   mo.ats_status,mo.ats_json
@@ -437,7 +440,11 @@ def attachment_summary(conn, attachment_id):
 def material_summaries(conn, rows):
     """Latest artifact of each kind for every current chain represented by ``rows``."""
     roots = {_root_url(row) for row in rows}
-    out = {root: {kind: None for kind in ALL_KINDS} for root in roots}
+    # SQLite rows and parsed ATS JSON make each summary intentionally dynamic.  ``Any`` is
+    # confined to this serialization boundary; the packet's fixed kind keys remain explicit.
+    out: dict[str, dict[str, Any]] = {
+        root: {kind: None for kind in ALL_KINDS} for root in roots
+    }
     if not roots:
         return out
     # Legacy /api/jobs callers may still request the historical unpaged array.  Chunk the
@@ -559,7 +566,7 @@ def _prep_context_bundle_in_snapshot(conn, row, cfg, *, context_title):
               ("cover_letter", "SUBMITTED COVER LETTER"))
     for kind, label in labels:
         item = packet[kind]
-        body = text_by_id.get(item["id"]) if item else f"[No {kind.replace('_', ' ')} attached]"
+        body = text_by_id[item["id"]] if item else f"[No {kind.replace('_', ' ')} attached]"
         parts.extend(["", f"=== {label} ===", body])
     parts.extend(["", "=== APPLICATION EVENTS AND NOTES ==="])
     events = chain_events(conn, row)

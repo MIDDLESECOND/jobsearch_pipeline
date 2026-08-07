@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Conservative, review-only suggestions for likely cross-source duplicates.
+
+The automatic repost fingerprint stays deliberately strict.  This module only surfaces
+recent postings whose stored normalized company and exact normalized title agree across
+different sources.  It never links chains: confirmation remains an explicit call through
+``chain.dupe_resolve`` / ``chain.dupe_commit``.
+"""
+
+import math
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+from itertools import combinations
+
+from chain import dupe_commit, dupe_resolve, resolve_posting
+
+
+LOOKBACK_DAYS = 120
+MAX_PAIR_GAP_DAYS = 45
+MAX_PAGE_SIZE = 200
+
+
+def _seen_date(row):
+    try:
+        return date.fromisoformat(str(row["first_seen"])[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _root(row):
+    return row["repost_of"] or row["job_url"]
+
+
+def _expected_root_pair(value):
+    if (not isinstance(value, (list, tuple)) or len(value) != 2
+            or any(not isinstance(root, str) or not root for root in value)):
+        raise ValueError("expected_roots must contain two posting roots")
+    return sorted(value)
+
+
+def _candidate_map(conn, today):
+    """Return the best physical evidence pair for each eligible current-chain pair."""
+    cutoff = (today - timedelta(days=LOOKBACK_DAYS - 1)).isoformat()
+    rows = conn.execute(
+        "SELECT job_url,repost_of,source,norm_company,norm_title,fingerprint,first_seen "
+        "FROM jobs WHERE norm_company IS NOT NULL AND norm_company<>'' "
+        "AND norm_title IS NOT NULL AND norm_title<>'' "
+        "AND source IS NOT NULL AND source<>'' AND substr(first_seen,1,10)>=?",
+        (cutoff,),
+    ).fetchall()
+    buckets = defaultdict(list)
+    for row in rows:
+        seen = _seen_date(row)
+        if seen is not None and seen <= today:
+            buckets[(row["norm_company"], row["norm_title"])].append((row, seen))
+
+    chosen = {}
+    for entries in buckets.values():
+        for (a, a_seen), (b, b_seen) in combinations(entries, 2):
+            a_root, b_root = _root(a), _root(b)
+            if a_root == b_root or a["source"] == b["source"]:
+                continue
+            gap = abs((a_seen - b_seen).days)
+            if gap > MAX_PAIR_GAP_DAYS:
+                continue
+            roots = tuple(sorted((a_root, b_root)))
+            if a_root == roots[0]:
+                left, right = a, b
+            else:
+                left, right = b, a
+            same_location = bool(
+                left["fingerprint"] and left["fingerprint"] == right["fingerprint"]
+            )
+            newest = max(a_seen, b_seen)
+            # One current-chain pair can have several physical relistings.  Prefer the pair
+            # closest in time, then equal normalized location, then the newest evidence.
+            rank = (gap, 0 if same_location else 1, -newest.toordinal(),
+                    left["job_url"], right["job_url"])
+            if roots not in chosen or rank < chosen[roots][0]:
+                chosen[roots] = (rank, {
+                    "left_root": roots[0],
+                    "right_root": roots[1],
+                    "left": left,
+                    "right": right,
+                    "same_location": same_location,
+                    "first_seen_gap_days": gap,
+                    "newest_seen": newest.isoformat(),
+                    "dismissed_at": None,
+                    "review_version": 0,
+                })
+    return {roots: value[1] for roots, value in chosen.items()}
+
+
+def _hydrate_pairs(conn, pairs):
+    """Hydrate only the bounded page, not every recent posting scanned for blocking."""
+    urls = {pair[side]["job_url"] for pair in pairs for side in ("left", "right")}
+    by_url = {}
+    url_list = sorted(urls)
+    for start in range(0, len(url_list), 800):
+        chunk = url_list[start:start + 800]
+        qs = ",".join("?" * len(chunk))
+        for row in conn.execute(
+            "SELECT job_url,title,company,location,source,first_seen,"
+            f"date_posted,description FROM jobs WHERE job_url IN ({qs})",
+            tuple(chunk),
+        ).fetchall():
+            by_url[row["job_url"]] = row
+    for pair in pairs:
+        pair["left"] = by_url[pair["left"]["job_url"]]
+        pair["right"] = by_url[pair["right"]["job_url"]]
+    return pairs
+
+
+def _all_candidates(conn, today):
+    candidates = _candidate_map(conn, today)
+    reviews = {
+        (row["left_root"], row["right_root"]): row
+        for row in conn.execute(
+            "SELECT left_root,right_root,dismissed_at,dismissed,version "
+            "FROM dupe_candidate_dismissals"
+        )
+    }
+    for roots, pair in candidates.items():
+        review = reviews.get(roots)
+        if review is not None:
+            pair["review_version"] = review["version"]
+            pair["dismissed_at"] = (
+                review["dismissed_at"] if review["dismissed"] else None
+            )
+    return list(candidates.values())
+
+
+def query_candidate_page(conn, *, page=1, page_size=50, today=None, dismissed=False):
+    """Return one bounded active or ignored candidate page.
+
+    Suggestions are current-state derivations.  A dismissal only hides the exact pair of
+    roots reviewed at that time; if a later merge changes either root, the changed evidence
+    may surface again instead of silently inheriting an obsolete judgment.
+    """
+    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+        raise ValueError("page must be a positive integer")
+    if (isinstance(page_size, bool) or not isinstance(page_size, int)
+            or not 1 <= page_size <= MAX_PAGE_SIZE):
+        raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
+    if not isinstance(dismissed, bool):
+        raise ValueError("dismissed must be a boolean")
+    today = today or date.today()
+    pairs = _all_candidates(conn, today)
+    dismissed_total = sum(pair["dismissed_at"] is not None for pair in pairs)
+    pairs = [pair for pair in pairs
+             if (pair["dismissed_at"] is not None) == dismissed]
+    pairs.sort(key=lambda pair: (
+        -date.fromisoformat(pair["newest_seen"]).toordinal(),
+        pair["first_seen_gap_days"],
+        0 if pair["same_location"] else 1,
+        pair["left_root"], pair["right_root"],
+    ))
+    total = len(pairs)
+    offset = (page - 1) * page_size
+    page_pairs = _hydrate_pairs(conn, pairs[offset:offset + page_size])
+    return {
+        "pairs": page_pairs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size) if total else 0,
+        "dismissed_total": dismissed_total,
+    }
+
+
+def set_candidate_dismissed(conn, left_url, right_url, dismissed, *,
+                            expected_roots, expected_dismissed,
+                            expected_review_version, today=None):
+    """Persist or restore one reviewed pair if its preview state is still current."""
+    if not isinstance(left_url, str) or not left_url:
+        raise ValueError("left_url is required")
+    if not isinstance(right_url, str) or not right_url:
+        raise ValueError("right_url is required")
+    if not isinstance(dismissed, bool):
+        raise ValueError("dismissed must be a boolean")
+    if not isinstance(expected_dismissed, bool):
+        raise ValueError("expected_dismissed must be a boolean")
+    if (isinstance(expected_review_version, bool)
+            or not isinstance(expected_review_version, int)
+            or expected_review_version < 0):
+        raise ValueError("expected_review_version must be a non-negative integer")
+    expected_roots = _expected_root_pair(expected_roots)
+    if conn.in_transaction:
+        raise RuntimeError("duplicate-candidate mutation requires a clean database connection")
+    today = today or date.today()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        left = conn.execute(
+            "SELECT job_url,repost_of FROM jobs WHERE job_url=?", (left_url,)
+        ).fetchone()
+        right = conn.execute(
+            "SELECT job_url,repost_of FROM jobs WHERE job_url=?", (right_url,)
+        ).fetchone()
+        if left is None or right is None:
+            raise ValueError("posting no longer exists")
+        roots = tuple(sorted((_root(left), _root(right))))
+        if list(roots) != expected_roots:
+            raise ValueError(
+                "duplicate chains changed since preview; refresh and review again"
+            )
+        pair = _candidate_map(conn, today).get(roots)
+        if pair is None:
+            raise ValueError("no longer an eligible duplicate suggestion; refresh and retry")
+        existing = conn.execute(
+            "SELECT dismissed_at,dismissed,version FROM dupe_candidate_dismissals "
+            "WHERE left_root=? AND right_root=?",
+            roots,
+        ).fetchone()
+        current_dismissed = bool(existing and existing["dismissed"])
+        current_version = existing["version"] if existing else 0
+        if (current_dismissed != expected_dismissed
+                or current_version != expected_review_version):
+            raise ValueError("duplicate suggestion review changed; refresh and retry")
+        if dismissed != current_dismissed:
+            reviewed_at = datetime.now(timezone.utc).isoformat()
+            if existing:
+                changed = conn.execute(
+                    "UPDATE dupe_candidate_dismissals "
+                    "SET dismissed_at=?,dismissed=?,version=version+1 "
+                    "WHERE left_root=? AND right_root=? AND version=?",
+                    (reviewed_at, int(dismissed), *roots, current_version),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError(
+                        "duplicate review version changed while holding the write transaction"
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO dupe_candidate_dismissals "
+                    "(left_root,right_root,dismissed_at,dismissed,version) "
+                    "VALUES (?,?,?,?,1)",
+                    (*roots, reviewed_at, int(dismissed)),
+                )
+            review_version = current_version + 1
+            dismissed_at = reviewed_at if dismissed else None
+        else:
+            review_version = current_version
+            dismissed_at = (existing["dismissed_at"]
+                            if existing and existing["dismissed"] else None)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "left_root": roots[0], "right_root": roots[1],
+        "dismissed": dismissed, "dismissed_at": dismissed_at,
+        "review_version": review_version,
+    }
+
+
+def confirm_candidate(conn, left_url, right_url, expected_roots):
+    """Confirm one previewed candidate without overriding newer review state.
+
+    The root check and dismissal check run under the same immediate write transaction as
+    the merge.  Whichever review action gets the lock first wins: a later stale confirmation
+    cannot override ``Not the same role``, and a later dismissal cannot target an already
+    merged pair.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("duplicate confirmation requires a clean database connection")
+    expected_roots = _expected_root_pair(expected_roots)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        left, left_err = resolve_posting(conn, left_url)
+        right, right_err = resolve_posting(conn, right_url)
+        if left_err or right_err:
+            conn.rollback()
+            return None, left_err or right_err, [], []
+        actual_roots = sorted((_root(left), _root(right)))
+        if actual_roots != expected_roots:
+            conn.rollback()
+            return (None, "duplicate chains changed since preview; refresh and review again",
+                    [], [])
+        ignored = conn.execute(
+            "SELECT 1 FROM dupe_candidate_dismissals "
+            "WHERE left_root=? AND right_root=? AND dismissed=1",
+            tuple(expected_roots),
+        ).fetchone()
+        if ignored is not None:
+            conn.rollback()
+            return (None, "duplicate suggestion was reviewed as different roles; refresh",
+                    [], [])
+        plan, err = dupe_resolve(conn, left_url, right_url)
+        if err:
+            conn.rollback()
+            return None, err, [], []
+        affected, exempt = dupe_commit(conn, plan)
+        return plan, None, affected, exempt
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise

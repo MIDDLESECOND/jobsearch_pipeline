@@ -7,6 +7,100 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-06 — Explicit starred-role shortlist
+
+- Added chain-scoped manual stars and a bounded **Starred roles** Action Center queue, independent
+  of model score and application decisions.
+- Added versioned tombstones and absolute expected-state/version checks under an immediate write
+  transaction so a stale browser tab cannot invert a newer star/unstar action, including ABA
+  sequences where the state changes away and back.
+- Duplicate merges union starred visibility; unlink restores canonical-at-write ownership without
+  rewriting markers. CSV summaries include the current star state.
+
+## 2026-08-06 — Spreadsheet-safe role summary export
+
+- Added a local **Export CSV** download with one row per current duplicate chain, using the shared
+  effective decision plus open-task and upcoming-interview summaries.
+- Neutralized formula-like cells before spreadsheet use and emitted UTF-8 with a BOM for Excel.
+- Deliberately excluded descriptions, contacts, notes, event history, and document bytes. This is
+  a portable summary, not a replacement for the paired `jobs.db` + `application_materials/` backup.
+
+## 2026-08-06 — Role notes on every workflow card
+
+- Exposed the existing chain-scoped `note` event on undecided, passed, filtered, and applied cards
+  instead of hiding it inside the applied-only outcome controls.
+- Added one shared History control on every card. Notes remain append-only local evidence and do
+  not change application decisions, outcomes, evaluation, or follow-up cadence.
+- Hardened `/api/event` to reject non-object JSON with the normal JSON error contract.
+
+## 2026-08-06 — Local interview schedule and calendar export
+
+### Why
+
+Open-source application trackers including Job Trail, Applic, and Candidex make upcoming
+interview dates visible instead of burying them in notes. The useful subset here is a local,
+chain-scoped schedule beside the existing application evidence—not an external calendar
+integration and not a second representation of events that have already happened.
+
+### Changes (schema/workflow only; evaluation judgment unchanged)
+
+- Added `job_interviews` plus `interviews.py` for validated, timezone-aware schedules on applied
+  role chains. Canonical-at-write/current-chain reads preserve the established merge/unlink model.
+- Added optimistic versions and immediate write transactions so stale tabs cannot overwrite a
+  newer edit or cancellation, and stale posting rows cannot attach a schedule to an obsolete root.
+- Added the bounded **Upcoming interviews** Action Center queue: one canonical card per chain,
+  ordered by the next scheduled start in the coming 14 days.
+- Added local-time card chips and controls to schedule, edit, or cancel a round. A scheduled round
+  can be downloaded as a standards-compatible `.ics` file for user-controlled import.
+- Added validation, chain merge/unlink, stale-version, transaction-ownership, queue paging, API,
+  card-payload, and calendar escaping regression coverage.
+
+### Explicitly unchanged
+
+No Google/Outlook calendar writes, email reminders, external notifications, LLM-generated
+schedules, evaluation changes, or automatic `interview` outcome events. A schedule is a plan; the
+user records the outcome only after it actually happens.
+
+## 2026-08-06 — Review-only cross-source duplicate suggestions
+
+### Why
+
+The strict company+location+exact-title fingerprint safely prevents false automatic merges, but
+source-specific location labels mean the same role can still appear independently on LinkedIn,
+Adzuna, and an ATS board. Finding those misses by manually searching two histories is avoidable;
+loosening the automatic fingerprint is not, because a false merge can hide a role that should be
+considered or cause the wrong decision to propagate.
+
+### Changes (schema/workflow only; automatic dedup and evaluation unchanged)
+
+- Added `dupe_candidates.py`, which derives recent cross-source suggestions only when normalized
+  company and exact normalized title agree. It emits at most one comparison per pair of current
+  chains and keeps location disagreement visible as evidence rather than silently overriding it.
+- Added a bounded **Possible duplicates** Action Center queue with side-by-side source, location,
+  dates, posting link, and description preview. Confirming reuses the existing guarded manual-dupe
+  core; the suggestion layer cannot merge on its own.
+- Limited each comparison side's API payload to those visible posting fields. Duplicate discovery
+  no longer loads or returns contacts, tasks, application materials, interview details, or
+  evaluation/decision card data.
+- Ignore/restore now validates the preview roots and a persistent review version inside the write
+  transaction. Restores retain a versioned tombstone, preventing stale tabs—including ABA state
+  sequences—from overwriting a newer judgment or hiding a changed pair.
+- Added `dupe_candidate_dismissals` for persistent **Not the same role** judgments, plus an ignored
+  queue and restore action. Mutations refresh current chain roots under `BEGIN IMMEDIATE`, so a
+  stale browser cannot dismiss a pair that a concurrent merge already changed.
+- Candidate confirmation carries the previewed roots through `confirm_candidate`; it checks both
+  current roots and any newer **Not the same role** judgment before resolving and merging under the
+  same immediate write transaction. A stale tab therefore cannot override the review action that
+  acquired the write lock first.
+- Added false-positive boundary, chain-collapse, transaction ownership, API, paging, dismiss,
+  restore, and confirm regression coverage.
+
+### Explicitly unchanged
+
+The automatic fingerprint, fetch/eval stage order, paid-evaluation eligibility, existing posting
+decisions, and manual merge conflict guards. Suggestions never auto-link, auto-skip, or change a
+status.
+
 ## 2026-08-06 — Chain-scoped next actions and due-task queue
 
 ### Why

@@ -5,7 +5,7 @@ app.py remains responsible for flattening them into the card payload.  The queri
 against synthetic fixtures only; no test opens the real jobs.db.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import chain
 from conftest import make_job
@@ -140,14 +140,83 @@ def test_action_center_returns_bounded_disjoint_work_queues(conn):
         conn, today=date(2026, 8, 5), fresh_days=3, followup_days=7, limit=10
     )
     by_id = {s["id"]: s for s in sections}
-    assert set(by_id) == {"fresh_strong", "recruiter_route", "interview_prep",
-                          "tasks_due", "followups_due", "needs_attention"}
+    assert set(by_id) == {"fresh_strong", "recruiter_route", "possible_duplicates",
+                          "starred_roles", "upcoming_interviews", "interview_prep", "tasks_due", "followups_due",
+                          "needs_attention"}
     assert [r["job_url"] for r in by_id["fresh_strong"]["rows"]] == ["cold"]
     assert [r["job_url"] for r in by_id["recruiter_route"]["rows"]] == ["route"]
     assert [r["job_url"] for r in by_id["followups_due"]["rows"]] == ["due"]
     assert [r["job_url"] for r in by_id["interview_prep"]["rows"]] == ["answered"]
     assert {r["job_url"] for r in by_id["needs_attention"]["rows"]} == {"err", "manual"}
-    assert all(s["total"] == len(s["rows"]) for s in sections)
+    assert all(s["total"] == len(s.get("pairs", s["rows"])) for s in sections)
+
+
+def test_upcoming_interviews_queue_is_chain_scoped_and_paged(conn):
+    import interviews
+
+    root = make_job(conn, job_url="root", app_status="applied", status_date="2026-08-01")
+    make_job(conn, job_url="relist", repost_of="root", app_status="applied",
+             status_date="2026-08-01")
+    later = make_job(conn, job_url="later", app_status="applied", status_date="2026-08-01")
+    old = make_job(conn, job_url="old", app_status="applied", status_date="2026-08-01")
+    interviews.add_interview(
+        conn, root, title="Soon", starts_at="2026-08-07T15:00:00+00:00",
+        duration_minutes=60, mode="video")
+    interviews.add_interview(
+        conn, later, title="Later", starts_at="2026-08-08T15:00:00+00:00",
+        duration_minutes=60, mode="phone")
+    interviews.add_interview(
+        conn, old, title="Too far", starts_at="2026-09-01T15:00:00+00:00",
+        duration_minutes=60, mode="onsite")
+
+    page = workflow.query_action_page(
+        conn, "upcoming_interviews", page=1, page_size=1,
+        now=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+    assert page["title"] == "Upcoming interviews"
+    assert page["total"] == 2 and page["pages"] == 2
+    assert page["rows"][0]["job_url"] == "root"
+    assert page["rows"][0]["next_interview_at"] == "2026-08-07T15:00:00+00:00"
+
+
+def test_starred_roles_queue_is_chain_scoped_and_paged(conn):
+    import watchlist
+
+    root = make_job(conn, job_url="root", first_seen="2026-08-01T00:00:00")
+    relist = make_job(conn, job_url="relist", repost_of="root")
+    second = make_job(conn, job_url="second", first_seen="2026-08-02T00:00:00")
+    watchlist.set_starred(
+        conn, relist, True, expected_starred=False, expected_version=0,
+    )
+    watchlist.set_starred(
+        conn, second, True, expected_starred=False, expected_version=0,
+    )
+
+    page = workflow.query_action_page(
+        conn, "starred_roles", page=1, page_size=1,
+    )
+    assert page["title"] == "Starred roles"
+    assert page["total"] == 2 and page["pages"] == 2
+    assert page["rows"][0]["job_url"] == "second"
+    assert page["rows"][0]["starred_at"]
+
+
+def test_action_center_includes_pageable_possible_duplicates(conn):
+    today = date.today().isoformat()
+    make_job(conn, job_url="li", company="Same Co", title="Data Analyst",
+             source="linkedin", first_seen=today + "T09:00:00")
+    make_job(conn, job_url="adz", company="Same Co", title="Data Analyst",
+             source="adzuna", location="Manhattan, NY",
+             first_seen=today + "T10:00:00")
+
+    section = workflow.query_action_page(
+        conn, "possible_duplicates", page=1, page_size=1,
+    )
+
+    assert section["title"] == "Possible duplicates"
+    assert section["total"] == 1 and len(section["pairs"]) == 1
+    assert section["rows"] == []
+    assert section["dismissed_total"] == 0
 
 
 def test_tasks_due_queue_is_chain_scoped_paged_and_closes_immediately(conn):

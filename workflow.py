@@ -8,9 +8,10 @@ thin and neither the report nor the decision service becomes a dashboard query m
 """
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from chain import effective_decisions
+from dupe_candidates import query_candidate_page
 from report import recency_sort_key
 from states import (STATUS_ERROR, STATUS_EVALUATED, STATUS_NEEDS_MANUAL,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED,
@@ -24,8 +25,9 @@ DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 DEFAULT_ACTION_LIMIT = 10
 FOLLOWUP_MAX = 2
-ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "interview_prep",
-                      "tasks_due", "followups_due", "needs_attention")
+ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "possible_duplicates",
+                      "starred_roles", "upcoming_interviews", "interview_prep", "tasks_due", "followups_due",
+                      "needs_attention")
 _TRIAGE_VERDICTS = (VERDICT_PASS, VERDICT_RECRUITER_ONLY)
 _UNDECIDED_BACKLOG_CTE = (
     "WITH decided_roots(root) AS ("
@@ -320,6 +322,64 @@ def _tasks_due_page(conn, *, page, page_size, today):
     }
 
 
+def _upcoming_interviews_page(conn, *, page, page_size, now, days=14):
+    """One canonical applied-role card per chain with a scheduled interview soon."""
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    starts = now.astimezone(timezone.utc).isoformat(timespec="seconds")
+    ends = (now.astimezone(timezone.utc) + timedelta(days=days)).isoformat(timespec="seconds")
+    joins = (
+        " FROM jobs root JOIN jobs owner "
+        "ON COALESCE(owner.repost_of,owner.job_url)=root.job_url "
+        "JOIN job_interviews i ON i.job_url=owner.job_url "
+        "WHERE root.repost_of IS NULL AND root.app_status='applied' "
+        "AND i.status='scheduled' AND i.starts_at>=? AND i.starts_at<=?"
+    )
+    params = (starts, ends)
+    total = conn.execute(
+        "SELECT COUNT(DISTINCT root.job_url)" + joins, params
+    ).fetchone()[0]
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        "SELECT root.*,MIN(i.starts_at) AS next_interview_at" + joins
+        + " GROUP BY root.job_url ORDER BY next_interview_at,root.job_url LIMIT ? OFFSET ?",
+        (*params, page_size, offset),
+    ).fetchall()
+    return {
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size) if total else 0,
+    }
+
+
+def _starred_roles_page(conn, *, page, page_size):
+    """One current canonical card per explicitly starred role chain."""
+    joins = (
+        " FROM jobs root JOIN jobs owner "
+        "ON COALESCE(owner.repost_of,owner.job_url)=root.job_url "
+        "JOIN role_stars s ON s.job_url=owner.job_url "
+        "WHERE root.repost_of IS NULL AND s.starred=1"
+    )
+    total = conn.execute(
+        "SELECT COUNT(DISTINCT root.job_url)" + joins
+    ).fetchone()[0]
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        "SELECT root.*,MAX(s.starred_at) AS starred_at" + joins
+        + " GROUP BY root.job_url ORDER BY starred_at DESC,root.job_url LIMIT ? OFFSET ?",
+        (page_size, offset),
+    ).fetchall()
+    return {
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size) if total else 0,
+    }
+
+
 def _interview_prep_page(conn, *, page, page_size, today, prep_days=14):
     """Recent recruiter responses that should be prepared from the submitted packet.
 
@@ -351,7 +411,7 @@ def _interview_prep_page(conn, *, page, page_size, today, prep_days=14):
 
 def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
                       today=None, fresh_days=3, followup_days=7,
-                      followup_max=FOLLOWUP_MAX):
+                      followup_max=FOLLOWUP_MAX, dismissed=False, now=None):
     """Return one pageable Action Center section with its display metadata."""
     if section_id not in ACTION_SECTION_IDS:
         raise ValueError(f"section must be one of {list(ACTION_SECTION_IDS)}")
@@ -363,6 +423,7 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
     if fresh_days < 1 or followup_days < 1 or followup_max < 1:
         raise ValueError("action-center cadence values must be positive")
     today = today or date.today()
+    now = now or datetime.now(timezone.utc)
 
     if section_id == "fresh_strong":
         result = query_job_page(
@@ -381,6 +442,28 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         )
         title = "Route to a human"
         description = f"Recruiter-only · score 14+ · last {fresh_days} calendar days"
+    elif section_id == "possible_duplicates":
+        result = query_candidate_page(
+            conn, page=page, page_size=page_size, today=today,
+            dismissed=dismissed,
+        )
+        # Keep the established ordinary-row key present so generic queue consumers can
+        # distinguish this pair-shaped section without special missing-key handling.
+        result["rows"] = []
+        title = "Ignored duplicate suggestions" if dismissed else "Possible duplicates"
+        description = ("Previously reviewed pairs · restore to reconsider"
+                       if dismissed else
+                       "Cross-source · exact normalized company and title · confirm manually")
+    elif section_id == "starred_roles":
+        result = _starred_roles_page(conn, page=page, page_size=page_size)
+        title = "Starred roles"
+        description = "Your explicit shortlist · independent of model score"
+    elif section_id == "upcoming_interviews":
+        result = _upcoming_interviews_page(
+            conn, page=page, page_size=page_size, now=now,
+        )
+        title = "Upcoming interviews"
+        description = "Scheduled in the next 14 days · local time shown on each card"
     elif section_id == "interview_prep":
         result = _interview_prep_page(
             conn, page=page, page_size=page_size, today=today,
@@ -410,7 +493,7 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
 
 
 def action_center(conn, *, today=None, fresh_days=3, followup_days=7,
-                  limit=DEFAULT_ACTION_LIMIT):
+                  limit=DEFAULT_ACTION_LIMIT, now=None):
     """Return the small work queues that answer "what needs me now?".
 
     Rows remain ordinary jobs rows.  app.api_actions adds the shared chain/card fields;
@@ -418,9 +501,11 @@ def action_center(conn, *, today=None, fresh_days=3, followup_days=7,
     daily report without importing Flask.
     """
     today = today or date.today()
+    now = now or datetime.now(timezone.utc)
     if not 1 <= limit <= MAX_PAGE_SIZE:
         raise ValueError(f"limit must be from 1 to {MAX_PAGE_SIZE}")
     return [query_action_page(
         conn, section_id, page=1, page_size=limit, today=today,
         fresh_days=fresh_days, followup_days=followup_days,
+        now=now,
     ) for section_id in ACTION_SECTION_IDS]

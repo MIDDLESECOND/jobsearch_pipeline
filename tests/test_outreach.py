@@ -30,6 +30,7 @@ def test_add_list_and_remove_contact(conn):
     assert stored["interaction_url"] == "root"
     assert added["contacts"] == [stored]
     removed = outreach.remove_contact(conn, row, stored["id"])
+    assert removed is not None
     assert removed["contacts"] == []
     assert outreach.chain_contacts(conn, row) == []
     assert outreach.remove_contact(conn, row, stored["id"]) is None

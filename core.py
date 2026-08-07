@@ -523,6 +523,63 @@ def _job_tasks_table_sql():
     """
 
 
+def _job_interviews_table_sql():
+    """User-entered interview schedules, canonical-keyed and read chain-wide.
+
+    Status and mode remain code-side vocabularies in interviews.py so additions do not
+    require a frozen-CHECK table rebuild.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS job_interviews (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url          TEXT NOT NULL,
+            interaction_url  TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            starts_at        TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            mode             TEXT NOT NULL,
+            location         TEXT,
+            meeting_url      TEXT,
+            note             TEXT,
+            status           TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            version          INTEGER NOT NULL DEFAULT 0
+        )
+    """
+
+
+def _role_stars_table_sql():
+    """Current manual priority markers, keyed to the canonical at write time."""
+    return """
+        CREATE TABLE IF NOT EXISTS role_stars (
+            job_url    TEXT PRIMARY KEY,
+            starred_at TEXT NOT NULL,
+            starred    INTEGER NOT NULL DEFAULT 1,
+            version    INTEGER NOT NULL DEFAULT 1
+        )
+    """
+
+
+def _dupe_candidate_dismissals_table_sql():
+    """Versioned review state for pairs the user compared.
+
+    Roots are stored in lexical order.  They intentionally have no foreign keys: a root can
+    later be merged under another canonical, at which point the obsolete pair simply stops
+    matching the current derived candidate set.
+    """
+    return """
+        CREATE TABLE IF NOT EXISTS dupe_candidate_dismissals (
+            left_root   TEXT NOT NULL,
+            right_root  TEXT NOT NULL,
+            dismissed_at TEXT NOT NULL,
+            dismissed   INTEGER NOT NULL DEFAULT 1,
+            version     INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (left_root, right_root)
+        )
+    """
+
+
 def _migrate_job_tasks(conn):
     """Add optimistic-concurrency state to databases opened during feature development."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(job_tasks)")}
@@ -552,6 +609,50 @@ def _migrate_application_materials(conn):
         print("[migrate] added/backfilled application_materials.interaction_url")
 
 
+def _migrate_dupe_candidate_dismissals(conn):
+    """Turn pre-version review rows into version-1 dismissed states, additively."""
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(dupe_candidate_dismissals)"
+    )}
+    changed = False
+    if "dismissed" not in cols:
+        conn.execute(
+            "ALTER TABLE dupe_candidate_dismissals "
+            "ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 1"
+        )
+        changed = True
+    if "version" not in cols:
+        conn.execute(
+            "ALTER TABLE dupe_candidate_dismissals "
+            "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+        )
+        changed = True
+    if changed:
+        conn.commit()
+        print("[migrate] versioned duplicate-candidate review state")
+
+
+def _migrate_role_stars(conn):
+    """Retain old star rows as version-1 active markers and add tombstone state."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(role_stars)")}
+    changed = False
+    if "starred" not in cols:
+        conn.execute(
+            "ALTER TABLE role_stars "
+            "ADD COLUMN starred INTEGER NOT NULL DEFAULT 1"
+        )
+        changed = True
+    if "version" not in cols:
+        conn.execute(
+            "ALTER TABLE role_stars "
+            "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+        )
+        changed = True
+    if changed:
+        conn.commit()
+        print("[migrate] versioned starred-role state")
+
+
 def get_db(cfg):
     conn = connect_db(cfg)
     conn.execute(_jobs_table_sql("jobs", if_not_exists=True))
@@ -560,8 +661,13 @@ def get_db(cfg):
     conn.execute(_application_materials_table_sql())
     conn.execute(_job_contacts_table_sql())
     conn.execute(_job_tasks_table_sql())
+    conn.execute(_job_interviews_table_sql())
+    conn.execute(_role_stars_table_sql())
+    conn.execute(_dupe_candidate_dismissals_table_sql())
     _migrate_job_tasks(conn)
     _migrate_application_materials(conn)
+    _migrate_dupe_candidate_dismissals(conn)
+    _migrate_role_stars(conn)
     # Run-level state the log files can't provide queryably (they're human-oriented text
     # with 30-day retention). Currently one key: 'last_run_ok_ended', the ISO end time of
     # the last SUCCESSFUL full run — the cooldown guard's input. Crashed runs never write
@@ -578,6 +684,12 @@ def get_db(cfg):
                  "ON job_tasks(job_url,status,due_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_due "
                  "ON job_tasks(status,due_date,job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_interviews_chain_time "
+                 "ON job_interviews(job_url,status,starts_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_interviews_upcoming "
+                 "ON job_interviews(status,starts_at,job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_role_stars_at "
+                 "ON role_stars(starred_at,job_url)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;

@@ -82,6 +82,17 @@
                 padding: .25rem .6rem; }
   button.dupe-target { background: #7c3aed; color: #fff; border-color: #7c3aed; }
   .card.anchor { outline: 2px solid #7c3aed; outline-offset: 1px; }
+  .dupe-pair { border-color: #c4b5fd; }
+  .dupe-pair h2 { color: #5b21b6; }
+  .dupe-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem;
+               margin-top: .65rem; }
+  .dupe-side { border: 1px solid #e5e7eb; border-radius: 8px; padding: .7rem;
+               min-width: 0; background: #fafafa; }
+  .dupe-side h3 { font-size: .9rem; margin: 0 0 .3rem; }
+  .dupe-preview { font-size: .8rem; color: #445; line-height: 1.4; margin: .45rem 0 0;
+                  overflow-wrap: anywhere; }
+  .dupe-warning { color: #92400e; }
+  @media (max-width: 620px) { .dupe-grid { grid-template-columns: 1fr; } }
   /* Post-application outcome (applied cards): current-state tag + record/history controls. */
   .outcome { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
   .outcome .tag { margin-left: 0; }
@@ -107,6 +118,10 @@
           background: #eef2ff; color: #3730a3; }
   .task.due { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
   .task.overdue { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .interviews { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+                margin: .35rem 0; font-size: .78rem; color: #556; }
+  .interview { border: 1px solid #a5f3fc; border-radius: 999px; padding: .16rem .5rem;
+               background: #ecfeff; color: #155e75; }
   #contactDialog { width: min(34rem, calc(100vw - 2rem)); border: 0; border-radius: 10px;
                    padding: 0; background: #fff; color: #1a1a1a;
                    box-shadow: 0 18px 55px rgba(15, 23, 42, .25); }
@@ -135,7 +150,24 @@
     font: inherit; }
   #taskForm textarea { min-height: 5rem; resize: vertical; }
   #taskForm .form-actions { display: flex; justify-content: flex-end; gap: .5rem; }
-  @media (max-width: 520px) { #contactForm .form-row { grid-template-columns: 1fr; } }
+  #interviewDialog { width: min(36rem, calc(100vw - 2rem)); border: 0; border-radius: 10px;
+                     padding: 0; background: #fff; color: #1a1a1a;
+                     box-shadow: 0 18px 55px rgba(15, 23, 42, .25); }
+  #interviewDialog::backdrop { background: rgba(15, 23, 42, .48); }
+  #interviewForm { padding: 1.1rem; display: grid; gap: .75rem; }
+  #interviewForm h2 { margin: 0; font-size: 1.05rem; }
+  #interviewForm .form-hint { margin: -.35rem 0 0; color: #667085; font-size: .8rem; }
+  #interviewForm label { display: grid; gap: .25rem; color: #344054; font-size: .8rem; }
+  #interviewForm input, #interviewForm select, #interviewForm textarea {
+    width: 100%; padding: .45rem .55rem; border: 1px solid #d0d4da; border-radius: 6px;
+    background: #fff; color: #1a1a1a; font: inherit;
+  }
+  #interviewForm textarea { min-height: 5rem; resize: vertical; }
+  #interviewForm .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+  #interviewForm .form-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  @media (max-width: 520px) {
+    #contactForm .form-row, #interviewForm .form-row { grid-template-columns: 1fr; }
+  }
   .tag.out-recruiter_screen { background: #dbeafe; color: #1e40af; }
   .tag.out-interview { background: #fde68a; color: #78350f; }
   .tag.out-offer { background: #bbf7d0; color: #14532d; font-weight: 700; }
@@ -200,6 +232,7 @@
   <input type="date" id="date" value="{{ today }}" style="display:none">
   <button id="toggleDecided" class="tab" style="display:none"></button>
   <span id="count"></span>
+  <a class="tab" href="/api/export/roles.csv" download>Export CSV</a>
   <div id="filters" style="display:none">
     <input type="search" id="query" placeholder="Search title, company, location…">
     <select id="verdictFilter">
@@ -304,6 +337,50 @@
     </div>
   </form>
 </dialog>
+<dialog id="interviewDialog" aria-labelledby="interviewDialogTitle">
+  <form id="interviewForm">
+    <h2 id="interviewDialogTitle">Schedule interview</h2>
+    <p class="form-hint">Saved locally. Times display in this browser's timezone; nothing is sent to a calendar and no outcome event is inferred.</p>
+    <label>Round/title *
+      <input id="interviewTitle" name="title" maxlength="240" required
+             placeholder="Recruiter screen, technical round, final…">
+    </label>
+    <div class="form-row">
+      <label>Starts *
+        <input id="interviewStarts" name="starts_at" type="datetime-local" required>
+      </label>
+      <label>Duration (minutes) *
+        <input id="interviewDuration" name="duration_minutes" type="number"
+               min="15" max="480" step="15" value="60" required>
+      </label>
+    </div>
+    <div class="form-row">
+      <label>Mode *
+        <select id="interviewMode" name="mode" required>
+          {% for mode in interview_modes %}
+          <option value="{{ mode }}">{{ mode }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Location
+        <input id="interviewLocation" name="location" maxlength="500"
+               placeholder="Office, room, or phone details">
+      </label>
+    </div>
+    <label>Meeting URL
+      <input id="interviewMeetingUrl" name="meeting_url" type="url" maxlength="2048"
+             placeholder="https://…">
+    </label>
+    <label>Preparation note
+      <textarea id="interviewNote" name="note" maxlength="4000"
+                placeholder="People, format, topics, logistics…"></textarea>
+    </label>
+    <div class="form-actions">
+      <button id="interviewCancelDialog" type="button" class="undo">Close</button>
+      <button id="interviewSave" type="submit" class="record">Save interview</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const GATES = {{ gates | tojson }};
@@ -311,6 +388,7 @@ const EVENTS = {{ events | tojson }};  // outcomes + followup_sent + note
 const CHANNELS = {{ channels | tojson }};  // states.ALL_CHANNELS — how the application went out
 const CONTACT_KINDS = {{ contact_kinds | tojson }};
 const OUTREACH_PURPOSES = {{ outreach_purposes | tojson }};
+const INTERVIEW_MODES = {{ interview_modes | tojson }};
 const FEEDBACK_URL = (() => {
   let u = String({{ feedback_url | tojson }});
   if (!u) return "";
@@ -346,6 +424,8 @@ let pageMeta = {total: 0, pages: 0, page: 1, page_size: pageSize};
 let actionSections = [];
 let actionQueue = null;
 let actionQueueTitle = "";
+let actionQueueDismissed = false;
+let dupeCandidateData = [];
 let funnelData = null;
 // localStorage access can throw outright (browser set to block all site data) — a top-level
 // throw would kill this whole script block, so route through a wrapper that degrades to
@@ -389,6 +469,9 @@ const busyUrls = new Set();
 // Task mutations are chain-scoped: canonical and relisting cards can display the same task,
 // so a per-job-url lock would still let two sibling cards race one state transition.
 const taskBusyRoots = new Set();
+// Interview mutations share one current-chain schedule, so sibling cards use one lock.
+const interviewBusyRoots = new Set();
+const starBusyRoots = new Set();
 
 // Selected by data-view — the semantic the click handler consumes — so a button that merely
 // shares the .tab pill style (#toggleDecided) can never be picked up as a view tab, even if it
@@ -424,6 +507,7 @@ tabs.forEach(t => t.addEventListener("click", () => {
   view = t.dataset.view;
   actionQueue = null;
   actionQueueTitle = "";
+  actionQueueDismissed = false;
   page = 1;
   dateInput.style.display = view === "today" ? "" : "none";
   filtersEl.classList.remove("queue-only");
@@ -566,6 +650,27 @@ function taskPanelHTML(j) {
   return `<div class="tasks"><b>Next actions</b>${chips}</div>`;
 }
 
+function interviewTimeLabel(iso) {
+  const value = new Date(iso);
+  if (Number.isNaN(value.getTime())) return iso;
+  return value.toLocaleString([], {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+function interviewPanelHTML(j) {
+  if (effectiveStatus(j) !== "applied") return "";
+  const interviews = j.interviews || [];
+  if (!interviews.length) return "";
+  const chips = interviews.map(item => {
+    const place = item.location || item.meeting_url || item.mode;
+    const note = item.note ? ` title="${esc(item.note)}"` : "";
+    return `<span class="interview"${note}><b>${esc(item.title)}</b> · `
+      + `${esc(interviewTimeLabel(item.starts_at))} · ${esc(place)}</span>`;
+  }).join("");
+  return `<div class="interviews"><b>Upcoming interviews</b>${chips}</div>`;
+}
+
 function scoreLine(b) {
   // Render whatever dimensions the stored eval has (the schema has changed over time);
   // highlight any AI-related dimension. Mirrors the report's score line.
@@ -580,7 +685,8 @@ function card(j, actionSection = null) {
   const div = document.createElement("div");
   // Re-apply the in-flight lock: a card rebuilt while its POST is pending must not come back
   // with live buttons (double-fire) — see busyUrls.
-  div.className = (busyUrls.has(j.job_url) || taskBusyRoots.has(j.chain_root))
+  div.className = (busyUrls.has(j.job_url) || taskBusyRoots.has(j.chain_root)
+      || interviewBusyRoots.has(j.chain_root) || starBusyRoots.has(j.chain_root))
     ? "card busy" : "card";
   div.dataset.url = j.job_url;  // lets a decision update every affected (repost-chain) card
   div.dataset.root = j.chain_root;
@@ -599,6 +705,7 @@ function card(j, actionSection = null) {
   div.innerHTML = `
     <h2>${esc(j.title)} — ${esc(j.company)} ${statusTag(j)} ${repost}</h2>
     ${outcomeRowHTML(j)}
+    ${interviewPanelHTML(j)}
     ${taskPanelHTML(j)}
     ${contactPanelHTML(j)}
     ${materialPanelHTML(j)}
@@ -621,6 +728,9 @@ function card(j, actionSection = null) {
 
   const sendBtn = div.querySelector(".send");
   if (sendBtn) sendBtn.addEventListener("click", () => sendToAssistant(div, j.job_url));
+
+  actions.appendChild(btn(j.starred ? "★ Unstar" : "☆ Star role", "undo", () =>
+    mutateStar(div, j, !j.starred)));
 
   // A chain-decided relisting (decision inherited from its canonical) is read-only here — undo it
   // on the original, which lives in the Applied/Passed view.
@@ -686,9 +796,30 @@ function card(j, actionSection = null) {
     actions.appendChild(materialUploadButton(div, j, "resume", "Attach resume"));
     actions.appendChild(materialUploadButton(div, j, "cover_letter", "Attach cover letter"));
     actions.appendChild(btn("Copy prep context", "send", () => copyPrepContext(div, j)));
+    actions.appendChild(btn("Schedule interview", "record", () =>
+      openInterviewDialog(div, j)));
+    const scheduled = j.interviews || [];
+    if (scheduled.length) {
+      const isel = document.createElement("select");
+      isel.className = "interview-in";
+      isel.title = "scheduled interview";
+      isel.innerHTML = scheduled.map(item =>
+        `<option value="${esc(item.id)}">${esc(item.title)} · ${esc(interviewTimeLabel(item.starts_at))}</option>`
+      ).join("");
+      actions.appendChild(isel);
+      actions.appendChild(btn("Edit interview", "undo", () => {
+        const item = selectedInterview(j, Number(isel.value));
+        if (item) openInterviewDialog(div, j, item);
+      }));
+      actions.appendChild(btn("Calendar .ics", "send", () =>
+        downloadInterviewCalendar(j, Number(isel.value))));
+      actions.appendChild(btn("Cancel interview", "undo", () =>
+        cancelInterview(div, j, Number(isel.value))));
+    }
     const esel = document.createElement("select");
     esel.innerHTML = `<option value="">event…</option>`
-      + EVENTS.map(e => `<option value="${e}">${e.replace(/_/g, " ")}</option>`).join("");
+      + EVENTS.filter(e => e !== "note")
+        .map(e => `<option value="${e}">${e.replace(/_/g, " ")}</option>`).join("");
     const enote = document.createElement("input");
     enote.className = "note-in"; enote.placeholder = "note…";
     actions.appendChild(esel);
@@ -701,12 +832,23 @@ function card(j, actionSection = null) {
     actions.appendChild(btn("Record", "record", () => {
       const t = esel.value;
       if (!t) { alert("pick an event type first"); return; }
-      if (t === "note" && !enote.value.trim()) { alert("a note event needs note text"); return; }
       postEvent(div, j, {type: t, note: enote.value.trim() || undefined});
     }));
-    actions.appendChild(btn("History ▸", "undo", ev => toggleHistory(div, j, ev.currentTarget)));
     actions.appendChild(btn("Undo last", "undo", () => postEvent(div, j, {undo: true})));
   }
+
+  const roleNote = document.createElement("input");
+  roleNote.className = "note-in role-note-in";
+  roleNote.placeholder = "role note…";
+  roleNote.maxLength = 4000;
+  actions.appendChild(roleNote);
+  actions.appendChild(btn("Save role note", "record", () => {
+    const note = roleNote.value.trim();
+    if (!note) { alert("a role note needs text"); return; }
+    postEvent(div, j, {type: "note", note});
+  }));
+  actions.appendChild(btn("History ▸", "undo", ev =>
+    toggleHistory(div, j, ev.currentTarget)));
 
   actions.appendChild(btn("Add next action", "undo", () => openTaskDialog(div, j)));
   const roleTasks = j.tasks || [];
@@ -785,6 +927,34 @@ function btn(label, cls, onClick) {
   const b = document.createElement("button");
   b.className = cls; b.textContent = label; b.addEventListener("click", onClick);
   return b;
+}
+
+async function mutateStar(div, j, starred) {
+  const root = j.chain_root || j.job_url;
+  if (linkBusy || busyUrls.has(j.job_url) || starBusyRoots.has(root)) return;
+  starBusyRoots.add(root);
+  list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+    .forEach(card => card.classList.add("busy"));
+  mutBusy++;
+  try {
+    const data = await postJSON("/api/star", {
+      job_url: j.job_url, starred, expected_starred: !!j.starred,
+      expected_star_version: j.star_version || 0,
+    });
+    if (!data.ok) {
+      alert(data.message || "star update failed");
+      if ((data.message || "").includes("refresh and retry")) await load();
+      return;
+    }
+    await load();
+  } catch (e) {
+    alert("error: " + e);
+  } finally {
+    mutBusy--;
+    starBusyRoots.delete(root);
+    list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+      .forEach(card => card.classList.remove("busy"));
+  }
 }
 
 function materialUploadButton(div, j, kind, label) {
@@ -893,7 +1063,7 @@ let contactDialogSubmitting = false;
 
 function openContactDialog(div, j) {
   if (linkBusy || mutBusy || busyUrls.has(j.job_url)
-      || contactDialog.open || taskDialog.open) return;
+      || contactDialog.open || taskDialog.open || interviewDialog.open) return;
   pendingContactTarget = {div, j};
   contactForm.reset();
   document.getElementById("contactKind").value = "recruiter";
@@ -957,6 +1127,133 @@ async function mutateContact(div, j, fields) {
   }
 }
 
+let pendingInterviewTarget = null;
+const interviewDialog = document.getElementById("interviewDialog");
+const interviewForm = document.getElementById("interviewForm");
+const interviewSave = document.getElementById("interviewSave");
+const interviewCancelDialog = document.getElementById("interviewCancelDialog");
+let interviewDialogSubmitting = false;
+
+function datetimeLocalValue(value) {
+  const instant = value ? new Date(value) : new Date(Date.now() + 60 * 60 * 1000);
+  if (!value) {
+    instant.setMinutes(Math.ceil(instant.getMinutes() / 15) * 15, 0, 0);
+  }
+  const pad = number => String(number).padStart(2, "0");
+  return `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())}`
+    + `T${pad(instant.getHours())}:${pad(instant.getMinutes())}`;
+}
+
+function selectedInterview(j, interviewId) {
+  return (j.interviews || []).find(item => item.id === interviewId);
+}
+
+function openInterviewDialog(div, j, item = null) {
+  const root = j.chain_root || j.job_url;
+  if (linkBusy || mutBusy || busyUrls.has(j.job_url) || interviewBusyRoots.has(root)
+      || interviewDialog.open || taskDialog.open || contactDialog.open) return;
+  pendingInterviewTarget = {div, j, item};
+  interviewForm.reset();
+  document.getElementById("interviewDialogTitle").textContent = item
+    ? "Edit interview" : "Schedule interview";
+  interviewSave.textContent = item ? "Save changes" : "Save interview";
+  document.getElementById("interviewTitle").value = item?.title || "";
+  document.getElementById("interviewStarts").value = datetimeLocalValue(item?.starts_at);
+  document.getElementById("interviewDuration").value = item?.duration_minutes || 60;
+  document.getElementById("interviewMode").value = item?.mode || INTERVIEW_MODES[0];
+  document.getElementById("interviewLocation").value = item?.location || "";
+  document.getElementById("interviewMeetingUrl").value = item?.meeting_url || "";
+  document.getElementById("interviewNote").value = item?.note || "";
+  interviewDialog.showModal();
+  document.getElementById("interviewTitle").focus();
+}
+
+interviewCancelDialog.addEventListener("click", () => interviewDialog.close());
+interviewDialog.addEventListener("cancel", event => {
+  if (interviewDialogSubmitting) event.preventDefault();
+});
+interviewDialog.addEventListener("close", () => {
+  pendingInterviewTarget = null;
+  interviewDialogSubmitting = false;
+  interviewSave.disabled = false;
+  interviewCancelDialog.disabled = false;
+});
+interviewForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!pendingInterviewTarget || interviewDialogSubmitting
+      || !interviewForm.reportValidity()) return;
+  const submittedTarget = pendingInterviewTarget;
+  const {div, j, item} = submittedTarget;
+  const fields = Object.fromEntries(new FormData(interviewForm).entries());
+  const starts = new Date(fields.starts_at);
+  if (Number.isNaN(starts.getTime())) { alert("enter a valid interview date and time"); return; }
+  fields.starts_at = starts.toISOString();
+  fields.duration_minutes = Number(fields.duration_minutes);
+  const mutation = item
+    ? Object.assign({action: "update", interview_id: item.id,
+                     expected_version: item.version}, fields)
+    : Object.assign({action: "add"}, fields);
+  interviewDialogSubmitting = true;
+  interviewSave.disabled = true;
+  interviewCancelDialog.disabled = true;
+  const saved = await mutateInterview(div, j, mutation);
+  if (saved && pendingInterviewTarget === submittedTarget) interviewDialog.close();
+  else {
+    interviewDialogSubmitting = false;
+    interviewSave.disabled = false;
+    interviewCancelDialog.disabled = false;
+  }
+});
+
+async function cancelInterview(div, j, interviewId) {
+  const item = selectedInterview(j, interviewId);
+  if (!item || !confirm(`Cancel “${item.title}”? Its record will be retained.`)) return;
+  await mutateInterview(div, j, {
+    action: "cancel", interview_id: interviewId, expected_version: item.version,
+  });
+}
+
+function downloadInterviewCalendar(j, interviewId) {
+  const item = selectedInterview(j, interviewId);
+  if (!item) return;
+  const link = document.createElement("a");
+  link.href = `/api/interviews/${encodeURIComponent(item.id)}.ics?job_url=`
+    + encodeURIComponent(j.job_url);
+  link.download = `interview-${item.id}.ics`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function mutateInterview(div, j, fields) {
+  const root = j.chain_root || j.job_url;
+  if (linkBusy || busyUrls.has(j.job_url) || interviewBusyRoots.has(root)) return false;
+  interviewBusyRoots.add(root);
+  list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+    .forEach(card => card.classList.add("busy"));
+  mutBusy++;
+  try {
+    const data = await postJSON("/api/interviews", Object.assign({job_url: j.job_url}, fields));
+    if (!data.ok) {
+      alert(data.message || "interview update failed");
+      if (data.message === "interview changed; refresh and retry") await load();
+      return false;
+    }
+    j.interviews = data.interviews || [];
+    // The mutation can add, reorder, or remove this chain from the upcoming queue.
+    await load();
+    return true;
+  } catch (e) {
+    alert("error: " + e);
+    return false;
+  } finally {
+    mutBusy--;
+    interviewBusyRoots.delete(root);
+    list.querySelectorAll(`.card[data-root="${CSS.escape(root)}"]`)
+      .forEach(card => card.classList.remove("busy"));
+  }
+}
+
 let pendingTaskTarget = null;
 const taskDialog = document.getElementById("taskDialog");
 const taskForm = document.getElementById("taskForm");
@@ -966,7 +1263,8 @@ let taskDialogSubmitting = false;
 
 function openTaskDialog(div, j) {
   if (linkBusy || mutBusy || busyUrls.has(j.job_url)
-      || taskBusyRoots.has(j.chain_root) || taskDialog.open || contactDialog.open) return;
+      || taskBusyRoots.has(j.chain_root) || taskDialog.open || contactDialog.open
+      || interviewDialog.open) return;
   pendingTaskTarget = {div, j};
   taskForm.reset();
   document.getElementById("taskDue").value = localTodayISO();
@@ -1303,7 +1601,7 @@ async function decide(div, j, action, gate, resume, channel) {
   }
 }
 
-// Record (or undo the last) post-application outcome event. Same in-flight guards as
+// Record a role note or a post-application event (or undo the last event). Same guards as
 // decide(); unlike a decision it never flips decided/undecided, so there is no hide-filter
 // or view-membership churn — patch the outcome cache on every affected chain member and
 // rebuild just those cards.
@@ -1344,7 +1642,8 @@ async function postEvent(div, j, body) {
       // Never wipe a SIBLING card's in-progress input (typed note, chosen event type,
       // focused field) — its stale outcome tag can wait for the next action/reload; lost
       // user text cannot. The clicked card itself always rebuilds (its input was consumed).
-      if (el !== div && (el.querySelector(".note-in")?.value
+      if (el !== div && (Array.from(el.querySelectorAll(".note-in"))
+                           .some(input => input.value)
                          || el.querySelector(".actions select")?.value
                          || el.contains(document.activeElement))) return;
       el.replaceWith(card(r));
@@ -1642,7 +1941,8 @@ function renderActionCenter() {
   toggleDecidedBtn.style.display = "none";
   list.innerHTML = "";
   const total = actionSections.reduce((n, s) => n + s.total, 0);
-  setCount(jobsData.length, 0, total);
+  const shown = actionSections.reduce((n, s) => n + s.items.length, 0);
+  setCount(shown, 0, total);
   for (const section of actionSections) {
     const wrap = document.createElement("section");
     wrap.className = "action-section";
@@ -1651,15 +1951,104 @@ function renderActionCenter() {
       + `${section.total > section.items.length ? '<button type="button" class="view-all">View all</button>' : ''}</div>`;
     const viewAll = wrap.querySelector(".view-all");
     if (viewAll) viewAll.addEventListener("click", () => openActionSection(section));
+    if (section.id === "possible_duplicates" && section.dismissed_total) {
+      const reviewIgnored = btn(`Review ignored (${section.dismissed_total})`, "undo", () =>
+        openActionSection(section, true));
+      wrap.querySelector(".action-head").appendChild(reviewIgnored);
+    }
     if (!section.items.length) {
       const empty = document.createElement("div");
       empty.className = "section-empty";
       empty.textContent = "Nothing needs attention here.";
       wrap.appendChild(empty);
     } else {
-      section.items.forEach(j => wrap.appendChild(card(j, section.id)));
+      section.items.forEach(item => wrap.appendChild(
+        section.id === "possible_duplicates"
+          ? duplicateCandidateCard(item) : card(item, section.id)));
     }
     list.appendChild(wrap);
+  }
+}
+
+function duplicateSide(side) {
+  return `<div class="dupe-side"><h3>${esc(side.source || "unknown source")}</h3>`
+    + `<div><b>${esc(side.title || "title unstated")}</b></div>`
+    + `<div class="meta">${esc(side.company || "company unstated")}</div>`
+    + `<div class="meta">${esc(side.location || "location unstated")}</div>`
+    + `<div class="meta">first seen ${esc((side.first_seen || "").slice(0, 10) || "unknown")}`
+    + `${side.date_posted ? ` · posted ${esc(side.date_posted)}` : ""}</div>`
+    + `<div class="links"><a href="${esc(side.job_url)}" target="_blank" rel="noopener noreferrer">Open posting ↗</a></div>`
+    + `<p class="dupe-preview">${esc(side.description_preview || "No stored description preview.")}</p></div>`;
+}
+
+function duplicateCandidateCard(pair) {
+  const div = document.createElement("article");
+  div.className = "card dupe-pair";
+  const title = pair.left.title || pair.right.title || "Possible duplicate";
+  const company = pair.left.company || pair.right.company || "";
+  div.innerHTML = `<h2>${esc(title)} — ${esc(company)}</h2>`
+    + `<div class="meta dupe-warning">Suggestion only: compare location and description before linking. `
+    + `${pair.same_location ? "Normalized locations match." : "Locations differ."} `
+    + `First-seen dates are ${Number(pair.first_seen_gap_days)} day(s) apart.</div>`
+    + `<div class="dupe-grid">${duplicateSide(pair.left)}${duplicateSide(pair.right)}</div>`
+    + `<div class="actions"></div><span class="toast"></span>`;
+  const actions = div.querySelector(".actions");
+  if (pair.dismissed_at) {
+    actions.appendChild(btn("Restore suggestion", "undo", () =>
+      setSuggestedDuplicateDismissed(div, pair, false)));
+  } else {
+    actions.appendChild(btn("Same role — link", "dupe-target", () =>
+      confirmSuggestedDuplicate(div, pair)));
+    actions.appendChild(btn("Not the same role", "undo", () =>
+      setSuggestedDuplicateDismissed(div, pair, true)));
+  }
+  return div;
+}
+
+async function setSuggestedDuplicateDismissed(div, pair, dismissed) {
+  if (linkBusy) return;
+  linkBusy = true;
+  div.classList.add("busy");
+  try {
+    const data = await postJSON("/api/dupe-candidate", {
+      left_url: pair.left.job_url, right_url: pair.right.job_url, dismissed,
+      expected_roots: [pair.left_root, pair.right_root],
+      expected_dismissed: !!pair.dismissed_at,
+      expected_review_version: pair.review_version || 0,
+    });
+    if (!data.ok) { alert(data.message || "failed"); await load(); return; }
+    await load();
+  } catch (e) {
+    alert("error: " + e);
+    await load();
+  } finally {
+    linkBusy = false;
+    div.classList.remove("busy");
+  }
+}
+
+async function confirmSuggestedDuplicate(div, pair) {
+  if (linkBusy || !confirm(
+      `Link these as the SAME role?\n\n`
+      + `  • ${pair.left.title} — ${pair.left.company} (${pair.left.source})\n`
+      + `  • ${pair.right.title} — ${pair.right.company} (${pair.right.source})\n\n`
+      + `The earliest posting becomes canonical; existing conflict guards still apply.`)) return;
+  linkBusy = true;
+  div.classList.add("busy");
+  try {
+    const data = await postJSON("/api/dupe", {
+      job_url: pair.right.job_url, of: pair.left.job_url,
+      expected_roots: [pair.left_root, pair.right_root],
+    });
+    if (!data.ok) { alert(data.message || "failed"); return; }
+    exemptFromHide(data.exempt);
+    await load();
+  } catch (e) {
+    alert("error: " + e);
+    await load();
+  } finally {
+    linkBusy = false;
+    div.classList.remove("busy");
   }
 }
 
@@ -1734,10 +2123,11 @@ function renderFunnel() {
   list.appendChild(wrap);
 }
 
-function openActionSection(section) {
+function openActionSection(section, dismissed = false) {
   view = "action_queue";
   actionQueue = section.id;
-  actionQueueTitle = section.title;
+  actionQueueDismissed = dismissed;
+  actionQueueTitle = dismissed ? "Ignored duplicate suggestions" : section.title;
   page = 1;
   dateInput.style.display = "none";
   filtersEl.classList.add("queue-only");
@@ -1746,12 +2136,50 @@ function openActionSection(section) {
   load();
 }
 
+function renderDuplicateQueue() {
+  toggleDecidedBtn.style.display = "none";
+  setCount(dupeCandidateData.length, 0, pageMeta.total);
+  renderPager();
+  list.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "action-head";
+  head.innerHTML = `<h2>${esc(actionQueueTitle)}</h2><button type="button" class="back-action">Back to Action Center</button>`;
+  head.querySelector(".back-action").addEventListener("click", () => {
+    view = "action"; actionQueue = null; actionQueueTitle = "";
+    actionQueueDismissed = false; page = 1;
+    filtersEl.classList.remove("queue-only"); filtersEl.style.display = "none"; load();
+  });
+  if (actionQueueDismissed) {
+    head.appendChild(btn("Back to suggestions", "undo", () => {
+      actionQueueDismissed = false; actionQueueTitle = "Possible duplicates"; page = 1; load();
+    }));
+  } else if (pageMeta.dismissed_total) {
+    head.appendChild(btn(`Review ignored (${pageMeta.dismissed_total})`, "undo", () => {
+      actionQueueDismissed = true; actionQueueTitle = "Ignored duplicate suggestions";
+      page = 1; load();
+    }));
+  }
+  list.appendChild(head);
+  if (!dupeCandidateData.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = actionQueueDismissed
+      ? "No ignored duplicate suggestions." : "No possible duplicates need review.";
+    list.appendChild(empty);
+    return;
+  }
+  dupeCandidateData.forEach(pair => list.appendChild(duplicateCandidateCard(pair)));
+}
+
 function render() {
   // A tab/page/filter change replaces the card collection.  Do not carry an index from a
   // longer previous page into a shorter result set (k would otherwise address no card).
   keyIndex = -1;
   if (view === "action") { renderActionCenter(); return; }
   if (view === "funnel") { renderFunnel(); return; }
+  if (view === "action_queue" && actionQueue === "possible_duplicates") {
+    renderDuplicateQueue(); return;
+  }
   const visible = jobsData.filter(j => !isHiddenDecided(j));
   const hidden = jobsData.length - visible.length;
   setCount(visible.length, hidden, pageMeta.total);
@@ -1769,6 +2197,7 @@ function render() {
     head.innerHTML = `<h2>${esc(actionQueueTitle)}</h2><button type="button">Back to Action Center</button>`;
     head.querySelector("button").addEventListener("click", () => {
       view = "action"; actionQueue = null; actionQueueTitle = ""; page = 1;
+      actionQueueDismissed = false;
       filtersEl.classList.remove("queue-only"); filtersEl.style.display = "none"; load();
     });
     list.appendChild(head);
@@ -1787,6 +2216,7 @@ async function load() {
   toggleDecidedBtn.style.display = "none";
   jobsData = [];
   actionSections = [];
+  dupeCandidateData = [];
   funnelData = null;
   countEl.textContent = "";
   list.innerHTML = `<div class="empty">Loading…</div>`;
@@ -1798,6 +2228,9 @@ async function load() {
   } else if (view === "action_queue") {
     params.set("page", String(page));
     params.set("page_size", String(pageSize));
+    if (actionQueue === "possible_duplicates" && actionQueueDismissed) {
+      params.set("dismissed", "1");
+    }
     url = "/api/actions/" + encodeURIComponent(actionQueue) + "?" + params;
   } else if (view !== "action") {
     params.set("view", view);
@@ -1836,13 +2269,19 @@ async function load() {
   loadState = "idle";
   if (view === "action") {
     actionSections = payload.sections || [];
-    jobsData = actionSections.flatMap(s => s.items);
+    jobsData = actionSections.flatMap(s =>
+      s.id === "possible_duplicates" ? [] : s.items);
     pageMeta = {total: jobsData.length, pages: 1, page: 1, page_size: jobsData.length};
   } else if (view === "funnel") {
     funnelData = payload;
     pageMeta = {total: payload.quality?.applications || 0, pages: 1, page: 1, page_size: 0};
   } else {
-    jobsData = payload.items || [];
+    if (view === "action_queue" && actionQueue === "possible_duplicates") {
+      dupeCandidateData = payload.items || [];
+      jobsData = [];
+    } else {
+      jobsData = payload.items || [];
+    }
     pageMeta = payload;
     if (view === "action_queue") actionQueueTitle = payload.title || actionQueueTitle;
     if (!payload.pages) page = 1;

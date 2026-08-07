@@ -9,7 +9,9 @@ existing `jobs.db`: `mark_posting` /
 `reject_posting` (so repost-chain
 propagation and the status lift behave exactly like the CLI wrappers in pipeline.py),
 and the shared `dupe_resolve` / `dupe_commit` / `dupe_unlink` cores for manually
-linking duplicates (the `dupe` command's two-click equivalent). It makes no schema
+linking duplicates (the `dupe` command's two-click equivalent). Review-only cross-source
+candidate discovery is owned by `dupe_candidates.py`; confirmation still uses those same
+guarded chain cores. It makes no schema
 changes directly; schema ownership remains in core.get_db. Single-user, local-only — binds
 to 127.0.0.1.
 
@@ -23,14 +25,18 @@ import sys
 import webbrowser
 from datetime import date
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    effective_decisions, effective_decision, dupe_resolve, dupe_commit,
                    dupe_unlink, record_event, undo_event, chain_events, set_resume,
                    set_channel)
 from core import connect_db, get_db, load_config
+from dupe_candidates import confirm_candidate, set_candidate_dismissed
+from exports import roles_csv
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
+from interviews import (INTERVIEW_MODES, add_interview, chain_interviews,
+                        change_interview, interview_ics, interview_summaries)
 from materials import (MAX_UPLOAD_BYTES, attach_upload, chain_materials, download_info,
                        material_summaries, prep_context_bundle, snapshot_jd)
 from outreach import (CONTACT_KINDS, OUTREACH_PURPOSES, add_contact, chain_contacts,
@@ -40,6 +46,7 @@ from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
                     VERDICT_RECRUITER_ONLY)
 from tasks import add_task, chain_tasks, change_task, task_counts, task_summaries
+from watchlist import set_starred, star_summaries
 from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_job_page
 
 app = Flask(__name__)
@@ -69,7 +76,7 @@ def _pin_host():
 
 
 def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
-                task_count=0):
+                task_count=0, scheduled_interviews=None, star=None):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
     configured max_description_chars — a stored description at that length was truncated.
     `dec` is chain.effective_decision(conn, row) — the chain-wide decision, computed by the
@@ -154,28 +161,92 @@ def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
         "next_followup_date": (row["next_followup_date"]
                                if "next_followup_date" in row_keys else None),
         "next_task_due": row["next_task_due"] if "next_task_due" in row_keys else None,
+        "next_interview_at": (row["next_interview_at"]
+                              if "next_interview_at" in row_keys else None),
         "materials": packet or {"resume": None, "cover_letter": None,
                                 "jd_snapshot": None},
         "contacts": contacts or [],
         "tasks": role_tasks or [],
         "task_count": task_count,
+        "interviews": scheduled_interviews or [],
+        "starred": bool(star and star["starred"]),
+        "starred_at": star["starred_at"] if star else None,
+        "star_version": star["star_version"] if star else 0,
     }
 
 
 def rows_to_dicts(conn, rows, cap, decisions=None):
-    """Batch chain decisions, packets, contacts, and tasks for a bounded row set."""
+    """Batch chain decisions, packets, contacts, tasks, and interviews for bounded rows."""
     decisions = decisions or effective_decisions(conn, rows)
     packets = material_summaries(conn, rows)
     contacts = contact_summaries(conn, rows)
     role_tasks = task_summaries(conn, rows)
     role_task_counts = task_counts(conn, rows)
+    scheduled = interview_summaries(conn, rows)
+    stars = star_summaries(conn, rows)
     return [row_to_dict(
         row, cap, decisions[row["job_url"]],
         packet=packets[row["repost_of"] or row["job_url"]],
         contacts=contacts[row["repost_of"] or row["job_url"]],
         role_tasks=role_tasks[row["repost_of"] or row["job_url"]],
         task_count=role_task_counts[row["repost_of"] or row["job_url"]],
+        scheduled_interviews=scheduled[row["job_url"]],
+        star=stars[row["job_url"]],
     ) for row in rows]
+
+
+def _dupe_side_to_dict(row):
+    """Serialize only posting evidence rendered by the duplicate comparison UI."""
+    description = " ".join((row["description"] or "").split())
+    return {
+        "job_url": row["job_url"],
+        "title": row["title"],
+        "company": row["company"],
+        "location": row["location"],
+        "source": row["source"],
+        "first_seen": row["first_seen"],
+        "date_posted": row["date_posted"],
+        "description_preview": description[:280],
+    }
+
+
+def dupe_pairs_to_dicts(pairs):
+    """Shape pair evidence without loading unrelated private role evidence."""
+    return [{
+        "left_root": pair["left_root"],
+        "right_root": pair["right_root"],
+        "left": _dupe_side_to_dict(pair["left"]),
+        "right": _dupe_side_to_dict(pair["right"]),
+        "same_location": pair["same_location"],
+        "first_seen_gap_days": pair["first_seen_gap_days"],
+        "dismissed_at": pair["dismissed_at"],
+        "review_version": pair["review_version"],
+    } for pair in pairs]
+
+
+def _action_section_payload(conn, section, cap, *, paged=False):
+    """Serialize ordinary job queues and the pair-shaped duplicate queue consistently."""
+    if section["id"] == "possible_duplicates":
+        items = dupe_pairs_to_dicts(section["pairs"])
+    else:
+        decisions = effective_decisions(conn, section["rows"])
+        items = rows_to_dicts(conn, section["rows"], cap, decisions)
+    payload = {
+        "id": section["id"],
+        "title": section["title"],
+        "description": section["description"],
+        "total": section["total"],
+        "items": items,
+    }
+    if section["id"] == "possible_duplicates":
+        payload["dismissed_total"] = section["dismissed_total"]
+    if paged:
+        payload.update({
+            "page": section["page"],
+            "page_size": section["page_size"],
+            "pages": section["pages"],
+        })
+    return payload
 
 
 def jobs_for_view(conn, view, for_date, cap):
@@ -250,6 +321,7 @@ def index():
         channels=list(ALL_CHANNELS),
         contact_kinds=list(CONTACT_KINDS),
         outreach_purposes=list(OUTREACH_PURPOSES),
+        interview_modes=list(INTERVIEW_MODES),
         today=date.today().isoformat(),
         feedback_url=cfg["settings"].get("feedback_project_url", "") or "",
     )
@@ -306,16 +378,8 @@ def api_actions():
     conn = connect_db(cfg)
     try:
         sections = action_center(conn)
-        payload = []
-        for section in sections:
-            decisions = effective_decisions(conn, section["rows"])
-            payload.append({
-                "id": section["id"],
-                "title": section["title"],
-                "description": section["description"],
-                "total": section["total"],
-                "items": rows_to_dicts(conn, section["rows"], cap, decisions),
-            })
+        payload = [_action_section_payload(conn, section, cap)
+                   for section in sections]
         return jsonify({"sections": payload})
     finally:
         conn.close()
@@ -331,22 +395,16 @@ def api_action_section(section_id):
         try:
             page = int(request.args.get("page", "1"))
             page_size = int(request.args.get("page_size", str(DEFAULT_PAGE_SIZE)))
+            dismissed_raw = request.args.get("dismissed", "0")
+            if dismissed_raw not in ("0", "1"):
+                raise ValueError("dismissed must be 0 or 1")
             section = query_action_page(
                 conn, section_id, page=page, page_size=page_size,
+                dismissed=dismissed_raw == "1",
             )
         except (TypeError, ValueError) as e:
             return jsonify({"ok": False, "message": str(e)}), 400
-        decisions = effective_decisions(conn, section["rows"])
-        return jsonify({
-            "id": section["id"],
-            "title": section["title"],
-            "description": section["description"],
-            "items": rows_to_dicts(conn, section["rows"], cap, decisions),
-            "total": section["total"],
-            "page": section["page"],
-            "page_size": section["page_size"],
-            "pages": section["pages"],
-        })
+        return jsonify(_action_section_payload(conn, section, cap, paged=True))
     finally:
         conn.close()
 
@@ -367,6 +425,56 @@ def api_funnel():
     finally:
         conn.close()
     return jsonify(result)
+
+
+@app.route("/api/export/roles.csv")
+def api_export_roles_csv():
+    """Download a chain-deduped summary; intentionally not a full evidence backup."""
+    conn = connect_db(load_config())
+    try:
+        content = roles_csv(conn)
+    finally:
+        conn.close()
+    filename = f"job-search-roles-{date.today().isoformat()}.csv"
+    return Response(
+        content, content_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/star", methods=["POST"])
+def api_star():
+    """Set explicit current-chain priority; independent of evaluation and decisions."""
+    if not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    job_url = body.get("job_url")
+    starred = body.get("starred")
+    expected = body.get("expected_starred")
+    expected_version = body.get("expected_star_version")
+    if (not isinstance(job_url, str) or not job_url
+            or not isinstance(starred, bool) or not isinstance(expected, bool)
+            or isinstance(expected_version, bool)
+            or not isinstance(expected_version, int) or expected_version < 0):
+        return jsonify({"ok": False, "message": "bad request"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        try:
+            result = set_starred(
+                conn, row, starred, expected_starred=expected,
+                expected_version=expected_version,
+            )
+        except ValueError as exc:
+            status = 409 if "refresh and retry" in str(exc) else 400
+            return jsonify({"ok": False, "message": str(exc)}), status
+        return jsonify({"ok": True, **result})
+    finally:
+        conn.close()
 
 
 @app.route("/api/clip")
@@ -602,6 +710,84 @@ def api_tasks():
         conn.close()
 
 
+@app.route("/api/interviews", methods=["GET", "POST"])
+def api_interviews():
+    """Read or mutate explicit interview schedules for the current role chain."""
+    if request.method == "POST" and not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    job_url = body.get("job_url") if request.method == "POST" else request.args.get("job_url")
+    if not isinstance(job_url, str) or not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        if request.method == "GET":
+            include_cancelled = request.args.get("include_cancelled") == "1"
+            return jsonify({"ok": True, "interviews": chain_interviews(
+                conn, row, include_cancelled=include_cancelled,
+            )})
+        action = body.get("action", "add")
+        try:
+            if action == "add":
+                result = add_interview(
+                    conn, row, title=body.get("title"), starts_at=body.get("starts_at"),
+                    duration_minutes=body.get("duration_minutes"), mode=body.get("mode"),
+                    location=body.get("location"), meeting_url=body.get("meeting_url"),
+                    note=body.get("note"),
+                )
+                message = f"scheduled {result['interview']['title']}"
+            elif action in ("update", "cancel"):
+                result = change_interview(
+                    conn, row, body.get("interview_id"), action,
+                    expected_version=body.get("expected_version"),
+                    title=body.get("title"), starts_at=body.get("starts_at"),
+                    duration_minutes=body.get("duration_minutes"), mode=body.get("mode"),
+                    location=body.get("location"), meeting_url=body.get("meeting_url"),
+                    note=body.get("note"),
+                )
+                if result is None:
+                    return jsonify({"ok": False, "message": "interview not found"}), 404
+                message = "interview updated" if action == "update" else "interview cancelled"
+            else:
+                return jsonify({"ok": False, "message": "unknown interview action"}), 400
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        return jsonify({"ok": True, "message": message, **result})
+    finally:
+        conn.close()
+
+
+@app.route("/api/interviews/<int:interview_id>.ics")
+def api_interview_calendar(interview_id):
+    """Download one local schedule as an iCalendar file; no external calendar write."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"ok": False, "message": "job_url is required"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "message": "posting not found"}), 404
+        try:
+            calendar = interview_ics(conn, row, interview_id)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        if calendar is None:
+            return jsonify({"ok": False, "message": "interview not found"}), 404
+        return Response(
+            calendar, mimetype="text/calendar",
+            headers={"Content-Disposition":
+                     f'attachment; filename="interview-{interview_id}.ics"'},
+        )
+    finally:
+        conn.close()
+
+
 @app.route("/api/decision", methods=["POST"])
 def api_decision():
     if not _origin_ok():
@@ -693,13 +879,13 @@ def api_decision():
 
 @app.route("/api/event", methods=["POST"])
 def api_event():
-    """Record (or with undo=true remove the last) post-application history event on a chain —
-    thin layer over chain.record_event / undo_event, same request/response contract as
-    /api/decision. An event never flips a card decided<->undecided, so `exempt` is just the
-    clicked row (the interaction handle) and the hide-decided filter is unaffected."""
+    """Record a chain event or a role note; notes are valid before application too."""
     if not _origin_ok():
         return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object",
+                        "affected": [], "exempt": []}), 400
     job_url = body.get("job_url")
     if not job_url:
         return jsonify({"ok": False, "message": "bad request", "affected": [], "exempt": []}), 400
@@ -747,15 +933,59 @@ def api_events():
                      "note": e["note"]} for e in events])
 
 
+@app.route("/api/dupe-candidate", methods=["POST"])
+def api_dupe_candidate():
+    """Persist or restore the human review result for one suggested pair."""
+    if not _origin_ok():
+        return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object"}), 400
+    left_url = body.get("left_url")
+    right_url = body.get("right_url")
+    dismissed = body.get("dismissed")
+    expected_roots = body.get("expected_roots")
+    expected_dismissed = body.get("expected_dismissed")
+    expected_review_version = body.get("expected_review_version")
+    if (not isinstance(left_url, str) or not left_url
+            or not isinstance(right_url, str) or not right_url
+            or not isinstance(dismissed, bool)
+            or not isinstance(expected_dismissed, bool)
+            or isinstance(expected_review_version, bool)
+            or not isinstance(expected_review_version, int)
+            or expected_review_version < 0
+            or not isinstance(expected_roots, list) or len(expected_roots) != 2
+            or any(not isinstance(root, str) or not root for root in expected_roots)):
+        return jsonify({"ok": False, "message": "bad request"}), 400
+    conn = connect_db(load_config())
+    try:
+        try:
+            result = set_candidate_dismissed(
+                conn, left_url, right_url, dismissed,
+                expected_roots=expected_roots,
+                expected_dismissed=expected_dismissed,
+                expected_review_version=expected_review_version,
+            )
+        except (ValueError, RuntimeError) as e:
+            return jsonify({"ok": False, "message": str(e)}), 409
+    finally:
+        conn.close()
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/dupe", methods=["POST"])
 def api_dupe():
     """Manually link two postings as the same role (or `undo` a manual link). Thin layer over the
     shared dupe cores in pipeline — assume_yes is implicit (the browser does its own confirm)."""
     if not _origin_ok():
         return jsonify({"ok": False, "message": "cross-origin request refused"}), 403
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "message": "JSON body must be an object",
+                        "affected": [], "exempt": []}), 400
     job_url = body.get("job_url")
     of_url = body.get("of")
+    expected_roots = body.get("expected_roots")
     undo = bool(body.get("undo"))
     if not job_url or (not undo and not of_url):
         return jsonify({"ok": False, "message": "bad request", "affected": [], "exempt": []}), 400
@@ -770,12 +1000,21 @@ def api_dupe():
                                 "affected": [], "exempt": []}), 404
             ok, message, affected, exempt = dupe_unlink(conn, row)
         else:
-            plan, err = dupe_resolve(conn, job_url, of_url)
+            if expected_roots is not None:
+                try:
+                    plan, err, affected, exempt = confirm_candidate(
+                        conn, job_url, of_url, expected_roots,
+                    )
+                except (ValueError, RuntimeError) as e:
+                    plan, err = None, str(e)
+            else:
+                plan, err = dupe_resolve(conn, job_url, of_url)
+                if not err:
+                    affected, exempt = dupe_commit(conn, plan)
             if err:
                 ok, message = False, err
             else:
-                assert plan is not None  # dupe_resolve returns plan when err is None
-                affected, exempt = dupe_commit(conn, plan)
+                assert plan is not None  # candidate/manual confirm returns plan when err is None
                 w = plan["winner"]
                 ok, message = True, f"linked under {w['title']} — {w['company']}"
     finally:

@@ -7,6 +7,29 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Eval runs at `reasoning_effort: "low"` (was provider-default "high")
+
+- Discovered while pricing the 0731 cost jump: `_call_deepseek` never set a reasoning
+  effort, and V4-Flash's default is thinking-on at **high** — so every eval has been paying
+  for maximum-depth reasoning on a rubric task. External evidence (LLM-judge studies; the
+  precision-vs-planning constraint split) predicted high effort adds nothing here; two
+  `effort_probe.py` runs (18 + 30 postings × 3 conditions × 3 reps, 432 calls) confirmed it
+  locally.
+- **Replicated across both runs**: low agrees with high's majority verdicts at the noise
+  floor (83% / 90%, vs high's own re-run agreement of 71–89%) — no detectable judgment
+  change; ~29% fewer output tokens (≈4.2k → ≈3.0k per eval); fit mean +0.7 (≈9.9 → ≈10.6,
+  closer to the pre-0731 ≈10.9 scale); zero empty answers in 144 low draws vs 3 in high's.
+  **Not replicated** (one run each way, treat as noise): any stability difference.
+- **`thinking: disabled` was rejected** despite 25× cheaper output and perfect determinism:
+  it is a *different judge* — 50–60% agreement, systematically harsher, GATE_FAILs most of
+  what high/low pass. Determinism is worthless if it's a different verdict.
+- Verdict-level anchors re-verified at low effort via backtest_v2 before landing.
+- **Open calibration note:** the cold-apply bar was set to 14 this morning against the
+  high-effort scale (gap to mean ≈ 4.1, matching the historical 15-on-10.9). On low's scale
+  the same bar-14 gap narrows to ≈ 3.4 (slightly looser eligibility), while bar-15 would be
+  ≈ 4.4 (slightly tighter). Left at **14** pending a user decision — cold applies remain
+  minimum-insurance volume behind the freshness + FTE legs and human triage either way.
+
 ## 2026-08-07 — Schema: per-gate explicit results (`gate_results` in eval output)
 
 - The eval output contract now requires an explicit PASS/FAIL for **each of the six hard

@@ -231,6 +231,13 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
     be generous or the answer truncates to empty (billing the whole failed attempt).
     The 0731 flash build thinks ~3.4k tokens on average with a long tail; the old
     8000 cap produced 30-100 empty-answer retries/day, so 16000.
+    reasoning_effort "low" (2026-08-07): the provider default is "high", which this
+    rubric task doesn't need — two effort_probe.py runs (48 postings, 432 calls)
+    showed low's verdicts agree with high's at the noise floor while spending ~29%
+    fewer output tokens, scoring ~0.7 closer to the pre-0731 fit scale, and (weak
+    signal) producing zero empty answers vs high's occasional ones. "none" was
+    REJECTED despite being 25x cheaper and fully deterministic: it is a different,
+    systematically harsher judge (50-60% agreement, near-everything GATE_FAILs).
     response_format forces valid JSON (DeepSeek otherwise wraps it in prose)."""
     import httpx
 
@@ -239,6 +246,7 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": model, "max_tokens": 16000, "temperature": 0,
+            "reasoning_effort": "low",
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": user_msg}],

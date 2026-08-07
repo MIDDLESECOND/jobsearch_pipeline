@@ -105,7 +105,10 @@ def call(api_key, model, system_prompt, user_msg):
             "https://api.deepseek.com/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
+                # Mirror production's reasoning depth by reference, so a re-run
+                # measures the guide against the tier the pipeline actually uses.
                 "model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
+                "reasoning_effort": evaluation.DEEPSEEK_EFFORT,
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "system", "content": system_prompt},
                              {"role": "user", "content": user_msg}],

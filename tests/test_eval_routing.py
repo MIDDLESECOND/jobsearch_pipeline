@@ -220,6 +220,14 @@ def test_gate_results_junk_value_reads_as_missing():
     assert "gate-results-incomplete" in r["flags"]
 
 
+def test_gate_results_flags_are_idempotent_on_renormalize():
+    # normalize_result mutates in place; re-running it (a re-analysis pass, a probe
+    # that normalizes then re-normalizes) must not stack duplicate diagnostics.
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3))
+    evaluation.normalize_result(r)
+    assert r["flags"].count("gate-results-incomplete") == 1
+
+
 def test_gate_results_preserves_existing_flags():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
               gate_results=_gr(), flags=["management-drift"])

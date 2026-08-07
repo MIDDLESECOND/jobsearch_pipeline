@@ -82,6 +82,12 @@ def call_deepseek(model, user_msg, extra=None):
             # 16000 (the 0731 build's tail overruns 8000); a lower cap here would score
             # flash's truncations against other models' complete answers.
             "model": model, "max_tokens": 16000, "temperature": 0,
+            # Mirror production's reasoning depth BY REFERENCE. DeepSeek's own
+            # default is "high"; production runs low (2026-08-07), and a comparison
+            # that benchmarks the incumbent at a tier it doesn't actually run is
+            # answering the wrong question — the incumbent's cost, scale, and
+            # empty-answer rate all move with this dial.
+            "reasoning_effort": evaluation.DEEPSEEK_EFFORT,
             # Force valid JSON — DeepSeek (esp. the reasoning-style pro) otherwise
             # wraps the answer in prose. This is how you'd call it in production.
             "response_format": {"type": "json_object"},
@@ -89,6 +95,11 @@ def call_deepseek(model, user_msg, extra=None):
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
+            # extra LAST so a MODELS column can override the defaults above — this
+            # is what makes a controlled same-model pair (e.g. flash low vs high)
+            # expressible; call_openai already did this and this arm silently
+            # dropped it, so any deepseek column carrying extras was a no-op.
+            **(extra or {}),
         },
         timeout=120,
     )

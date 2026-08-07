@@ -176,17 +176,26 @@ def normalize_result(result):
 
     flags = result.get("flags")
     flags = flags if isinstance(flags, list) else []
+
+    def _flag(name):
+        # Idempotent: normalize_result mutates in place, so a second call on the
+        # same dict must not stack duplicate diagnostics into the human's flag list.
+        if name not in flags:
+            flags.append(name)
+
     if any(v is None for v in norm_gr.values()):
-        flags.append("gate-results-incomplete")
+        _flag("gate-results-incomplete")
     explicit_fails = {g for g, v in norm_gr.items() if v == "FAIL"}
     failed_gate = result.get("failed_gate")
     if verdict == VERDICT_GATE_FAIL:
         # failed_gate "other" (the unmeetable-qualification rule) legitimately fails
         # OUTSIDE the six named gates — all six reading PASS is consistent there.
+        # Note failed_gate is still the model's RAW value here; _write_result coerces
+        # unknown strings to "other" only after this runs.
         if failed_gate in GATE_NAMES and norm_gr.get(failed_gate) == "PASS":
-            flags.append("gate-results-inconsistent")
+            _flag("gate-results-inconsistent")
     elif explicit_fails:
-        flags.append("gate-results-inconsistent")
+        _flag("gate-results-inconsistent")
     result["flags"] = flags
 
     result["verdict"] = verdict

@@ -7,6 +7,19 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Unified role activity timeline
+
+- Replaced the card's event-only History panel with a bounded, newest-first **Activity** view across
+  posting discovery, current chain decision, application events, material attachments, contacts,
+  tasks, interview schedules, and the current star.
+- Mapped every owner through its posting's current duplicate root, so merges union activity and
+  unlink restores the original separation without rewriting records.
+- Kept the timeline strictly read-only and factual: it emits only timestamps retained by the owning
+  tables, does not turn mutable state into invented append-only history, and leaves the legacy
+  `/api/events` contract intact.
+- Limited item detail and total response size; contact email/profile/note, document hashes/bytes,
+  and full private artifacts are not loaded into the timeline payload.
+
 ## 2026-08-07 — Explicit manual role intake
 
 - Added a local **Add role** form for jobs found outside configured LinkedIn, Adzuna, or ATS

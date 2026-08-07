@@ -64,6 +64,9 @@ re-export hub):
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
   imports `report`/`chain`/`states`/`dupe_candidates`, performs no mutations, and keeps dashboard-query logic
   out of both the decision service and Flask routes.
+- `timeline.py` — bounded, newest-first role activity assembled read-only across current duplicate
+  chains. It imports `chain` for the shared effective decision and never invents events for history
+  that mutable tables do not retain.
 - `funnel.py` — chain-scoped application-funnel aggregation over current applied decisions
   and append-only outcome history. It imports only `states`, performs no mutations, maps
   events from former canonicals to the current chain, and owns conversion definitions.
@@ -310,6 +313,14 @@ via Windows Task Scheduler.
   filter, outcome, task, or event state. Unstar retains a versioned tombstone; each actual
   star/unstar transition receives a monotonic version, and the UI sends its expected version so
   stale tabs cannot overwrite a newer choice even after the state changes away and back.
+
+- **The unified activity timeline is a read model, not a second event store.** It maps posting
+  discovery, the current effective decision, append-only application events/material links, current
+  contact/task/interview records, and the current star through each owner posting's present chain
+  root. It emits only timestamps the owning tables actually retain and is bounded to the latest
+  entries. A snoozed task does not pretend its current due date was the original due date; a mutable
+  interview contributes only its creation and the one latest `updated_at`; an unstarred tombstone
+  has no fabricated unstar time. `/api/events` remains the append-only application-event contract.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

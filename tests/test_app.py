@@ -97,6 +97,7 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert "Save role note" in html
     assert 'href="/api/export/roles.csv"' in html and "Export CSV" in html
     assert "Star role" in html and "Unstar" in html
+    assert "Activity ▸" in html and 'fetch("/api/timeline?job_url="' in html
     assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
     assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
     assert '<option value="AI leadership">AI leadership</option>' in html
@@ -1052,6 +1053,44 @@ def test_event_api_rejects_non_object_json(client, seed):
     make_job(seed, job_url="c1")
     response = _post(client, "/api/event", ["not", "an", "object"])
     assert response.status_code == 400 and response.get_json()["ok"] is False
+
+
+# --------------------------------------------------------------- /api/timeline
+
+def test_timeline_api_returns_bounded_chain_activity_without_contact_secrets(
+    client, seed
+):
+    make_job(seed, job_url="root", first_seen="2026-08-01T09:00:00")
+    seed.execute(
+        """INSERT INTO app_events(job_url,event_type,event_date,note,created_at)
+           VALUES ('root','note','2026-08-02','reviewed role',
+                   '2026-08-02T10:00:00+00:00')"""
+    )
+    seed.execute(
+        """INSERT INTO job_contacts
+           (job_url,interaction_url,name,role,kind,email,profile_url,note,created_at)
+           VALUES ('root','root','Jane','Recruiter','recruiter','private@example.test',
+                   'https://profile.test/jane','private note','2026-08-03T10:00:00+00:00')"""
+    )
+    seed.commit()
+
+    response = client.get("/api/timeline?job_url=root&limit=2")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 3 and payload["truncated"] is True
+    assert len(payload["items"]) == 2
+    assert payload["items"][0]["kind"] == "contact"
+    serialized = repr(payload)
+    assert "private@example.test" not in serialized
+    assert "profile.test" not in serialized and "private note" not in serialized
+
+
+def test_timeline_api_validates_posting_and_limit(client):
+    assert client.get("/api/timeline").status_code == 400
+    assert client.get("/api/timeline?job_url=missing").status_code == 404
+    invalid = client.get("/api/timeline?job_url=missing&limit=all")
+    assert invalid.status_code == 400
 
 
 # ------------------------------------------------------------------ /api/dupe

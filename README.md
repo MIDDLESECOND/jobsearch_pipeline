@@ -79,6 +79,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
 | `report.py` | the daily markdown report |
 | `workflow.py` | bounded/filterable UI queries and Action Center queues |
+| `timeline.py` | bounded read-only activity across a role's current duplicate chain |
 | `funnel.py` | chain-scoped application funnel and channel conversion reads |
 | `pipeline.py` | CLI orchestrator (stage order lives here) |
 | `app.py` + `templates/` | the local Flask triage UI |
@@ -265,6 +266,13 @@ profile URL, and notes stay in the local SQLite database.
 Notes use the existing append-only, chain-scoped event history, so duplicate merges show one
 combined timeline and unlink preserves the canonical-at-write ownership. Saving a note does not
 change the role's application decision, evaluation, or outcome.
+
+Open **Activity** on any card for one newest-first view of timestamped role history: posting
+discovery, the current decision, application events and notes, packet attachments, contacts, tasks,
+interview schedules, and the current star. The view follows the role's current duplicate chain and
+is capped to keep a large history from bloating every card request. It does not create another event
+store or infer missing history: mutable task/interview/star tables contribute only the timestamps
+they actually retain.
 
 Use **Star role** as a manual shortlist that is deliberately independent of the evaluator's score.
 The star follows the current duplicate chain, appears on sibling cards, and adds one canonical card

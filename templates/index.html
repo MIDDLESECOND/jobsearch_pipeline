@@ -954,7 +954,7 @@ function card(j, actionSection = null) {
     if (!note) { alert("a role note needs text"); return; }
     postEvent(div, j, {type: "note", note});
   }));
-  actions.appendChild(btn("History ▸", "undo", ev =>
+  actions.appendChild(btn("Activity ▸", "undo", ev =>
     toggleHistory(div, j, ev.currentTarget)));
 
   actions.appendChild(btn("Add next action", "undo", () => openTaskDialog(div, j)));
@@ -1763,31 +1763,38 @@ async function postEvent(div, j, body) {
   }
 }
 
-// Lazy-loaded chain event timeline, toggled per card ("History ▸"/"▾"). Read-only fetch —
+function activityTimeLabel(iso) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return iso;
+  return interviewTimeLabel(iso);
+}
+
+// Lazy-loaded unified activity timeline, toggled per card. Read-only fetch —
 // no busy locking; a re-render simply drops the open panel (state lives in the DOM).
 async function toggleHistory(div, j, btnEl) {
   const open = div.querySelector(".history");
-  if (open) { open.remove(); btnEl.textContent = "History ▸"; return; }
-  btnEl.textContent = "History …";
-  let evs = null;  // null = fetch failed — must NOT render as the affirmative "no events"
+  if (open) { open.remove(); btnEl.textContent = "Activity ▸"; return; }
+  btnEl.textContent = "Activity …";
+  let timeline = null;  // null = fetch failed — must NOT render as affirmative empty history
   try {
-    const res = await fetch("/api/events?job_url=" + encodeURIComponent(j.job_url));
-    if (res.ok) evs = await res.json();
-  } catch (e) { /* evs stays null */ }
+    const res = await fetch("/api/timeline?job_url=" + encodeURIComponent(j.job_url));
+    if (res.ok) timeline = await res.json();
+  } catch (e) { /* timeline stays null */ }
   // The card may have been rebuilt while the fetch was in flight (postEvent's replaceWith)
   // — appending to the detached node would silently show nothing while flipping a dead
-  // button's label. Bail; the fresh card's button still reads "History ▸" and works.
+  // button's label. Bail; the fresh card's button still reads "Activity ▸" and works.
   if (!div.isConnected) return;
-  if (div.querySelector(".history")) { btnEl.textContent = "History ▾"; return; }  // double-click race
+  if (div.querySelector(".history")) { btnEl.textContent = "Activity ▾"; return; }  // double-click race
   const p = document.createElement("div");
   p.className = "history";
-  p.innerHTML = evs === null
+  const items = timeline && timeline.items;
+  p.innerHTML = timeline === null
     ? "<div>⚠ Couldn't load history — close and retry.</div>"
-    : (evs.length
-      ? evs.map(e => `<div>${esc(e.event_date)} — <b>${esc(e.event_type.replace(/_/g, " "))}</b>${e.note ? " · " + esc(e.note) : ""}</div>`).join("")
-      : "<div>No events recorded yet.</div>");
+    : (items.length
+      ? items.map(item => `<div>${esc(activityTimeLabel(item.occurred_at))} — <b>${esc(item.title)}</b>${item.detail ? " · " + esc(item.detail) : ""}</div>`).join("")
+        + (timeline.truncated ? `<div>Showing latest ${items.length} of ${timeline.total} activities.</div>` : "")
+      : "<div>No timestamped activity recorded yet.</div>");
   div.appendChild(p);
-  btnEl.textContent = "History ▾";
+  btnEl.textContent = "Activity ▾";
 }
 
 // The ONE copy of the applied-field save-on-change machinery — shared by resumeField and

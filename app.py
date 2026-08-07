@@ -47,6 +47,7 @@ from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
                     VERDICT_RECRUITER_ONLY)
 from tasks import add_task, chain_tasks, change_task, task_counts, task_summaries
+from timeline import DEFAULT_TIMELINE_LIMIT, role_timeline
 from watchlist import set_starred, star_summaries
 from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_job_page
 
@@ -951,8 +952,11 @@ def api_event():
 
 @app.route("/api/events")
 def api_events():
-    """The chain's full event timeline for one posting — lazy-fetched by the card's
-    History toggle, kept off the list payload like /api/clip."""
+    """Legacy/read-specific append-only application events for one posting chain.
+
+    The card's unified Activity view uses /api/timeline; this narrower contract remains
+    available to callers that need event types and notes without other workflow records.
+    """
     job_url = request.args.get("job_url")
     if not job_url:
         return jsonify([]), 400
@@ -966,6 +970,30 @@ def api_events():
         conn.close()
     return jsonify([{"event_type": e["event_type"], "event_date": e["event_date"],
                      "note": e["note"]} for e in events])
+
+
+@app.route("/api/timeline")
+def api_timeline():
+    """Bounded, read-only activity across the posting's current duplicate chain."""
+    job_url = request.args.get("job_url")
+    if not job_url:
+        return jsonify({"items": [], "total": 0, "truncated": False}), 400
+    try:
+        limit = int(request.args.get("limit", str(DEFAULT_TIMELINE_LIMIT)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "timeline limit must be an integer"}), 400
+    conn = connect_db(load_config())
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (job_url,)).fetchone()
+        if row is None:
+            return jsonify({"items": [], "total": 0, "truncated": False}), 404
+        try:
+            result = role_timeline(conn, row, limit=limit)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+    finally:
+        conn.close()
+    return jsonify(result)
 
 
 @app.route("/api/dupe-candidate", methods=["POST"])

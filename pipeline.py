@@ -50,6 +50,12 @@ from chain import (
     record_event, undo_event, chain_events,
 )
 from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats
+from health import (
+    FetchSummary, completed_run_status, current_pipeline_run_id, fetch_error_kind,
+    finish_pipeline_run, record_active_fetch_attempt, reset_active_pipeline_run,
+    run_has_successful_target, set_active_pipeline_run, source_attempts_exist,
+    start_pipeline_run,
+)
 from filters import (
     apply_salary_filter, apply_hard_filters,
     load_filters, save_filters, _pattern_matches, validate_pattern, FILTERS_PATH,
@@ -344,15 +350,48 @@ def _run_fetch_stage(fn, cfg, conn, label):
     downstream stages (salary/hard filters, eval, report) stay bare: they must fail loud, since
     limping past a crashed filter would let un-filtered rows reach the *paid* eval."""
     try:
-        return fn(cfg, conn)
-    except Exception:
+        result = fn(cfg, conn)
+        run_id = current_pipeline_run_id()
+        if run_id is not None and not source_attempts_exist(conn, run_id, label):
+            # Built-in fetchers record their configured targets transactionally. This family
+            # fallback keeps orchestration tests and future adapters observable until they do.
+            if isinstance(result, FetchSummary) and result.status == "skipped":
+                record_active_fetch_attempt(
+                    conn, source_family=label, target_kind="family", target_label=label,
+                    definition_hash=None, status="skipped",
+                    skip_reason=result.skipped_reason,
+                )
+            elif isinstance(result, FetchSummary) and result.status == "failed":
+                record_active_fetch_attempt(
+                    conn, source_family=label, target_kind="family", target_label=label,
+                    definition_hash=None, status="failed", error_kind="unexpected",
+                )
+            else:
+                inserted = (int(result) if isinstance(result, int)
+                            and not isinstance(result, bool) and result >= 0 else None)
+                record_active_fetch_attempt(
+                    conn, source_family=label, target_kind="family", target_label=label,
+                    definition_hash=None, status="success", inserted_count=inserted,
+                )
+                if isinstance(result, FetchSummary) and result.status == "partial":
+                    record_active_fetch_attempt(
+                        conn, source_family=label, target_kind="family",
+                        target_label=f"{label} unclassified failure", definition_hash=None,
+                        status="failed", error_kind="unexpected",
+                    )
+        return result
+    except Exception as exc:
         conn.rollback()
+        if current_pipeline_run_id() is not None:
+            record_active_fetch_attempt(
+                conn, source_family=label, target_kind="family", target_label=label,
+                definition_hash=None, status="failed", error_kind=fetch_error_kind(exc),
+            )
         print(f"[run] {label} fetch FAILED — skipping this source for this run:", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        # None = crashed, distinct from a fetcher's own 0 (= ran fine, nothing new/skipped
-        # by config). The run branch stamps the cooldown only if some source returned
-        # non-None, so an all-sources-down run (wake before Wi-Fi) can't suppress the
-        # next scheduled slot.
+        # Preserve the established None-on-family-crash contract for direct callers. The run
+        # branch now keys cooldown on structured target-level success instead, so internal
+        # all-query failures cannot masquerade as a healthy integer 0.
         return None
 
 
@@ -506,6 +545,8 @@ def main():
         # succeeded. The deterministic stages below stay UNGUARDED on purpose — they must fail
         # loud, since continuing past a crashed filter would let un-filtered rows hit the paid eval.
         with run_log("run"):
+            run_date = args.date or date.today().isoformat()
+            trigger = "scheduled" if args.scheduled else "manual"
             # Cooldown guard, scheduled runs only — INSIDE run_log so a skipped slot is
             # visible in the day's log (a silent non-run reads as a crash). A skip does
             # NOT re-stamp last_run_ok_ended, so consecutive slots can't cascade-skip.
@@ -516,6 +557,10 @@ def main():
             if args.scheduled:
                 last_ok = meta_get(conn, "last_run_ok_ended")
                 if _cooldown_active(last_ok, datetime.now()):
+                    run_id = start_pipeline_run(
+                        conn, trigger=trigger, run_date=run_date
+                    )
+                    finish_pipeline_run(conn, run_id, status="skipped")
                     print(f"[cooldown] last successful run ended {last_ok} "
                           f"(< {COOLDOWN_MINUTES} min ago) — skipping this scheduled slot")
                     return
@@ -525,42 +570,71 @@ def main():
             # report time" would file it under the new day and those rows would appear in NO
             # report at all. This is a code invariant, deliberately not a scheduling
             # constraint (any run can cross midnight if delayed).
-            run_date = args.date or date.today().isoformat()
-            fetch_results = [
-                _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin"),
-                _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna"),
-                _run_fetch_stage(fetch_ats, cfg, conn, "ats"),
-            ]
-            requeue_error_rows(conn)
-            # RESTORE direction first, BEFORE the filters: a skipped row whose chain decision
-            # was undone (or whose chain verdict was cleared) returns to 'new' here so it
-            # re-faces the CURRENT salary/hard rules — same re-facing contract as
-            # requeue_error_rows above. Restoring after the filters would hand it straight to
-            # the paid eval past a rule added while it sat skipped.
-            skip_decided_reposts(conn, forward=False)
-            skip_evaluated_reposts(conn, forward=False)
-            apply_salary_filter(cfg, conn)
-            apply_hard_filters(cfg, conn)
-            # FORWARD direction after the filters: a rule keeps first claim on a 'new'
-            # relisting; whatever the rules didn't take is then skip-checked before the eval.
-            skip_decided_reposts(conn, restore=False)
-            skip_evaluated_reposts(conn, restore=False)
-            evaluate_new_jobs(cfg, conn)
-            generate_report(cfg, conn, run_date)
-            # Written only after the FULL cycle succeeded AND at least one fetch source
-            # did — the cooldown guard keys on this. A crashed run leaving it stale is
-            # exactly the desired behavior (its slot did no eval/report, so the next
-            # slot must not be suppressed); likewise a run whose every fetcher crashed
-            # (wake before Wi-Fi reconnects) fetched nothing, so stamping it would make
-            # the guard suppress the first slot that COULD fetch. None = crashed in
-            # fetch_results; a fetcher's own 0 (nothing new / source unconfigured)
-            # still counts as a working cycle.
-            if any(r is not None for r in fetch_results):
-                meta_set(conn, "last_run_ok_ended",
-                         datetime.now().isoformat(timespec="seconds"))
-            else:
-                print("[cooldown] all fetch sources failed — not stamping "
-                      "last_run_ok_ended, so the next scheduled slot runs in full")
+            run_id = start_pipeline_run(conn, trigger=trigger, run_date=run_date)
+            token = set_active_pipeline_run(run_id)
+            stage = "fetch_linkedin"
+            try:
+                _run_fetch_stage(fetch_new_jobs, cfg, conn, "linkedin")
+                stage = "fetch_adzuna"
+                _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
+                stage = "fetch_ats"
+                _run_fetch_stage(fetch_ats, cfg, conn, "ats")
+                stage = "error_requeue"
+                requeue_error_rows(conn)
+                # RESTORE direction first, BEFORE the filters: a skipped row whose chain
+                # decision was undone returns to 'new' here and re-faces CURRENT rules.
+                stage = "restore_decided_reposts"
+                skip_decided_reposts(conn, forward=False)
+                stage = "restore_evaluated_reposts"
+                skip_evaluated_reposts(conn, forward=False)
+                stage = "salary_filter"
+                apply_salary_filter(cfg, conn)
+                stage = "hard_filters"
+                apply_hard_filters(cfg, conn)
+                # Forward skips remain after deterministic filters and before paid eval.
+                stage = "skip_decided_reposts"
+                skip_decided_reposts(conn, restore=False)
+                stage = "skip_evaluated_reposts"
+                skip_evaluated_reposts(conn, restore=False)
+                stage = "evaluation"
+                evaluate_new_jobs(cfg, conn)
+                stage = "report"
+                generate_report(cfg, conn, run_date)
+                stage = "cooldown_stamp"
+                if run_has_successful_target(conn, run_id):
+                    meta_set(conn, "last_run_ok_ended",
+                             datetime.now().isoformat(timespec="seconds"))
+                else:
+                    if completed_run_status(conn, run_id) == "degraded":
+                        print("[cooldown] all fetch sources failed — not stamping "
+                              "last_run_ok_ended, so the next scheduled slot runs in full")
+                    else:
+                        print("[cooldown] no fetch target was configured — not stamping "
+                              "last_run_ok_ended, so the next scheduled slot runs in full")
+                finish_pipeline_run(
+                    conn, run_id, status=completed_run_status(conn, run_id)
+                )
+            except BaseException as exc:
+                # Ctrl-C/SystemExit remain fatal, but the durable row records that the run
+                # did not complete. Error messages stay only in the human log, never SQLite.
+                # Roll back FIRST: finish_pipeline_run commits its terminal marker, and must
+                # never accidentally ship an interrupted downstream stage's partial writes.
+                conn.rollback()
+                try:
+                    finish_pipeline_run(
+                        conn, run_id,
+                        status=("interrupted" if isinstance(
+                            exc, (KeyboardInterrupt, SystemExit)
+                        ) else "failed"),
+                        error_stage=stage,
+                        error_type=type(exc).__name__,
+                    )
+                except Exception as health_exc:
+                    print(f"[health] could not finish failed run record: {health_exc}",
+                          file=sys.stderr)
+                raise
+            finally:
+                reset_active_pipeline_run(token)
     elif args.command == "report":
         generate_report(cfg, conn, args.date)
     elif args.command == "stats":

@@ -580,6 +580,45 @@ def _dupe_candidate_dismissals_table_sql():
     """
 
 
+def _pipeline_runs_table_sql():
+    """Durable run boundaries; unfinished rows are evidence of missing completion, not success."""
+    return """
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT,
+            trigger     TEXT NOT NULL,
+            run_date    TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            error_stage TEXT,
+            error_type  TEXT
+        )
+    """
+
+
+def _pipeline_fetch_attempts_table_sql():
+    """Per-search/query/board fetch facts without raw URLs, terms, or exception messages."""
+    return """
+        CREATE TABLE IF NOT EXISTS pipeline_fetch_attempts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          INTEGER NOT NULL,
+            source_family   TEXT NOT NULL,
+            target_kind     TEXT NOT NULL,
+            target_label    TEXT NOT NULL,
+            definition_hash TEXT,
+            started_at      TEXT NOT NULL,
+            ended_at        TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            skip_reason     TEXT,
+            error_kind      TEXT,
+            returned_count  INTEGER,
+            eligible_count  INTEGER,
+            inserted_count  INTEGER,
+            repost_count    INTEGER
+        )
+    """
+
+
 def _migrate_job_tasks(conn):
     """Add optimistic-concurrency state to databases opened during feature development."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(job_tasks)")}
@@ -664,14 +703,16 @@ def get_db(cfg):
     conn.execute(_job_interviews_table_sql())
     conn.execute(_role_stars_table_sql())
     conn.execute(_dupe_candidate_dismissals_table_sql())
+    conn.execute(_pipeline_runs_table_sql())
+    conn.execute(_pipeline_fetch_attempts_table_sql())
     _migrate_job_tasks(conn)
     _migrate_application_materials(conn)
     _migrate_dupe_candidate_dismissals(conn)
     _migrate_role_stars(conn)
     # Run-level state the log files can't provide queryably (they're human-oriented text
     # with 30-day retention). Currently one key: 'last_run_ok_ended', the ISO end time of
-    # the last SUCCESSFUL full run — the cooldown guard's input. Crashed runs never write
-    # it, so a crash can't suppress the next scheduled slot.
+    # the last completed full cycle with at least one successful fetch target — the cooldown
+    # guard's input. Failed/no-target runs never write it, so they can't suppress the next slot.
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_app_events_job_url ON app_events(job_url)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_application_materials_job_url "
@@ -690,6 +731,10 @@ def get_db(cfg):
                  "ON job_interviews(status,starts_at,job_url)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_role_stars_at "
                  "ON role_stars(starred_at,job_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started "
+                 "ON pipeline_runs(started_at,id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_fetch_run_source "
+                 "ON pipeline_fetch_attempts(run_id,source_family,id)")
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint ON jobs(fingerprint)")
     # repost_of is scanned per-decision by _chain_targets and per-row by _repost_info / cmd_report;

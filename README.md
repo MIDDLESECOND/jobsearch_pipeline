@@ -80,6 +80,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `report.py` | the daily markdown report |
 | `workflow.py` | bounded/filterable UI queries and Action Center queues |
 | `timeline.py` | bounded read-only activity across a role's current duplicate chain |
+| `health.py` | structured run/target health and descriptive first-touch search yield |
 | `funnel.py` | chain-scoped application funnel and channel conversion reads |
 | `pipeline.py` | CLI orchestrator (stage order lives here) |
 | `app.py` + `templates/` | the local Flask triage UI |
@@ -273,6 +274,16 @@ interview schedules, and the current star. The view follows the role's current d
 is capped to keep a large history from bloating every card request. It does not create another event
 store or infer missing history: mutable task/interview/star tables contribute only the timestamps
 they actually retain.
+
+Open **Health & yield** for structured pipeline evidence. Each configured LinkedIn search,
+Adzuna query, and ATS board is recorded as succeeded, failed, or intentionally skipped; zero new
+postings is not treated as a failure. Recent runs show target counts and categorized failures
+without storing raw exception messages, request URLs, credentials, or posting text. The yield table
+uses a selectable `first_seen` cohort and deduplicates current role chains. Its source/search credit
+splits two facts: posting volume belongs to each stored row's own source/search; role, strong-match,
+and applied counts assign each current chain once to its earliest stored posting, and only when that
+first touch falls inside the cohort. It is descriptive—not a multi-touch attribution model or a
+ranking of which search caused an application.
 
 Use **Star role** as a manual shortlist that is deliberately independent of the evaluator's score.
 The star follows the current duplicate chain, appears on sibling cards, and adds one canonical card

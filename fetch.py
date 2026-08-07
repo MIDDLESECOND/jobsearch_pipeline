@@ -18,6 +18,8 @@ from datetime import datetime
 
 from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
 from filters import _pattern_matches, validate_pattern  # one pattern dialect + validator
+from health import (FetchSummary, fetch_definition_hash, fetch_error_kind,
+                    record_active_fetch_attempt, utc_now_iso)
 # for filters.yaml AND settings.ats
 from posting_store import insert_posting as _insert_posting
 
@@ -32,9 +34,19 @@ def fetch_new_jobs(cfg, conn):
     today_iso = datetime.now().isoformat(timespec="seconds")
     inserted = 0
     reposts = 0
+    units = successes = failures = 0
 
     for search in cfg["searches"]:
+        units += 1
         name = search["name"]
+        attempt_started = utc_now_iso()
+        definition_hash = fetch_definition_hash({
+            "source": "linkedin",
+            "search": {key: search.get(key) for key in ("name", "term", "job_type")},
+            "settings": {key: s.get(key) for key in (
+                "location", "hours_old", "results_per_search"
+            )},
+        })
         print(f"[fetch] {name}: {search['term']}")
         try:
             df = scrape_jobs(
@@ -49,6 +61,12 @@ def fetch_new_jobs(cfg, conn):
                 description_format="markdown",
             )
         except Exception as e:
+            failures += 1
+            record_active_fetch_attempt(
+                conn, source_family="linkedin", target_kind="search", target_label=name,
+                definition_hash=definition_hash, status="failed",
+                error_kind=fetch_error_kind(e), started_at=attempt_started,
+            )
             print(f"[fetch] {name} FAILED: {e}", file=sys.stderr)
             # A failure is often the rate-limiter talking — pause before the next search,
             # same as the 0-results path, instead of hammering the endpoint while it's sore.
@@ -56,37 +74,74 @@ def fetch_new_jobs(cfg, conn):
             continue
 
         if df is None or df.empty:
+            successes += 1
+            record_active_fetch_attempt(
+                conn, source_family="linkedin", target_kind="search", target_label=name,
+                definition_hash=definition_hash, status="success", returned_count=0,
+                eligible_count=0, inserted_count=0, repost_count=0,
+                started_at=attempt_started,
+            )
             print(f"[fetch] {name}: 0 results")
             time.sleep(s["delay_between_searches"])
             continue
 
-        for _, row in df.iterrows():
-            url = row.get("job_url")
-            if not isinstance(url, str) or not url:
-                continue
-            desc = row.get("description")
-            if not isinstance(desc, str):  # pandas yields NaN (float) for empty cells
-                desc = ""
-            company, title, location = row.get("company"), row.get("title"), row.get("location")
-            n, repost_of = _insert_posting(
-                conn, url=url, title=title, company=company, location=location,
-                search_name=name, tier=search.get("tier", "primary"),
-                date_posted=_linkedin_date(row.get("date_posted")),
-                first_seen=today_iso,
-                salary_min=_num(row.get("min_amount")), salary_max=_num(row.get("max_amount")),
-                description=desc[: s["max_description_chars"]], source="linkedin",
+        search_inserted = search_reposts = eligible = 0
+        try:
+            for _, row in df.iterrows():
+                url = row.get("job_url")
+                if not isinstance(url, str) or not url:
+                    continue
+                eligible += 1
+                desc = row.get("description")
+                if not isinstance(desc, str):  # pandas yields NaN (float) for empty cells
+                    desc = ""
+                company, title, location = row.get("company"), row.get("title"), row.get("location")
+                n, repost_of = _insert_posting(
+                    conn, url=url, title=title, company=company, location=location,
+                    search_name=name, tier=search.get("tier", "primary"),
+                    date_posted=_linkedin_date(row.get("date_posted")),
+                    first_seen=today_iso,
+                    salary_min=_num(row.get("min_amount")), salary_max=_num(row.get("max_amount")),
+                    description=desc[: s["max_description_chars"]], source="linkedin",
+                )
+                search_inserted += n
+                if n and repost_of:
+                    search_reposts += 1
+                    print(f"[repost] {title} — {company} (relisting of {repost_of})")
+            record_active_fetch_attempt(
+                conn, source_family="linkedin", target_kind="search", target_label=name,
+                definition_hash=definition_hash, status="success", returned_count=len(df),
+                eligible_count=eligible, inserted_count=search_inserted,
+                repost_count=search_reposts, started_at=attempt_started, commit=False,
             )
-            inserted += n
-            if n and repost_of:
-                reposts += 1
-                print(f"[repost] {title} — {company} (relisting of {repost_of})")
-
-        conn.commit()
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            failures += 1
+            record_active_fetch_attempt(
+                conn, source_family="linkedin", target_kind="search", target_label=name,
+                definition_hash=definition_hash, status="failed",
+                error_kind=fetch_error_kind(e), started_at=attempt_started,
+            )
+            print(f"[fetch] {name} FAILED: {e}", file=sys.stderr)
+            time.sleep(s["delay_between_searches"])
+            continue
+        successes += 1
+        inserted += search_inserted
+        reposts += search_reposts
         print(f"[fetch] {name}: {len(df)} returned")
         time.sleep(s["delay_between_searches"])
 
     print(f"[fetch] {inserted} new postings inserted ({reposts} reposts of seen roles)")
-    return inserted
+    if not units:
+        record_active_fetch_attempt(
+            conn, source_family="linkedin", target_kind="family", target_label="linkedin",
+            definition_hash=None, status="skipped", skip_reason="no configured searches",
+        )
+        return FetchSummary.skipped("no configured searches")
+    return FetchSummary(
+        inserted, units=units, successes=successes, failures=failures
+    )
 
 
 def _num(v):
@@ -222,11 +277,23 @@ def fetch_adzuna(cfg, conn):
     """Fetch postings from the Adzuna API for every search that defines an `adzuna:` block;
     insert unseen ones as status='new', source='adzuna'. No-op (with a notice) if the
     ADZUNA_APP_ID / ADZUNA_APP_KEY credentials are absent, so `run` still works without it."""
+    if not any(isinstance(search, dict) and search.get("adzuna")
+               for search in cfg.get("searches") or []):
+        print("[adzuna] no searches define an adzuna block — skipping Adzuna source")
+        record_active_fetch_attempt(
+            conn, source_family="adzuna", target_kind="family", target_label="adzuna",
+            definition_hash=None, status="skipped", skip_reason="no configured queries",
+        )
+        return FetchSummary.skipped("no configured queries")
     app_id = _ensure_api_key("ADZUNA_APP_ID", label="adzuna")
     app_key = _ensure_api_key("ADZUNA_APP_KEY", label="adzuna")
     if not (app_id and app_key):
         print("[adzuna] ADZUNA_APP_ID / ADZUNA_APP_KEY not set — skipping Adzuna source")
-        return 0
+        record_active_fetch_attempt(
+            conn, source_family="adzuna", target_kind="family", target_label="adzuna",
+            definition_hash=None, status="skipped", skip_reason="credentials unavailable",
+        )
+        return FetchSummary.skipped("credentials unavailable")
 
     s = cfg["settings"]
     adz = s.get("adzuna") or {}
@@ -238,6 +305,7 @@ def fetch_adzuna(cfg, conn):
     today_iso = datetime.now().isoformat(timespec="seconds")
     inserted = 0
     reposts = 0
+    units = successes = failures = 0
 
     for search in cfg["searches"]:
         block = search.get("adzuna")
@@ -248,54 +316,91 @@ def fetch_adzuna(cfg, conn):
         # Adzuna allows only a single what_phrase per call, so each variant is its own call).
         queries = _as_list(block)
         for query in queries:
+            units += 1
+            attempt_started = utc_now_iso()
+            definition_hash = fetch_definition_hash({
+                "source": "adzuna", "search_name": name, "query": query,
+                "settings": {"country": country, "where": where,
+                             "results_per_search": rpp, "max_days_old": max_days},
+            })
             # A query with no what_* keys would match EVERYTHING — skip it rather than pull a
             # page of arbitrary jobs (guards against an empty/typo'd config block).
-            if not any(query.get(k) for k in _ADZUNA_WHAT_KEYS):
+            if not isinstance(query, dict) or not any(query.get(k) for k in _ADZUNA_WHAT_KEYS):
+                failures += 1
+                record_active_fetch_attempt(
+                    conn, source_family="adzuna", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="failed",
+                    error_kind="parse_or_validation", started_at=attempt_started,
+                )
                 print(f"[adzuna] {name}: query block has no what_* keys — skipping", file=sys.stderr)
                 continue
             label = query.get("what_phrase") or query.get("what") or query.get("what_or") or "?"
             print(f"[adzuna] {name}: {label}")
             try:
                 results = _adzuna_search(country, app_id, app_key, query, where, rpp, max_days)
+                query_inserted = query_reposts = eligible = 0
+                for r in results:
+                    url = _adzuna_job_url(r)
+                    if not url:
+                        continue
+                    eligible += 1
+                    title = r.get("title")
+                    company = (r.get("company") or {}).get("display_name")
+                    location = (r.get("location") or {}).get("display_name")
+                    desc = r.get("description")
+                    if not isinstance(desc, str):
+                        desc = ""
+                    # Predicted salaries are Adzuna's ML guess, not the posting's — drop to NULL so
+                    # the deterministic salary filter never rejects a real job on an estimate.
+                    predicted = str(r.get("salary_is_predicted") or "").strip().lower() in ("1", "true")
+                    n, repost_of = _insert_posting(
+                        conn, url=url, title=title, company=company, location=location,
+                        search_name=name, tier=search.get("tier", "primary"),
+                        date_posted=str(r.get("created") or ""), first_seen=today_iso,
+                        salary_min=None if predicted else _num(r.get("salary_min")),
+                        salary_max=None if predicted else _num(r.get("salary_max")),
+                        description=desc[: s["max_description_chars"]], source="adzuna",
+                    )
+                    query_inserted += n
+                    if n and repost_of:
+                        query_reposts += 1
+                record_active_fetch_attempt(
+                    conn, source_family="adzuna", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="success",
+                    returned_count=len(results), eligible_count=eligible,
+                    inserted_count=query_inserted, repost_count=query_reposts,
+                    started_at=attempt_started, commit=False,
+                )
+                conn.commit()
             except Exception as e:
-                # Redact the credentials in case the exception message carries the request URL
-                # (Adzuna auth is in the query string — see _adzuna_search).
+                conn.rollback()
+                failures += 1
+                record_active_fetch_attempt(
+                    conn, source_family="adzuna", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="failed",
+                    error_kind=fetch_error_kind(e), started_at=attempt_started,
+                )
+                # Redact credentials in case an exception embeds the query-string URL.
                 print(f"[adzuna] {name} ({label}) FAILED: {_redact(str(e), app_id, app_key)}",
                       file=sys.stderr)
                 time.sleep(delay)
                 continue
-
-            for r in results:
-                url = _adzuna_job_url(r)
-                if not url:
-                    continue
-                title = r.get("title")
-                company = (r.get("company") or {}).get("display_name")
-                location = (r.get("location") or {}).get("display_name")
-                desc = r.get("description")
-                if not isinstance(desc, str):
-                    desc = ""
-                # Predicted salaries are Adzuna's ML guess, not the posting's — drop to NULL so
-                # the deterministic salary filter never rejects a real job on an estimate.
-                # Accept any truthy encoding ("1"/1/True/"true"), not just the documented "1".
-                predicted = str(r.get("salary_is_predicted") or "").strip().lower() in ("1", "true")
-                n, repost_of = _insert_posting(
-                    conn, url=url, title=title, company=company, location=location,
-                    search_name=name, tier=search.get("tier", "primary"),
-                    date_posted=str(r.get("created") or ""), first_seen=today_iso,
-                    salary_min=None if predicted else _num(r.get("salary_min")),
-                    salary_max=None if predicted else _num(r.get("salary_max")),
-                    description=desc[: s["max_description_chars"]], source="adzuna",
-                )
-                inserted += n
-                if n and repost_of:
-                    reposts += 1
-            conn.commit()
+            successes += 1
+            inserted += query_inserted
+            reposts += query_reposts
             print(f"[adzuna] {name} ({label}): {len(results)} returned")
             time.sleep(delay)
 
     print(f"[adzuna] {inserted} new postings inserted ({reposts} reposts of seen roles)")
-    return inserted
+    if not units:
+        record_active_fetch_attempt(
+            conn, source_family="adzuna", target_kind="family", target_label="adzuna",
+            definition_hash=None, status="skipped", skip_reason="no configured queries",
+        )
+        return FetchSummary.skipped("no configured queries")
+    return FetchSummary(
+        inserted, units=units, successes=successes, failures=failures
+    )
 
 
 # ------------------------------------------------------------------- ATS fetch
@@ -539,14 +644,23 @@ def fetch_ats(cfg, conn):
     companies = _as_list(ats.get("companies"))
     if not companies:
         print("[ats] no settings.ats.companies configured — skipping ATS source")
-        return 0
+        record_active_fetch_attempt(
+            conn, source_family="ats", target_kind="family", target_label="ats",
+            definition_hash=None, status="skipped", skip_reason="no configured boards",
+        )
+        return FetchSummary.skipped("no configured boards")
     title_any = _ats_clean_patterns(ats.get("title_any"), "title_any")
     if not title_any:
         # Mirrors the Adzuna no-what_*-keys guard: with no usable title filter a board would
         # insert EVERY open role at the company and flood the paid eval.
         print("[ats] settings.ats.title_any is empty (or every pattern was dropped) — "
               "skipping (would insert every posting on every board)", file=sys.stderr)
-        return 0
+        record_active_fetch_attempt(
+            conn, source_family="ats", target_kind="family", target_label="ats",
+            definition_hash=fetch_definition_hash({"title_any": ats.get("title_any")}),
+            status="failed", error_kind="parse_or_validation",
+        )
+        return FetchSummary.failed("ValueError")
     location_raw = ats.get("location_any")
     location_any = _ats_clean_patterns(location_raw, "location_any")
     if location_raw and not location_any:
@@ -556,7 +670,12 @@ def fetch_ats(cfg, conn):
         # title_any guard above (an ABSENT location_any is still fine — that's `not location_raw`).
         print("[ats] every settings.ats.location_any pattern was unusable — skipping (an empty "
               "location filter would accept every location)", file=sys.stderr)
-        return 0
+        record_active_fetch_attempt(
+            conn, source_family="ats", target_kind="family", target_label="ats",
+            definition_hash=fetch_definition_hash({"location_any": location_raw}),
+            status="failed", error_kind="parse_or_validation",
+        )
+        return FetchSummary.failed("ValueError")
     # _num tolerates a quoted "2" and a bare `delay_between_calls:` (None) — either would
     # otherwise TypeError inside time.sleep and abort the run.
     delay = _num(ats.get("delay_between_calls", 2))
@@ -565,11 +684,21 @@ def fetch_ats(cfg, conn):
     today_iso = datetime.now().isoformat(timespec="seconds")
     inserted = 0
     reposts = 0
+    units = successes = failures = 0
 
-    for entry in companies:
+    for index, entry in enumerate(companies, 1):
+        units += 1
+        attempt_started = utc_now_iso()
         # A non-dict entry (a bare `- examplecorp` in YAML) must not crash the run — skip it
         # with a notice like any other malformed entry.
         if not isinstance(entry, dict):
+            failures += 1
+            record_active_fetch_attempt(
+                conn, source_family="ats", target_kind="board",
+                target_label=f"entry {index}", definition_hash=fetch_definition_hash(entry),
+                status="failed", error_kind="parse_or_validation",
+                started_at=attempt_started,
+            )
             print(f"[ats] bad companies entry {entry!r} (expected slug/board mapping) — skipping",
                   file=sys.stderr)
             continue
@@ -578,6 +707,13 @@ def fetch_ats(cfg, conn):
             slug = str(slug)  # a digit-only board slug parses as a YAML int
         board = entry.get("board")
         if not slug or board not in ATS_BOARDS:
+            failures += 1
+            record_active_fetch_attempt(
+                conn, source_family="ats", target_kind="board",
+                target_label=str(slug or f"entry {index}"),
+                definition_hash=fetch_definition_hash(entry), status="failed",
+                error_kind="parse_or_validation", started_at=attempt_started,
+            )
             print(f"[ats] bad companies entry (slug={slug!r}, board={board!r}) — skipping",
                   file=sys.stderr)
             continue
@@ -586,6 +722,10 @@ def fetch_ats(cfg, conn):
         name = entry.get("name") or slug.replace("-", " ").title()
         tier = entry.get("tier") or "primary"  # `or`, not a .get default: `tier: null` → None
         url_template, extract = ATS_BOARDS[board]
+        definition_hash = fetch_definition_hash({
+            "source": "ats", "company": entry,
+            "filters": {"title_any": title_any, "location_any": location_any},
+        })
         # The whole board — fetch, extract, AND the filter/insert rows — is one failure
         # unit: a wrong-shaped 200 response or a single bad row logs FAILED and moves on to
         # the next company instead of aborting the run. The rollback discards any partial
@@ -615,16 +755,31 @@ def fetch_ats(cfg, conn):
                 board_inserted += n
                 if n and repost_of:
                     board_reposts += 1
+            record_active_fetch_attempt(
+                conn, source_family="ats", target_kind="board", target_label=slug,
+                definition_hash=definition_hash, status="success", returned_count=len(rows),
+                eligible_count=kept, inserted_count=board_inserted,
+                repost_count=board_reposts, started_at=attempt_started, commit=False,
+            )
             conn.commit()
         except Exception as e:
             conn.rollback()
+            failures += 1
+            record_active_fetch_attempt(
+                conn, source_family="ats", target_kind="board", target_label=slug,
+                definition_hash=definition_hash, status="failed",
+                error_kind=fetch_error_kind(e), started_at=attempt_started,
+            )
             print(f"[ats] {slug} ({board}) FAILED: {e}", file=sys.stderr)
             time.sleep(delay)
             continue
+        successes += 1
         inserted += board_inserted
         reposts += board_reposts
         print(f"[ats] {slug} ({board}): {len(rows)} listed, {kept} matched filters")
         time.sleep(delay)
 
     print(f"[ats] {inserted} new postings inserted ({reposts} reposts of seen roles)")
-    return inserted
+    return FetchSummary(
+        inserted, units=units, successes=successes, failures=failures
+    )

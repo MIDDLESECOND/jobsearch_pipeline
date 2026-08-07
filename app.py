@@ -35,6 +35,7 @@ from core import connect_db, get_db, load_config
 from dupe_candidates import confirm_candidate, set_candidate_dismissed
 from exports import roles_csv
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
+from health import MAX_HEALTH_DAYS, MAX_RUN_HISTORY, health_snapshot
 from interviews import (INTERVIEW_MODES, add_interview, chain_interviews,
                         change_interview, interview_ics, interview_summaries)
 from intake import PostingAlreadyExists, add_manual_posting
@@ -429,6 +430,26 @@ def api_funnel():
     finally:
         conn.close()
     return jsonify(result)
+
+
+@app.route("/api/health")
+def api_health():
+    """Bounded pipeline availability facts and descriptive first-touch search yield."""
+    try:
+        days = int(request.args.get("days", "30"))
+        run_limit = int(request.args.get("run_limit", "20"))
+        if not 1 <= days <= MAX_HEALTH_DAYS:
+            raise ValueError(f"days must be an integer from 1 to {MAX_HEALTH_DAYS}")
+        if not 1 <= run_limit <= MAX_RUN_HISTORY:
+            raise ValueError(f"run_limit must be an integer from 1 to {MAX_RUN_HISTORY}")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        return jsonify(health_snapshot(conn, cfg, days=days, run_limit=run_limit))
+    finally:
+        conn.close()
 
 
 @app.route("/api/export/roles.csv")

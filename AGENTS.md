@@ -67,6 +67,8 @@ re-export hub):
 - `timeline.py` — bounded, newest-first role activity assembled read-only across current duplicate
   chains. It imports `chain` for the shared effective decision and never invents events for history
   that mutable tables do not retain.
+- `health.py` — structured run/fetch-attempt facts plus bounded, descriptive first-touch search
+  attribution. It stores counts and error categories, never raw exception messages or request URLs.
 - `funnel.py` — chain-scoped application-funnel aggregation over current applied decisions
   and append-only outcome history. It imports only `states`, performs no mutations, maps
   events from former canonicals to the current chain, and owns conversion definitions.
@@ -154,8 +156,9 @@ via Windows Task Scheduler.
 
 - **The `run` stage order is load-bearing.** Before any stage, a `--scheduled` run (the .bat's
   spelling) may cooldown-skip: if the `meta` table's `last_run_ok_ended` (stamped only after a
-  FULL successful cycle in which ≥1 fetch source didn't crash — an all-sources-down catch-up
-  run must not suppress the first slot that can fetch) is <60 min old, the slot no-ops —
+  FULL successful cycle in which at least one configured fetch target really succeeded, including
+  a legitimate zero-result response—an all-targets-failed catch-up run must not suppress the first
+  slot that can fetch) is <60 min old, the slot no-ops —
   visibly, inside the day's run-log markers; the predicate fails open on missing/garbage
   stamps and manual runs never skip. A skip is a full no-op (error-row requeue, reconciles,
   and report rebuild all wait for the next executed run).
@@ -321,6 +324,20 @@ via Windows Task Scheduler.
   entries. A snoozed task does not pretend its current due date was the original due date; a mutable
   interview contributes only its creation and the one latest `updated_at`; an unstarred tombstone
   has no fabricated unstar time. `/api/events` remains the append-only application-event contract.
+
+- **Pipeline health is per configured fetch target, not inferred from insertion volume.** Every
+  LinkedIn search, Adzuna query, and ATS board records success/failure/skipped facts in
+  `pipeline_fetch_attempts`; a legitimate zero-result response is success, while target inserts
+  and their success fact commit together. A target failure first rolls back its partial jobs, then
+  commits only a categorized failure fact. `pipeline_runs` brackets the complete cycle; an
+  uncaught downstream failure stores its stage and exception class but not its message. The
+  cooldown success stamp advances only when at least one real fetch target succeeded, including a
+  successful zero-result response—not when every target failed or nothing was configured.
+  Health/yield reads are descriptive: posting counts use each row's stored source/search, while
+  role/outcome counts assign each current duplicate chain exactly once to its earliest stored
+  posting and cohort only chains first seen inside the selected window. Merge/unlink can therefore
+  change current-chain counts; none of these are causal rankings. Never store raw query/request
+  URLs, exception messages, credentials, JD text, or private role evidence in the run tables/API.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

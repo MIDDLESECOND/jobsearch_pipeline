@@ -7,6 +7,20 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Pipeline health and search-yield evidence
+
+- Added durable `pipeline_runs` and per-target `pipeline_fetch_attempts` records for each LinkedIn
+  search, Adzuna query, and ATS board. Successful target facts commit with their posting inserts;
+  failures roll back partial inserts before recording a categorized error.
+- Added a local **Health & yield** view for recent run/source/target status and bounded search-track
+  cohorts, including configured tracks with zero observed roles.
+- Kept the metrics honest: a successful zero-result response is healthy, missing configuration is
+  skipped rather than failed, cooldown advances only after a real target success, and yield uses
+  raw posting volume plus one earliest-touch attribution per current duplicate chain rather than
+  double-crediting cross-posted roles or claiming causal conversion.
+- Run records retain counts, configuration hashes, stages, and error categories/classes only—never
+  raw exception messages, request URLs, credentials, descriptions, contacts, or document content.
+
 ## 2026-08-07 — Unified role activity timeline
 
 - Replaced the card's event-only History panel with a bounded, newest-first **Activity** view across

@@ -125,6 +125,20 @@ def test_backup_rejects_material_links_hidden_by_missing_postings(
         create_backup(conn, tmp_path / "evidence.zip", created_at=NOW)
 
 
+def test_backup_rejects_orphaned_pipeline_fetch_attempt(conn, tmp_path):
+    conn.execute(
+        """INSERT INTO pipeline_fetch_attempts
+           (run_id,source_family,target_kind,target_label,definition_hash,started_at,ended_at,
+            status,skip_reason,error_kind,returned_count,eligible_count,inserted_count,repost_count)
+           VALUES (999,'linkedin','search','track',NULL,'2026-08-07T00:00:00+00:00',
+                   '2026-08-07T00:01:00+00:00','success',NULL,NULL,0,0,0,0)"""
+    )
+    conn.commit()
+
+    with pytest.raises(BackupError, match="missing pipeline run"):
+        create_backup(conn, tmp_path / "orphan-attempt.zip", created_at=NOW)
+
+
 def test_backup_refuses_existing_destination_and_uncommitted_source(conn, tmp_path):
     archive = tmp_path / "evidence.zip"
     archive.write_bytes(b"keep me")

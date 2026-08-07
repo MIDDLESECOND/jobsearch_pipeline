@@ -125,6 +125,23 @@ def _check_snapshot(conn) -> None:
         raise BackupError(
             "application material link references a missing posting: " + detail
         )
+    # Backward-compatible with archives created before structured run health existed: only
+    # enforce the relationship when the attempt table is present in that snapshot.
+    has_attempts = conn.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='pipeline_fetch_attempts'"""
+    ).fetchone()
+    if has_attempts:
+        attempt_orphans = conn.execute(
+            """SELECT a.id FROM pipeline_fetch_attempts a
+                 LEFT JOIN pipeline_runs r ON r.id=a.run_id
+                WHERE r.id IS NULL ORDER BY a.id"""
+        ).fetchall()
+        if attempt_orphans:
+            raise BackupError(
+                "pipeline fetch attempt references a missing pipeline run: "
+                + ", ".join(str(row[0]) for row in attempt_orphans[:5])
+            )
 
 
 def _counts(conn) -> dict[str, int]:

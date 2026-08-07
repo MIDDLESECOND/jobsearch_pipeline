@@ -98,6 +98,8 @@ def test_homepage_exposes_action_center_filters_and_pager(client):
     assert 'href="/api/export/roles.csv"' in html and "Export CSV" in html
     assert "Star role" in html and "Unstar" in html
     assert "Activity ▸" in html and 'fetch("/api/timeline?job_url="' in html
+    assert 'data-view="health">Health &amp; yield' in html
+    assert 'url = "/api/health?" + params' in html
     assert 'id="intakeOpen"' in html and 'id="intakeDialog"' in html
     assert 'id="intakeForm"' in html and 'postJSON("/api/intake"' in html
     assert '<option value="AI leadership">AI leadership</option>' in html
@@ -1091,6 +1093,54 @@ def test_timeline_api_validates_posting_and_limit(client):
     assert client.get("/api/timeline?job_url=missing").status_code == 404
     invalid = client.get("/api/timeline?job_url=missing&limit=all")
     assert invalid.status_code == 400
+
+
+# ------------------------------------------------------------------- /api/health
+
+def test_health_api_returns_aggregates_without_private_posting_or_error_text(
+    client, seed, monkeypatch
+):
+    from health import (finish_pipeline_run, record_fetch_attempt, start_pipeline_run)
+
+    make_job(
+        seed, job_url="health-role", source="linkedin", search_name="AI leadership",
+        title="Private title", company="Private company",
+        description="Private description", first_seen=date.today().isoformat() + "T09:00:00",
+    )
+    run_id = start_pipeline_run(
+        seed, trigger="manual", run_date=date.today().isoformat()
+    )
+    record_fetch_attempt(
+        seed, run_id=run_id, source_family="linkedin", target_kind="search",
+        target_label="AI leadership", definition_hash="a" * 64, status="failed",
+        error_kind="timeout",
+    )
+    finish_pipeline_run(seed, run_id, status="degraded")
+    cfg = webapp.load_config()
+    monkeypatch.setattr(
+        webapp, "load_config",
+        lambda: {**cfg, "searches": [{
+            "name": "AI leadership", "term": "SECRET BOOLEAN QUERY MUST NOT LEAK"
+        }]},
+    )
+
+    response = client.get("/api/health?days=30&run_limit=5")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["runs"][0]["status"] == "degraded"
+    assert payload["search_effectiveness"]["total"] >= 1
+    serialized = repr(payload)
+    assert "Private title" not in serialized
+    assert "Private company" not in serialized
+    assert "Private description" not in serialized
+    assert "SECRET BOOLEAN QUERY" not in serialized
+    assert "raw_error" not in serialized and "error_message" not in serialized
+
+
+def test_health_api_validates_bounds(client):
+    assert client.get("/api/health?days=0").status_code == 400
+    assert client.get("/api/health?run_limit=all").status_code == 400
 
 
 # ------------------------------------------------------------------ /api/dupe

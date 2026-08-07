@@ -199,6 +199,21 @@ def test_gate_fail_whose_named_gate_reads_pass_is_inconsistent():
     assert "gate-results-inconsistent" in r["flags"]
 
 
+def test_gate_fail_naming_no_cause_anywhere_is_inconsistent():
+    # No failed_gate and no gate reading FAIL: the verdict rejected the role while
+    # pointing at nothing. "other" exists precisely so a real non-named fail can say
+    # so, which makes this shape unexplained rather than ambiguous.
+    r = _norm(verdict="GATE_FAIL", gate_results=_gr())
+    assert "gate-results-inconsistent" in r["flags"]
+
+
+def test_gate_fail_with_an_unnamed_explicit_fail_is_consistent():
+    # failed_gate absent but a gate explicitly reads FAIL — the cause IS stated,
+    # just not duplicated into failed_gate. Not the unexplained shape.
+    r = _norm(verdict="GATE_FAIL", gate_results=_gr(work_auth="FAIL"))
+    assert "gate-results-inconsistent" not in r["flags"]
+
+
 def test_gate_fail_other_with_all_gates_passing_is_consistent():
     # The unmeetable-qualification rule fails OUTSIDE the six named gates: an
     # "other" failed_gate with six PASSes is the documented shape, not a conflict.

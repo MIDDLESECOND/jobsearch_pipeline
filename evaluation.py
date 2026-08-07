@@ -75,7 +75,7 @@ Respond with ONLY a JSON object, no markdown fences, no preamble:
 {{
   "verdict": "PASS" or "GATE_FAIL" or "RECRUITER_ONLY",
   "gate_results": {{"years_floor": "PASS" or "FAIL", "domain_requirement": "PASS" or "FAIL", "role_substance": "PASS" or "FAIL", "tool_requirement": "PASS" or "FAIL", "work_auth": "PASS" or "FAIL", "employment_type": "PASS" or "FAIL"}} — MANDATORY: give an explicit verdict for EVERY one of the six gates by name, even on a GATE_FAIL (evaluate the remaining gates anyway) and even when a gate is trivially satisfied. A gate you did not consider must be reported, not omitted.,
-  "failed_gate": null or one of ["years_floor","domain_requirement","role_substance","tool_requirement","work_auth","employment_type"],
+  "failed_gate": null or one of ["years_floor","domain_requirement","role_substance","tool_requirement","work_auth","employment_type","other"] — use "other" ONLY for a gate failure the six named gates don't cover (a stated qualification the profile definitionally cannot meet, e.g. an experience ceiling or an unsatisfiable precondition), and say which one in gate_notes. On any GATE_FAIL this field must name something; null with verdict GATE_FAIL is not a valid answer.,
   "gate_notes": "one short sentence on the decisive gate finding",
   "fit_score": null or integer 0-18 (set whenever gates pass — i.e. for PASS and RECRUITER_ONLY),
   "score_breakdown": null or {{"ai_applied_vs_research": 0-3, "ai_artifact_depth": 0-3, "learning_value": 0-3, "technical_skill_match": 0-3, "title_trajectory": 0-3, "years_vs_stated": 0-3}},
@@ -189,10 +189,18 @@ def normalize_result(result):
     failed_gate = result.get("failed_gate")
     if verdict == VERDICT_GATE_FAIL:
         # failed_gate "other" (the unmeetable-qualification rule) legitimately fails
-        # OUTSIDE the six named gates — all six reading PASS is consistent there.
-        # Note failed_gate is still the model's RAW value here; _write_result coerces
-        # unknown strings to "other" only after this runs.
+        # OUTSIDE the six named gates — all six reading PASS is consistent there,
+        # which is why the schema lists "other" explicitly: without it the guide
+        # (log `other`) and the output spec (six names or null) contradict each
+        # other, and an unnamed fail became indistinguishable from an unexplained
+        # one. Note failed_gate is still the model's RAW value here; _write_result
+        # coerces unknown strings to "other" only after this runs.
         if failed_gate in GATE_NAMES and norm_gr.get(failed_gate) == "PASS":
+            _flag("gate-results-inconsistent")
+        elif not failed_gate and not explicit_fails:
+            # Rejected the gates while naming no cause anywhere: no failed_gate and
+            # six PASSes. With "other" available this is unexplained, not the
+            # unmeetable-qualification shape.
             _flag("gate-results-inconsistent")
     elif explicit_fails:
         _flag("gate-results-inconsistent")

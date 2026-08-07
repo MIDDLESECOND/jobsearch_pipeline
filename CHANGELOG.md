@@ -50,6 +50,17 @@ changes to *how postings are judged* do.
 - `backtest_v2` is the enforcement point: an incomplete or self-contradictory gate table
   fails the case even when the verdict matched. Old `eval_json` rows lack the field and are
   unaffected (nothing re-reads them through the new path).
+- **Follow-up the same day — `failed_gate` enum now includes `"other"`.** Merging the
+  unmeetable-stated-qualification rule into the production guide created a contradiction
+  between the two halves of the prompt: the guide says log such a failure as `other`, while
+  the output spec listed only the six gate names or `null`. (Contradictory instructions are
+  specifically costly on reasoning models — they spend tokens reconciling rather than
+  picking.) The spec now lists `other` with its narrow definition and states that a
+  `GATE_FAIL` must name a cause. With that ambiguity gone, `normalize_result` also flags the
+  previously-unjudgeable shape — `GATE_FAIL` with no `failed_gate` and no gate reading FAIL
+  — as inconsistent, while a fail named only in the gate table (cause stated, just not
+  duplicated) stays consistent. `"other"` was already reaching the DB from the merged rule;
+  storage and the report/UI render it unchanged, and there is no CHECK on the column.
 
 ## 2026-08-07 — Guide surfaces reconverged: the 07-30 gate rules reach the pipeline
 

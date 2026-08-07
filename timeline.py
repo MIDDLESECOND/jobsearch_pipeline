@@ -9,6 +9,8 @@ DEFAULT_TIMELINE_LIMIT = 200
 MAX_TIMELINE_LIMIT = 500
 MAX_TIMELINE_CHAIN_MEMBERS = 5_000
 _MAX_DETAIL = 2000
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MIN_TIME_KEY = -62_135_596_800.0
 
 
 def _text(value):
@@ -95,8 +97,8 @@ def _collect(conn, current, members, root, limit):
         """SELECT e.id,e.event_type,e.event_date,e.note,e.created_at
              FROM app_events e JOIN jobs k ON k.job_url=e.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=?
-            ORDER BY julianday(e.event_date) DESC,e.event_date DESC,
-                     julianday(e.created_at) DESC,e.created_at DESC,e.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(e.event_date) DESC,e.event_date DESC,
+                     timeline_instant(e.created_at) DESC,e.created_at DESC,e.id DESC LIMIT ?""",
         (root, limit),
     ):
         title = _text(event["event_type"]).replace("_", " ").capitalize()
@@ -116,7 +118,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT am.id,am.kind,am.original_name,am.attached_at
              FROM application_materials am JOIN jobs k ON k.job_url=am.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=?
-            ORDER BY julianday(am.attached_at) DESC,am.attached_at DESC,am.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(am.attached_at) DESC,am.attached_at DESC,am.id DESC LIMIT ?""",
         (root, limit),
     ):
         label = _text(material["kind"]).replace("_", " ").upper()
@@ -135,7 +137,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT c.id,c.name,c.role,c.kind,c.created_at
              FROM job_contacts c JOIN jobs k ON k.job_url=c.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=?
-            ORDER BY julianday(c.created_at) DESC,c.created_at DESC,c.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(c.created_at) DESC,c.created_at DESC,c.id DESC LIMIT ?""",
         (root, limit),
     ):
         detail = " · ".join(
@@ -157,7 +159,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT t.id,t.title,t.created_at
              FROM job_tasks t JOIN jobs k ON k.job_url=t.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=?
-            ORDER BY julianday(t.created_at) DESC,t.created_at DESC,t.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(t.created_at) DESC,t.created_at DESC,t.id DESC LIMIT ?""",
         (root, limit),
     ):
         items.append(_item(
@@ -177,7 +179,7 @@ def _collect(conn, current, members, root, limit):
              FROM job_tasks t JOIN jobs k ON k.job_url=t.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=? AND t.closed_at IS NOT NULL
               AND t.status IN ('completed','cancelled')
-            ORDER BY julianday(t.closed_at) DESC,t.closed_at DESC,t.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(t.closed_at) DESC,t.closed_at DESC,t.id DESC LIMIT ?""",
         (root, limit),
     ):
         items.append(_item(
@@ -195,7 +197,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT i.id,i.created_at
              FROM job_interviews i JOIN jobs k ON k.job_url=i.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=?
-            ORDER BY julianday(i.created_at) DESC,i.created_at DESC,i.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(i.created_at) DESC,i.created_at DESC,i.id DESC LIMIT ?""",
         (root, limit),
     ):
         items.append(_item(
@@ -212,7 +214,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT i.id,i.title,i.starts_at,i.status,i.updated_at
              FROM job_interviews i JOIN jobs k ON k.job_url=i.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=? AND i.updated_at<>i.created_at
-            ORDER BY julianday(i.updated_at) DESC,i.updated_at DESC,i.id DESC LIMIT ?""",
+            ORDER BY timeline_instant(i.updated_at) DESC,i.updated_at DESC,i.id DESC LIMIT ?""",
         (root, limit),
     ):
         title = ("Interview cancelled" if interview["status"] == "cancelled"
@@ -233,7 +235,7 @@ def _collect(conn, current, members, root, limit):
         """SELECT s.job_url,s.starred_at FROM role_stars s
              JOIN jobs k ON k.job_url=s.job_url
             WHERE COALESCE(k.repost_of,k.job_url)=? AND s.starred=1
-            ORDER BY julianday(s.starred_at) DESC,s.starred_at DESC,s.job_url DESC LIMIT ?""",
+            ORDER BY timeline_instant(s.starred_at) DESC,s.starred_at DESC,s.job_url DESC LIMIT ?""",
         (root, limit),
     ):
         items.append(_item(
@@ -243,15 +245,23 @@ def _collect(conn, current, members, root, limit):
     return items, total
 
 
-def _time_key(value):
+def _time_key(value, *, naive_timezone=None):
+    """Map stored timestamps to one UTC number for SQL and Python ordering.
+
+    Historical producers stored naive ``datetime.now()`` values, while newer concerns use
+    aware UTC values. A naive value therefore means the machine's local wall clock at write
+    time; treating it as UTC would reverse cross-concern events in non-UTC timezones.
+    ``naive_timezone`` exists for deterministic boundary tests.
+    """
     value = str(value or "")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-        return parsed
+        if parsed.tzinfo is None:
+            parsed = (parsed.replace(tzinfo=naive_timezone) if naive_timezone is not None
+                      else parsed.astimezone())
+        return (parsed.astimezone(timezone.utc) - _EPOCH).total_seconds()
     except (ValueError, OSError, OverflowError):
-        return datetime.min
+        return _MIN_TIME_KEY
 
 
 def role_timeline(conn, row, *, limit=DEFAULT_TIMELINE_LIMIT):
@@ -264,6 +274,9 @@ def role_timeline(conn, row, *, limit=DEFAULT_TIMELINE_LIMIT):
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_TIMELINE_LIMIT:
         raise ValueError(f"timeline limit must be 1..{MAX_TIMELINE_LIMIT}")
+    # Per-category LIMIT must use exactly the same instant semantics as the final Python sort;
+    # otherwise a mixed legacy-local/aware-UTC category can discard its newest row too early.
+    conn.create_function("timeline_instant", 1, _time_key, deterministic=True)
     owns_snapshot = not conn.in_transaction
     if owns_snapshot:
         conn.execute("BEGIN")

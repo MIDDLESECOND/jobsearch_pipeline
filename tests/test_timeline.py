@@ -1,5 +1,7 @@
 """Unified role activity is chain-scoped, factual, bounded, and read-only."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from conftest import make_job
@@ -67,7 +69,7 @@ def _seed_activity(conn):
 
 
 def test_role_timeline_unifies_current_chain_activity_without_private_payloads(conn):
-    from timeline import role_timeline
+    from timeline import _time_key, role_timeline
 
     root = _seed_activity(conn)
     result = role_timeline(conn, root)
@@ -75,9 +77,8 @@ def test_role_timeline_unifies_current_chain_activity_without_private_payloads(c
     assert result["total"] == 11
     assert result["truncated"] is False
     items = result["items"]
-    assert [item["occurred_at"] for item in items] == sorted(
-        (item["occurred_at"] for item in items), reverse=True
-    )
+    instants = [_time_key(item["occurred_at"]) for item in items]
+    assert instants == sorted(instants, reverse=True)
     assert {item["kind"] for item in items} == {
         "posting", "decision", "event", "material", "contact", "task_created",
         "task_closed", "interview_created", "interview_updated", "star",
@@ -199,6 +200,46 @@ def test_timeline_orders_offset_timestamps_before_limit_by_actual_instant(conn):
 
     assert len(contacts) == 1
     assert contacts[0]["detail"].startswith("Later instant")
+
+
+def test_timeline_interprets_legacy_naive_timestamps_as_local_instants(conn, monkeypatch):
+    import timeline
+
+    real_time_key = timeline._time_key
+    local_zone = timezone(timedelta(hours=-6))
+    monkeypatch.setattr(
+        timeline, "_time_key",
+        lambda value: real_time_key(value, naive_timezone=local_zone),
+    )
+    local_naive = datetime(2026, 1, 15, 10, 0, 0)
+    other_utc = datetime(2026, 1, 15, 15, 30, tzinfo=timezone.utc)
+
+    row = make_job(conn, job_url="root", first_seen="2025-01-01T00:00:00")
+    for name, created_at in (
+        ("Local instant", local_naive.isoformat()),
+        ("Aware instant", other_utc.isoformat()),
+    ):
+        conn.execute(
+            """INSERT INTO job_contacts
+               (job_url,interaction_url,name,role,kind,email,profile_url,note,created_at)
+               VALUES ('root','root',?,NULL,'other',NULL,NULL,NULL,?)""",
+            (name, created_at),
+        )
+    conn.commit()
+
+    result = timeline.role_timeline(conn, row, limit=1)
+
+    assert result["items"][0]["kind"] == "contact"
+    assert result["items"][0]["detail"].startswith("Local instant")
+
+
+def test_timeline_time_key_can_apply_an_explicit_local_zone():
+    from timeline import _time_key
+
+    chicago_winter = timezone(timedelta(hours=-6))
+    assert _time_key(
+        "2026-01-15T10:00:00", naive_timezone=chicago_winter,
+    ) > _time_key("2026-01-15T15:30:00+00:00")
 
 
 def test_timeline_rejects_abnormally_large_role_chain_before_loading_it(conn, monkeypatch):

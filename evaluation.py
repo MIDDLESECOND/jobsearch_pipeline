@@ -191,8 +191,10 @@ def _call_anthropic(client, model, system_prompt, user_msg):
 
 def _call_deepseek(api_key, model, system_prompt, user_msg):
     """Return (text, fresh_in_tok, out_tok, cache_read_tok, cache_write_tok).
-    V4 is a reasoning model — it spends 2-4k tokens thinking before the JSON
-    answer, so max_tokens must be generous or the answer truncates to empty.
+    V4 is a reasoning model — it thinks before the JSON answer, so max_tokens must
+    be generous or the answer truncates to empty (billing the whole failed attempt).
+    The 0731 flash build thinks ~3.4k tokens on average with a long tail; the old
+    8000 cap produced 30-100 empty-answer retries/day, so 16000.
     response_format forces valid JSON (DeepSeek otherwise wraps it in prose)."""
     import httpx
 
@@ -200,7 +202,7 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json={
-            "model": model, "max_tokens": 8000, "temperature": 0,
+            "model": model, "max_tokens": 16000, "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": user_msg}],

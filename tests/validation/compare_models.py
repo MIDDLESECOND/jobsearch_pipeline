@@ -77,9 +77,11 @@ def call_deepseek(model, user_msg, extra=None):
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {DS_KEY}"},
         json={
-            # V4 is a reasoning model — it spends 2-4k tokens thinking before the
-            # JSON answer. 1200 truncates mid-reasoning -> empty answer. Give headroom.
-            "model": model, "max_tokens": 8000, "temperature": 0,
+            # V4 is a reasoning model — it thinks before the JSON answer, and 1200
+            # truncates mid-reasoning -> empty answer. Matches evaluation._call_deepseek's
+            # 16000 (the 0731 build's tail overruns 8000); a lower cap here would score
+            # flash's truncations against other models' complete answers.
+            "model": model, "max_tokens": 16000, "temperature": 0,
             # Force valid JSON — DeepSeek (esp. the reasoning-style pro) otherwise
             # wraps the answer in prose. This is how you'd call it in production.
             "response_format": {"type": "json_object"},

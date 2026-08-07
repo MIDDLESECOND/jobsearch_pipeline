@@ -7,6 +7,20 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — 0731 flash build: eval max_tokens 16000, cold-apply bar 15 → 14
+
+- DeepSeek's silently cut-over V4-Flash-0731 build reasons ~2.5× longer per eval (out-tokens/eval
+  ~1.2k → ~3.4k; per-eval cost doubled, no price change). The old `max_tokens: 8000` was sized for
+  the pre-0731 2–4k thinking budget; the new tail blows through it, truncating the answer to empty
+  and burning 30–100 billed "no JSON object" retries/day. Raised to 16000 in `_call_deepseek`.
+- The same build also scores gates-passed roles ~1 point lower (daily fit-score mean 10.9 → 9.6;
+  backtest re-scores of identical postings confirm the level shift). Routing and gates are intact —
+  backtest_v2 8/8 green post-fix, artifact-depth/leadership caps firing correctly — so this is a
+  scale drift, not a judgment break. Standing-allocation cold-apply bar lowered fit ≥ 15 → ≥ 14
+  (guide, three sites) to keep the bar's real-world strictness unchanged on the new scale.
+- Watch item: eval_json verbosity was still climbing daily a week after cutover; if the scale keeps
+  sliding, revisit the bar rather than the scoring rules.
+
 ## 2026-08-07 — Confirmed interview-story and application-answer library
 
 - Added local `prep_entries` drafts for reusable interview stories and application answers, plus

@@ -34,10 +34,14 @@ Run:  python tests/validation/backtest_v2.py   (any CWD — config and DB resolv
 core.BASE_DIR, the cases file next to this script; unlike the comparison scripts,
 nothing here is CWD-relative).
 Needs the same API key the configured provider needs (DEEPSEEK_API_KEY by default).
+Exit codes: 0 = all anchors measured and matched; 1 = a measured anchor missed its
+expectation (real regression signal); 3 = no mismatches but >=1 case could not be
+measured (infra error after retries — re-run later, nothing known to be broken).
 """
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -159,9 +163,25 @@ def make_caller(cfg, system_prompt):
     sys.exit(f"unknown provider '{provider}' — backtest_v2 speaks anthropic|deepseek")
 
 
-def evaluate(call, row):
-    text = call(evaluation.build_user_msg(row))
-    return evaluation.normalize_result(evaluation.parse_eval_json(text))
+def evaluate(call, row, attempts=3):
+    """Call + parse with the production loop's retry count. The 0731 flash build
+    sometimes ends a response normally with ZERO content tokens (finish_reason
+    "stop", ~1/3 reproduction on affected postings — CHANGELOG 2026-08-07); one
+    draw of that must not paint an anchor red, so parse failures retry like
+    production's _evaluate_one does. The last failure propagates to the caller,
+    which reports it as an INFRA error, not a verdict mismatch."""
+    user_msg = evaluation.build_user_msg(row)
+    last = None
+    for attempt in range(attempts):
+        try:
+            text = call(user_msg)
+            return evaluation.normalize_result(evaluation.parse_eval_json(text))
+        except Exception as e:
+            last = e
+            if attempt < attempts - 1:
+                print(f"          (attempt {attempt + 1} failed: {e}; retrying)")
+                time.sleep(3 * (attempt + 1))
+    raise last
 
 
 def main():
@@ -172,7 +192,7 @@ def main():
     call = make_caller(cfg, system_prompt)
     print(f"provider={cfg['settings'].get('provider')} model={cfg['settings']['model']}\n")
 
-    passed = failed = skipped = xfailed = xpassed = 0
+    passed = failed = errored = skipped = xfailed = xpassed = 0
     for case in cases:
         company_like, title_like = case["company_like"], case["title_like"]
         expected = case["expected"]
@@ -186,8 +206,13 @@ def main():
         try:
             res = evaluate(call, row)
         except Exception as e:
-            print(f"  ERROR {company_like}: {type(e).__name__}: {e}")
-            failed += 1
+            # An eval that never produced a parseable verdict is an INFRA fact
+            # (provider outage, empty-answer build behavior), not evidence about
+            # the anchor — count it apart so exit codes can distinguish "the
+            # judgment regressed" from "the probe couldn't measure".
+            print(f"  ERROR {company_like}: {type(e).__name__}: {e} "
+                  f"(infra — not counted as a verdict mismatch)")
+            errored += 1
             continue
         verdict = res.get("verdict")
         bucket = res.get("bucket")
@@ -246,6 +271,8 @@ def main():
 
     print("=" * 60)
     parts = [f"{passed} matched expectation", f"{failed} did not"]
+    if errored:
+        parts.append(f"{errored} infra error(s) (unmeasured, not mismatches)")
     if xfailed:
         parts.append(f"{xfailed} known-alarm xfail (expected red)")
     if xpassed:
@@ -258,7 +285,13 @@ def main():
     # on this single-user tool, never environmental, so it must not read as green.
     if skipped:
         sys.exit(f"{skipped} case(s) skipped — fix the LIKE fragment/job_url or the DB")
-    sys.exit(0 if failed == 0 else 1)
+    # Exit-code contract: 1 = a measured anchor missed its expectation (the eval
+    # framework regressed — act on it); 3 = every measured anchor matched but some
+    # never got measured (retry later; nothing is known to be broken). 1 wins when
+    # both are true, because a real regression must never be masked by an outage.
+    if failed:
+        sys.exit(1)
+    sys.exit(3 if errored else 0)
 
 
 if __name__ == "__main__":

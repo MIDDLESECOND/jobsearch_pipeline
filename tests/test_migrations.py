@@ -343,3 +343,51 @@ def test_eval_issues_column_is_added_and_backfilled_from_stored_json(tmp_path):
             "SELECT eval_issues FROM jobs WHERE job_url='clean'").fetchone()[0] == "hand-set"
     finally:
         conn.close()
+
+
+def test_scored_yet_rejected_rows_are_flagged_once_and_precisely(tmp_path):
+    # A rejection that still carries a full score_breakdown contradicts the guide's own
+    # rule (fit is scored only when every gate passes), so it is flagged for review on
+    # databases predating gate_results. The signature must not catch a rejection that
+    # named its gate, and must never overwrite a diagnostic the evaluator itself wrote.
+    breakdown = ('"score_breakdown": {"a":2,"b":2,"c":2,"d":2,"e":2,'
+                 '"ai_artifact_depth":0}')
+    path = str(tmp_path / "prescored.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_jobs_ddl())
+    conn.execute("INSERT INTO jobs (job_url,title,status,verdict,failed_gate,eval_json) "
+                 f"VALUES ('scored','T','evaluated','GATE_FAIL',NULL,'{{{breakdown}}}')")
+    conn.execute("INSERT INTO jobs (job_url,title,status,verdict,failed_gate,eval_json) "
+                 f"VALUES ('named','T','evaluated','GATE_FAIL','years_floor','{{{breakdown}}}')")
+    conn.execute("INSERT INTO jobs (job_url,title,status,verdict,failed_gate,eval_json) "
+                 "VALUES ('unscored','T','evaluated','GATE_FAIL',NULL,"
+                 "'{\"one_line\": \"truncated posting\"}')")
+    conn.execute("INSERT INTO jobs (job_url,title,status,verdict,failed_gate,eval_json) "
+                 "VALUES ('already','T','evaluated','GATE_FAIL',NULL,"
+                 f'\'{{"eval_issues": ["gate-results-inconsistent"], {breakdown}}}\')')
+    conn.commit()
+    conn.close()
+
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        got = {r["job_url"]: r["eval_issues"] for r in conn.execute(
+            "SELECT job_url, eval_issues FROM jobs")}
+        assert got["scored"] == "scored-yet-rejected"
+        assert got["named"] is None          # named its gate — not a contradiction
+        assert got["unscored"] is None       # never scored — an input problem, not a verdict one
+        assert got["already"] == "gate-results-inconsistent"   # evaluator's own value kept
+        # Flagging is review, never re-routing.
+        assert conn.execute("SELECT verdict FROM jobs WHERE job_url='scored'"
+                            ).fetchone()[0] == "GATE_FAIL"
+        conn.execute("UPDATE jobs SET eval_issues=NULL WHERE job_url='scored'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # One-shot: a second open must not re-derive what the user has since cleared.
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        assert conn.execute("SELECT eval_issues FROM jobs WHERE job_url='scored'"
+                            ).fetchone()[0] is None
+    finally:
+        conn.close()

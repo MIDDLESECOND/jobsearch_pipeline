@@ -865,10 +865,50 @@ def _migrate(conn):
         ).rowcount
         print(f"[migrate] backfilled jobs.eval_issues for {n} row(s)")
     conn.commit()
+    _derive_scored_yet_rejected(conn)
     _migrate_applied_to_status(conn, cols)
     _rebuild_for_stale_checks(conn)
     _backfill_fingerprints(conn)
     _recompute_fingerprints(conn)
+
+
+_SCORED_YET_REJECTED_KEY = "backfill_scored_yet_rejected"
+
+
+def _derive_scored_yet_rejected(conn):
+    """One-time reach back to rejections that predate the `gate_results` contract check.
+
+    The guide scores fit ONLY when every gate passes ("if ANY gate fails, stop — do not
+    score fit"), so a GATE_FAIL still carrying a complete score_breakdown contradicts itself
+    without needing a gate table.  Measured before trusting it: of 36,886 rejections that DID
+    name a failing gate, exactly ONE also carried a score_breakdown (0.00%) — the signature
+    is not an artifact of the model filling in fields.  On the real history it marks 20 rows,
+    17 of them inside the three days after the 2026-07-31 behaviour change, all target-tier
+    (PwC AI Engineer, Google/Deloitte Forward Deployed Engineer GenAI, EY AI Cybersecurity
+    Architect); their own one_line text argues "pursue via recruiter or referral".
+
+    This DERIVES a value normalize_result never computed, which is why it is a one-shot
+    keyed in `meta` rather than part of the eval path: going forward `gate_results` catches
+    the same rows (on every row carrying that field, both signatures flagged exactly the
+    same one), so there is nothing here to run twice.  Flagging is not re-routing — the
+    stored verdict is untouched and the row surfaces in the attention queue for a human.
+    """
+    if meta_get(conn, _SCORED_YET_REJECTED_KEY):
+        return
+    n = conn.execute(
+        "UPDATE jobs SET eval_issues='scored-yet-rejected' "
+        "WHERE verdict='GATE_FAIL' AND (failed_gate IS NULL OR failed_gate='') "
+        # Never clobber a diagnostic the evaluator itself recorded.
+        "AND eval_issues IS NULL AND json_valid(eval_json) "
+        "AND json_type(json_extract(eval_json,'$.score_breakdown'))='object' "
+        "AND (SELECT COUNT(*) FROM json_each("
+        "json_extract(jobs.eval_json,'$.score_breakdown')) je "
+        "WHERE json_type(je.value) IN ('integer','real'))>=6"
+    ).rowcount
+    meta_set(conn, _SCORED_YET_REJECTED_KEY, "done")
+    conn.commit()
+    if n:
+        print(f"[migrate] flagged {n} scored-yet-rejected row(s) for review")
 
 
 def _check_clause_values(sql, column):

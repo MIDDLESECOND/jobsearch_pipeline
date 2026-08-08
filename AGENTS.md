@@ -393,9 +393,16 @@ via Windows Task Scheduler.
   truncation flag so an omitted tail is never presented as complete.
 
 - **A flagged verdict is reviewed, never re-routed.** `normalize_result`'s contract
-  diagnostics are denormalized onto `jobs.eval_issues` (comma-joined, NULL = clean; the eval
-  UPDATE in `evaluation.py` is the ONE writer, and a one-time migration lifts the values that
-  already sat inside `eval_json`). The column exists for one reason: testing the JSON on the
+  diagnostics are denormalized onto `jobs.eval_issues` (comma-joined, NULL = clean). The eval
+  UPDATE in `evaluation.py` is the only ONGOING writer; the migration path touches the column
+  exactly twice, both one-shot: it lifts values that already sat inside `eval_json`, and
+  `_derive_scored_yet_rejected` marks rejections that predate `gate_results` but still carry a
+  complete `score_breakdown` — a contradiction of the guide's own "if ANY gate fails, stop —
+  do not score fit", validated before use (of 36,886 rejections that named a failing gate,
+  exactly one also carried a breakdown). That derivation is keyed in `meta`, never re-runs,
+  and never overwrites a value the evaluator itself wrote. Do NOT promote it into
+  `normalize_result`: on every row carrying `gate_results`, both signatures flagged exactly
+  the same row, so it buys no forward coverage in the load-bearing path. The column exists for one reason: testing the JSON on the
   real history cost 3.8s per Action Center load against 9ms for a column, and the partial
   `idx_eval_issues` keeps the attention queue's OR on the MULTI-INDEX OR path instead of a
   full scan. Undecided flagged rows join `needs_attention`, because they have no other

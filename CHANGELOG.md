@@ -7,6 +7,37 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — 20 pre-`gate_results` rejections flagged for review; the 07-31 step change
+
+- The "scored yet rejected" signature was **falsification-tested before use**: if scoring
+  said nothing about gates, rejections that DID name a failing gate would carry a
+  `score_breakdown` too. Of **36,886** named-gate rejections, exactly **1** does (0.00%;
+  0.00% for role_substance, years_floor, tool_requirement, employment_type,
+  domain_requirement individually). The signature is real, not an artifact of the model
+  filling in fields. Of the 21 rows it selects, 16 say in their own words that the gates
+  passed and 18 argue a recruiter/referral channel.
+- **The onset is a step, not a slope.** Against a flat denominator of Adzuna rows evaluated
+  per day, the rate is 0.00% on every day from 07-24 through 07-30 — including 07-24, the
+  highest-volume day at 1,722 rows — then **0.91% on 07-31, 0.72% on 08-01, 0.28% on 08-02**,
+  decaying after. 17 of the 21 land in those three days. This is the 0731 drift with a
+  countable signature: from that date the model began rejecting postings it had scored.
+- `core._derive_scored_yet_rejected` marks those rows `eval_issues='scored-yet-rejected'`
+  once (keyed in `meta`, never overwrites an evaluator-written value, verdicts untouched), so
+  they surface in **Needs attention**. On the real database: 20 rows flagged, 0 named-gate
+  rows wrongly caught, migration 0.7s.
+- **Re-evaluating them was considered and rejected.** All 21 still have their stored text and
+  none has been decided, so a requeue was possible — but 20 of 21 are Adzuna rows whose
+  description sits at the documented 500-char snippet cap. Feeding the same thin text back to
+  the judge that already mishandled it twice is not a fix; a human with the posting link is.
+- **Not promoted into `normalize_result`.** On rows carrying `gate_results`, the two
+  signatures flagged exactly the same single row and neither caught anything the other
+  missed, so a second live detector in the load-bearing path buys nothing.
+- Separately, the 43 "cannot evaluate" rejections are **not a fetch bug**: 41 are Adzuna,
+  42 of 43 sit at or below the 500-char cap, and none is empty (min 143 chars). That is the
+  documented cost of the thin source, not a retrievable failure.
+
+---
+
 ## 2026-08-07 — Schema: `jobs.eval_issues`; flagged verdicts enter the attention queue
 
 - Audit of the contract diagnostics on real data. The live `gate_results` check flags **1**

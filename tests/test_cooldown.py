@@ -82,7 +82,10 @@ def test_meta_roundtrip_and_replace(conn):
     assert meta_get(conn, "last_run_ok_ended") == "2026-07-20T15:07:53"
     meta_set(conn, "last_run_ok_ended", "2026-07-20T20:31:02")  # INSERT OR REPLACE, one row
     assert meta_get(conn, "last_run_ok_ended") == "2026-07-20T20:31:02"
-    assert conn.execute("SELECT count(*) FROM meta").fetchone()[0] == 1
+    # Scoped to the key: replacing must not duplicate IT. Counting the whole table would
+    # also fail the moment a migration legitimately records a one-shot marker here.
+    assert conn.execute(
+        "SELECT count(*) FROM meta WHERE key='last_run_ok_ended'").fetchone()[0] == 1
 
 
 # ------------------------------------------------------------------ the wiring

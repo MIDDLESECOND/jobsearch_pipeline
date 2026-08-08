@@ -237,7 +237,7 @@ def main():
         if missing:
             ok = False
             extra_lines.append(f"gate_results INCOMPLETE — no explicit verdict for {missing}")
-        if "gate-results-inconsistent" in (res.get("flags") or []):
+        if "gate-results-inconsistent" in (res.get("eval_issues") or []):
             ok = False
             extra_lines.append("gate_results INCONSISTENT with the verdict "
                                f"(gate_results={gr}, failed_gate={res.get('failed_gate')})")

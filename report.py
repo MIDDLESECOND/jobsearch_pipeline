@@ -404,6 +404,10 @@ def _render_scored_job(r, dec, now=None):
         out.append("- " + BUCKET_LABELS.get(r["bucket"], "Bucket " + str(r["bucket"])))
     if r["salary_min"] or r["salary_max"]:
         out.append(f"- Posted salary: {_fmt_sal(r['salary_min'])}–{_fmt_sal(r['salary_max'])}")
+    # Evaluation-quality diagnostics ride WITH the verdict, above the role's own
+    # caveats: they qualify how much to trust this card, not what the job is like.
+    for iss in ev.get("eval_issues") or []:
+        out.append(f"- 🔎 eval contract: {iss}")
     out.append(f"- {ev.get('one_line', '')}")
     bd = ev.get("score_breakdown") or {}
     if bd:

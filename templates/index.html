@@ -50,6 +50,12 @@
   .scores { font-size: .78rem; color: #556; margin: .3rem 0; }
   .scores .ai { color: #1d4ed8; font-weight: 600; }
   .flag { font-size: .78rem; color: #b45309; margin: .1rem 0; }
+  /* Evaluation-contract diagnostics — deliberately NOT styled like .flag: those are
+     the model's warnings about the ROLE, these say the evaluation itself came back
+     incomplete. Muted and monospaced so a low-trust card reads as plumbing, not as
+     one more caveat about the job. */
+  .evalissue { font-size: .72rem; color: #6b7280; font-family: ui-monospace, monospace;
+               margin: .1rem 0; }
   .oneline { font-size: .85rem; margin: .3rem 0; }
   .tag { font-size: .72rem; background: #eef; color: #335; padding: .05rem .4rem;
          border-radius: 4px; margin-left: .3rem; }
@@ -1197,6 +1203,10 @@ function card(j, actionSection = null) {
                 : (j.chain_verdict ? `<span class="verdict v-${j.chain_verdict}">↻ chain ${j.chain_verdict}${chainFit}</span>` : "");
   const repost = j.is_repost ? `<span class="tag repost">↻ repost</span>` : "";
   const flags = (j.flags||[]).map(f => `<div class="flag">⚠️ ${esc(f)}</div>`).join("");
+  // Rendered with the verdict, not with the flags: it qualifies the verdict's
+  // trustworthiness rather than describing the role.
+  const evalIssues = (j.eval_issues||[])
+    .map(i => `<div class="evalissue">🔎 eval contract: ${esc(i)}</div>`).join("");
   const gateOpts = GATES.map(g => `<option value="${g}">${g}</option>`).join("");
 
   div.innerHTML = `
@@ -1207,6 +1217,7 @@ function card(j, actionSection = null) {
     ${contactPanelHTML(j)}
     ${materialPanelHTML(j)}
     <div class="meta">${verdict}${score}</div>
+    ${evalIssues}
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
     <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet — may be stale; verify on employer site</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}${j.age_label ? ` · 🕐 ${esc(j.age_label)}` : ""}</div>

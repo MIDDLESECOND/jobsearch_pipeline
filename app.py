@@ -119,6 +119,10 @@ def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
         "score_breakdown": ev.get("score_breakdown") or {},
         "one_line": ev.get("one_line"),
         "flags": ev.get("flags") or [],
+        # Separate channel from `flags`: these describe the EVALUATION's completeness,
+        # not the role (see evaluation.normalize_result). The UI renders them next to
+        # the verdict so a low-trust card is visibly low-trust.
+        "eval_issues": ev.get("eval_issues") or [],
         "app_status": row["app_status"],
         "status_date": row["status_date"],
         "outcome_status": row["outcome_status"],

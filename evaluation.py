@@ -161,10 +161,18 @@ def normalize_result(result):
     # rules they were violating). A structured per-gate field turns a skipped gate
     # into a visible None that backtest_v2 asserts on. Normalization here is
     # assistive and NEVER verdict-changing (unlike the depth/leadership caps): a
-    # malformed or inconsistent gate_results earns a flag for the human, because
+    # malformed or inconsistent gate_results is REPORTED, never acted on, because
     # auto-capping on a diagnostics field would let one hallucinated FAIL string
     # bucket-1 a clean role. Same no-throw discipline as the caps — this runs
     # outside the retry loop, so every access fails soft.
+    #
+    # The findings go in `eval_issues`, NOT in `flags`. `flags` answers "what about
+    # this ROLE needs human judgment"; these answer "how much should you trust this
+    # evaluation" — different subjects, and the first is a free-text channel the
+    # model fills with ~2 prose warnings per posting (measured: 76% of rows carry
+    # one, 53k distinct phrasings, only 0.8% matching a guide-defined token). Mixing
+    # a machine-generated contract check into that stream would read as another
+    # caveat about the job and would be unfindable among the prose.
     gr = result.get("gate_results")
     gr = gr if isinstance(gr, dict) else {}
     norm_gr = {}
@@ -174,17 +182,16 @@ def normalize_result(result):
         norm_gr[gate] = v if v in ("PASS", "FAIL") else None
     result["gate_results"] = norm_gr
 
-    flags = result.get("flags")
-    flags = flags if isinstance(flags, list) else []
+    issues = []
 
-    def _flag(name):
+    def _issue(name):
         # Idempotent: normalize_result mutates in place, so a second call on the
-        # same dict must not stack duplicate diagnostics into the human's flag list.
-        if name not in flags:
-            flags.append(name)
+        # same dict must not stack duplicates.
+        if name not in issues:
+            issues.append(name)
 
     if any(v is None for v in norm_gr.values()):
-        _flag("gate-results-incomplete")
+        _issue("gate-results-incomplete")
     explicit_fails = {g for g, v in norm_gr.items() if v == "FAIL"}
     failed_gate = result.get("failed_gate")
     if verdict == VERDICT_GATE_FAIL:
@@ -196,15 +203,15 @@ def normalize_result(result):
         # one. Note failed_gate is still the model's RAW value here; _write_result
         # coerces unknown strings to "other" only after this runs.
         if failed_gate in GATE_NAMES and norm_gr.get(failed_gate) == "PASS":
-            _flag("gate-results-inconsistent")
+            _issue("gate-results-inconsistent")
         elif not failed_gate and not explicit_fails:
             # Rejected the gates while naming no cause anywhere: no failed_gate and
             # six PASSes. With "other" available this is unexplained, not the
             # unmeetable-qualification shape.
-            _flag("gate-results-inconsistent")
+            _issue("gate-results-inconsistent")
     elif explicit_fails:
-        _flag("gate-results-inconsistent")
-    result["flags"] = flags
+        _issue("gate-results-inconsistent")
+    result["eval_issues"] = issues
 
     result["verdict"] = verdict
     return result

@@ -158,8 +158,8 @@ def _gr(**overrides):
 def test_gate_results_complete_and_consistent_passes_clean():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), gate_results=_gr())
     assert r["gate_results"] == _gr()
-    assert "gate-results-incomplete" not in r["flags"]
-    assert "gate-results-inconsistent" not in r["flags"]
+    assert r["eval_issues"] == []
+    assert "gate-results-inconsistent" not in r["eval_issues"]
 
 
 def test_gate_results_missing_gate_flags_incomplete_without_touching_verdict():
@@ -168,13 +168,13 @@ def test_gate_results_missing_gate_flags_incomplete_without_touching_verdict():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), gate_results=partial)
     assert r["verdict"] == "PASS"          # assistive: never re-routes
     assert r["gate_results"]["work_auth"] is None
-    assert "gate-results-incomplete" in r["flags"]
+    assert "gate-results-incomplete" in r["eval_issues"]
 
 
 def test_gate_results_absent_entirely_flags_incomplete():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3))
     assert all(v is None for v in r["gate_results"].values())
-    assert "gate-results-incomplete" in r["flags"]
+    assert "gate-results-incomplete" in r["eval_issues"]
 
 
 def test_gate_results_non_dict_fails_soft():
@@ -183,20 +183,20 @@ def test_gate_results_non_dict_fails_soft():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
               gate_results=["years_floor: PASS"])
     assert all(v is None for v in r["gate_results"].values())
-    assert "gate-results-incomplete" in r["flags"]
+    assert "gate-results-incomplete" in r["eval_issues"]
 
 
 def test_gate_results_case_and_whitespace_normalized():
     r = _norm(verdict="GATE_FAIL", failed_gate="years_floor",
               gate_results=_gr(years_floor=" fail "))
     assert r["gate_results"]["years_floor"] == "FAIL"
-    assert "gate-results-inconsistent" not in r["flags"]
+    assert "gate-results-inconsistent" not in r["eval_issues"]
 
 
 def test_gate_fail_whose_named_gate_reads_pass_is_inconsistent():
     r = _norm(verdict="GATE_FAIL", failed_gate="years_floor", gate_results=_gr())
     assert r["verdict"] == "GATE_FAIL"
-    assert "gate-results-inconsistent" in r["flags"]
+    assert "gate-results-inconsistent" in r["eval_issues"]
 
 
 def test_gate_fail_naming_no_cause_anywhere_is_inconsistent():
@@ -204,35 +204,35 @@ def test_gate_fail_naming_no_cause_anywhere_is_inconsistent():
     # pointing at nothing. "other" exists precisely so a real non-named fail can say
     # so, which makes this shape unexplained rather than ambiguous.
     r = _norm(verdict="GATE_FAIL", gate_results=_gr())
-    assert "gate-results-inconsistent" in r["flags"]
+    assert "gate-results-inconsistent" in r["eval_issues"]
 
 
 def test_gate_fail_with_an_unnamed_explicit_fail_is_consistent():
     # failed_gate absent but a gate explicitly reads FAIL — the cause IS stated,
     # just not duplicated into failed_gate. Not the unexplained shape.
     r = _norm(verdict="GATE_FAIL", gate_results=_gr(work_auth="FAIL"))
-    assert "gate-results-inconsistent" not in r["flags"]
+    assert "gate-results-inconsistent" not in r["eval_issues"]
 
 
 def test_gate_fail_other_with_all_gates_passing_is_consistent():
     # The unmeetable-qualification rule fails OUTSIDE the six named gates: an
     # "other" failed_gate with six PASSes is the documented shape, not a conflict.
     r = _norm(verdict="GATE_FAIL", failed_gate="other", gate_results=_gr())
-    assert "gate-results-inconsistent" not in r["flags"]
+    assert "gate-results-inconsistent" not in r["eval_issues"]
 
 
 def test_pass_verdict_with_an_explicit_gate_fail_is_inconsistent_but_uncapped():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
               gate_results=_gr(employment_type="FAIL"))
     assert r["verdict"] == "PASS"          # flag, don't re-route
-    assert "gate-results-inconsistent" in r["flags"]
+    assert "gate-results-inconsistent" in r["eval_issues"]
 
 
 def test_gate_results_junk_value_reads_as_missing():
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
               gate_results=_gr(role_substance="N/A"))
     assert r["gate_results"]["role_substance"] is None
-    assert "gate-results-incomplete" in r["flags"]
+    assert "gate-results-incomplete" in r["eval_issues"]
 
 
 def test_gate_results_flags_are_idempotent_on_renormalize():
@@ -240,13 +240,27 @@ def test_gate_results_flags_are_idempotent_on_renormalize():
     # that normalizes then re-normalizes) must not stack duplicate diagnostics.
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3))
     evaluation.normalize_result(r)
-    assert r["flags"].count("gate-results-incomplete") == 1
+    assert r["eval_issues"].count("gate-results-incomplete") == 1
 
 
-def test_gate_results_preserves_existing_flags():
+def test_diagnostics_never_touch_the_role_flag_channel():
+    # `flags` is the model's free-text "what about this ROLE needs judgment" stream
+    # (76% of rows carry one, ~53k distinct phrasings). Contract diagnostics answer a
+    # different question — how much to trust the evaluation — and must stay out of it,
+    # in both directions: an incomplete gate table must not append to flags, and the
+    # model's own flags must survive untouched.
     r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
-              gate_results=_gr(), flags=["management-drift"])
+              flags=["management-drift"])          # gate_results absent -> an issue
     assert r["flags"] == ["management-drift"]
+    assert r["eval_issues"] == ["gate-results-incomplete"]
+
+
+def test_flags_left_alone_when_absent_or_malformed():
+    # Diagnostics no longer coerce `flags`, so a missing or non-list value from the
+    # model passes through as-is rather than being silently rewritten to a list.
+    assert "flags" not in _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3))
+    assert _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+                 flags="not-a-list")["flags"] == "not-a-list"
 
 
 # ----- deepseek_request_body: one definition of the production request shape -----

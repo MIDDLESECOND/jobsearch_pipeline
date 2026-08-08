@@ -50,6 +50,19 @@ changes to *how postings are judged* do.
 - `backtest_v2` is the enforcement point: an incomplete or self-contradictory gate table
   fails the case even when the verdict matched. Old `eval_json` rows lack the field and are
   unaffected (nothing re-reads them through the new path).
+- **Follow-up the same day — the contract findings live in `eval_issues`, not `flags`.**
+  Profiling the flag channel before designing its rendering showed it is not the tidy
+  token list it looks like: 76% of evaluated rows carry at least one flag, median two,
+  across **53,655 distinct phrasings**, and only **0.8%** of flag strings match a
+  guide-defined token — the rest is model prose. `flags` answers "what about this ROLE
+  needs human judgment"; a gate-table contract check answers "how much should you trust
+  this evaluation". Putting the second in the first read as one more caveat about the job
+  and would have been unfindable among the prose. `normalize_result` now writes an
+  `eval_issues` list and no longer touches `flags` at all (it previously also rewrote a
+  malformed `flags` value to `[]`, which was never its business). The report prints them
+  with the verdict, above the role's caveats; the web UI renders them under the verdict
+  line in a muted monospace style deliberately unlike a flag. Verified in the browser
+  against synthetic diagnostics — no live row has ever tripped the contract.
 - **Follow-up the same day — `failed_gate` enum now includes `"other"`.** Merging the
   unmeetable-stated-qualification rule into the production guide created a contradiction
   between the two halves of the prompt: the guide says log such a failure as `other`, while

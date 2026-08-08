@@ -153,9 +153,15 @@ def generate_report(cfg, conn, for_date=None):
         lines.append("*None today.*")
     for r in fails:
         ev = json.loads(r["eval_json"] or "{}")
+        # A contract diagnostic matters MOST here and was previously rendered only for
+        # gates-passed rows: a GATE_FAIL whose own gate table says everything passed may
+        # be a mis-rejected role, and a rejected role never surfaces anywhere else — the
+        # silent, irreversible direction of the judge's ~25% verdict instability.
+        issues = ev.get("eval_issues") or []
+        issue_tag = f" · 🔎 **{', '.join(issues)}** — verify before trusting this rejection" if issues else ""
         lines.append(
             f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)}: `{r['failed_gate']}` — "
-            f"{ev.get('gate_notes', '')} · [link]({r['job_url']})"
+            f"{ev.get('gate_notes', '')}{issue_tag} · [link]({r['job_url']})"
         )
     lines.append("")
 

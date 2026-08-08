@@ -61,8 +61,19 @@ changes to *how postings are judged* do.
   `eval_issues` list and no longer touches `flags` at all (it previously also rewrote a
   malformed `flags` value to `[]`, which was never its business). The report prints them
   with the verdict, above the role's caveats; the web UI renders them under the verdict
-  line in a muted monospace style deliberately unlike a flag. Verified in the browser
-  against synthetic diagnostics — no live row has ever tripped the contract.
+  line in a muted monospace style deliberately unlike a flag.
+- **Correction + first real catch.** The line above originally read "no live row has ever
+  tripped the contract" — measured wrong, because the completeness check was tested
+  before the causeless-`GATE_FAIL` check existed. Re-normalizing all 417 stored rows that
+  carry `gate_results` gives **3 trips (0.7%): 2 incomplete, 1 inconsistent**. The
+  inconsistent one is a genuine model error — an agentic-solutions engineering role
+  returned `GATE_FAIL` with `failed_gate: null` while its own gate table read six PASSes
+  and its own `one_line` said "all gates pass, but required depth is a generation ahead",
+  i.e. the textbook `ai_artifact_depth = 0` → RECRUITER_ONLY case. A wrong GATE_FAIL is
+  the irreversible direction of the judge's ~25% instability: rejected rows surface
+  nowhere, so the role simply vanishes. The gate-fail section of the report now carries
+  the diagnostic too — it previously rendered only for gates-passed rows, i.e. the
+  finding that matters most appeared exactly where it could not be seen.
 - **Follow-up the same day — `failed_gate` enum now includes `"other"`.** Merging the
   unmeetable-stated-qualification rule into the production guide created a contradiction
   between the two halves of the prompt: the guide says log such a failure as `other`, while

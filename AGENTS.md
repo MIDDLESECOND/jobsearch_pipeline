@@ -224,7 +224,15 @@ via Windows Task Scheduler.
   (`dupe_resolve` / `dupe_commit` / `dupe_unlink`) in `chain.py`; the guard/conflict logic lives
   there, not in either front-end. The Action Center's **Possible duplicates** queue is a separate,
   review-only discovery layer: it considers recent cross-source rows with exact normalized
-  company+title, shows both postings, and never links or skips anything automatically. Its API
+  company+title, shows both postings, and never links or decides anything automatically. It does
+  drop evidence in one bounded way: the blocking key deliberately omits location (cross-source
+  location strings rarely agree), so one requisition mass-posted across many cities becomes a full
+  cross product under a single key. A key yielding more than `dupe_candidates.MAX_BUCKET_PAIRS`
+  chain pairs is read as mass-posting rather than duplication and is dropped WHOLE — and its pairs
+  also stop being confirmable through this queue, since the eligibility check shares that map. The
+  page therefore returns `suppressed_keys`/`suppressed_pairs` and the section says so out loud;
+  never let a trimmed queue read as the complete population. The manual assertion paths (CLI
+  `dupe`, the UI's duplicate controls) are unaffected, so nothing becomes unlinkable. Its API
   serializes only the posting fields rendered by that comparison; it does not load or expose role
   contacts, tasks, application materials, interview details, or evaluation/decision card data. A confirmed
   pair goes through `dupe_candidates.confirm_candidate` and the same `dupe_resolve` /

@@ -255,7 +255,11 @@ root pair locally so it stays hidden. Ignored pairs remain available under **Rev
 can be restored. If another tab or a merge changes that review state first, the stale action is
 refused using the pair's persistent review version—even if the state changed away and back—and the
 queue refreshes instead of overwriting the newer judgment. No suggestion changes status, skips
-evaluation, or propagates a decision until you explicitly confirm the merge. The comparison API
+evaluation, or propagates a decision until you explicitly confirm the merge. One employer posting
+the same requisition across many cities would otherwise flood the queue with a cross product, so a
+company/title key that produces more than a few pairs is treated as mass-posting and dropped whole;
+the section header always reports how many pairs and keys were left out, and you can still link any
+of them by hand from the role cards. The comparison API
 returns only those visible posting fields; it does not read or return contacts, tasks, application
 materials, interview details, or evaluation/decision card data.
 

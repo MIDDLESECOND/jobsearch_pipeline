@@ -7,6 +7,30 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Duplicate suggestions drop mass-posted company/title keys (`MAX_BUCKET_PAIRS = 3`)
+
+- The Possible duplicates blocking key is company+title **without** location on purpose —
+  cross-source location strings rarely agree ("Grand Central, Manhattan" vs "New York, NY"), so
+  requiring them to match would defeat the queue. The cost: one requisition mass-posted across
+  many cities becomes a full LinkedIn × Adzuna cross product under a single key. One
+  `deloitte | microsoft dynamics senior consultant…` key alone yielded 792 pairs, and the ten
+  largest keys were 26% of the queue.
+- A key producing more than `MAX_BUCKET_PAIRS` chain pairs is now read as evidence of
+  mass-posting rather than of duplication and is dropped **whole**. Dropped pairs also stop being
+  confirmable through this queue (the eligibility check shares the same map); the manual
+  assertion paths — CLI `dupe`, the UI's duplicate controls — are untouched, so nothing becomes
+  unlinkable.
+- `query_candidate_page` returns `suppressed_keys`/`suppressed_pairs` and the Action Center
+  section appends them to its description, so a trimmed queue is never presented as the complete
+  population.
+- **Measured on the real DB at 3**: 2,486 pairs shown, 8,054 pairs across 358 keys suppressed —
+  **76% of the candidate population**. That is a much wider cut than the "ten largest keys = 26%"
+  observation that motivated the threshold. Left at 3 deliberately (mass-posting really is that
+  common here, and the counts are visible rather than silent), but the number is recorded so the
+  threshold can be revisited against evidence rather than intuition.
+
+---
+
 ## 2026-08-07 — recruiter_route becomes a channel-finding worklist (RO ≥15 · 14d · clears on contact)
 
 - Diagnosis: the RECRUITER_ONLY bucket was effectively untouched (8,659 evaluated rows, 38 ever

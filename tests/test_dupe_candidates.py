@@ -73,6 +73,53 @@ def test_candidate_page_collapses_physical_matches_to_one_current_chain_pair(con
     assert _pair_urls(pair) == {"left-relist", "right-root"}
 
 
+def test_mass_posted_company_title_key_is_dropped_whole_and_counted(conn):
+    """One requisition posted across many cities must not bury real suggestions.
+
+    The blocking key has no location, so a mass-posting employer yields a full
+    LinkedIn x Adzuna cross product under a single key.  Past MAX_BUCKET_PAIRS the key
+    carries no duplication signal, so it is dropped entirely -- and reported, never
+    silently trimmed.
+    """
+    # 2 x 2 = 4 cross-source pairs: one over the cap, so the whole key goes.
+    for i, (source, city) in enumerate([("linkedin", "Chicago, IL"),
+                                        ("linkedin", "Atlanta, GA"),
+                                        ("adzuna", "Chicago"),
+                                        ("adzuna", "Atlanta")]):
+        make_job(conn, job_url=f"mass-{i}", company="MassCo", title="Dynamics Consultant",
+                 location=city, source=source, first_seen="2026-08-02T09:00:00")
+    # 3 x 1 = 3 pairs: exactly at the cap, so the key is kept.
+    for i, (source, city) in enumerate([("linkedin", "Boston, MA"),
+                                        ("linkedin", "Austin, TX"),
+                                        ("linkedin", "Denver, CO"),
+                                        ("adzuna", "Boston")]):
+        make_job(conn, job_url=f"small-{i}", company="SmallCo", title="Data Analyst",
+                 location=city, source=source, first_seen="2026-08-03T09:00:00")
+
+    page = dupe_candidates.query_candidate_page(conn, page=1, page_size=50, today=TODAY)
+
+    assert page["total"] == 3
+    assert all(pair["left_root"].startswith("small-") for pair in page["pairs"])
+    assert page["suppressed_keys"] == 1
+    assert page["suppressed_pairs"] == 4
+
+
+def test_suppressed_key_pairs_are_not_confirmable_through_the_queue(conn):
+    """The queue's eligibility gate and its listing must agree on what was dropped."""
+    for i, (source, city) in enumerate([("linkedin", "Chicago, IL"),
+                                        ("linkedin", "Atlanta, GA"),
+                                        ("adzuna", "Chicago"),
+                                        ("adzuna", "Atlanta")]):
+        make_job(conn, job_url=f"mass-{i}", company="MassCo", title="Dynamics Consultant",
+                 location=city, source=source, first_seen="2026-08-02T09:00:00")
+
+    with pytest.raises(ValueError, match="no longer an eligible duplicate suggestion"):
+        dupe_candidates.set_candidate_dismissed(
+            conn, "mass-0", "mass-2", True, expected_roots=["mass-0", "mass-2"],
+            expected_dismissed=False, expected_review_version=0, today=TODAY,
+        )
+
+
 def test_candidate_window_includes_45_day_gap_but_excludes_46_days_and_future(conn):
     make_job(conn, job_url="anchor", company="Boundary", title="Analyst",
              source="linkedin", first_seen="2026-06-22T09:00:00")

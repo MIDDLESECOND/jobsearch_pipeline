@@ -18,6 +18,14 @@ from chain import dupe_commit, dupe_resolve, resolve_posting
 LOOKBACK_DAYS = 120
 MAX_PAIR_GAP_DAYS = 45
 MAX_PAGE_SIZE = 200
+# The blocking key is company+title WITHOUT location, on purpose: cross-source location
+# strings rarely agree ("Grand Central, Manhattan" vs "New York, NY"), so requiring them to
+# match would defeat the whole point.  The cost is that one employer posting one requisition
+# across many cities produces a full LinkedIn x Adzuna cross product under a single key.
+# Observed: one "deloitte | microsoft dynamics senior consultant..." key alone yielded 792
+# pairs, and the 10 largest keys were 26% of the entire queue.  Past this many pairs a key is
+# evidence of mass-posting rather than of duplication, so the whole key is dropped.
+MAX_BUCKET_PAIRS = 3
 
 
 def _seen_date(row):
@@ -39,7 +47,11 @@ def _expected_root_pair(value):
 
 
 def _candidate_map(conn, today):
-    """Return the best physical evidence pair for each eligible current-chain pair."""
+    """Return the eligible pairs plus the counts suppressed as mass-posting keys.
+
+    Returns ``(pairs_by_roots, suppression)``; ``suppression`` carries the dropped key and
+    pair counts so no caller can present a trimmed queue as a complete one.
+    """
     cutoff = (today - timedelta(days=LOOKBACK_DAYS - 1)).isoformat()
     rows = conn.execute(
         "SELECT job_url,repost_of,source,norm_company,norm_title,fingerprint,first_seen "
@@ -55,7 +67,10 @@ def _candidate_map(conn, today):
             buckets[(row["norm_company"], row["norm_title"])].append((row, seen))
 
     chosen = {}
+    suppressed_keys = 0
+    suppressed_pairs = 0
     for entries in buckets.values():
+        bucket = {}
         for (a, a_seen), (b, b_seen) in combinations(entries, 2):
             a_root, b_root = _root(a), _root(b)
             if a_root == b_root or a["source"] == b["source"]:
@@ -76,8 +91,8 @@ def _candidate_map(conn, today):
             # closest in time, then equal normalized location, then the newest evidence.
             rank = (gap, 0 if same_location else 1, -newest.toordinal(),
                     left["job_url"], right["job_url"])
-            if roots not in chosen or rank < chosen[roots][0]:
-                chosen[roots] = (rank, {
+            if roots not in bucket or rank < bucket[roots][0]:
+                bucket[roots] = (rank, {
                     "left_root": roots[0],
                     "right_root": roots[1],
                     "left": left,
@@ -88,7 +103,20 @@ def _candidate_map(conn, today):
                     "dismissed_at": None,
                     "review_version": 0,
                 })
-    return {roots: value[1] for roots, value in chosen.items()}
+        # Suppressed pairs deliberately stop being confirmable through this queue too: the
+        # eligibility check below shares this map.  The manual assertion path is unaffected
+        # (CLI ``dupe``, the UI's "duplicate" controls), so nothing becomes unlinkable.
+        if len(bucket) > MAX_BUCKET_PAIRS:
+            suppressed_keys += 1
+            suppressed_pairs += len(bucket)
+            continue
+        # One chain pair can sit under two keys when a member's normalized title drifted, so
+        # keep merging across keys by the same rank rather than overwriting blindly.
+        for roots, value in bucket.items():
+            if roots not in chosen or value[0] < chosen[roots][0]:
+                chosen[roots] = value
+    return ({roots: value[1] for roots, value in chosen.items()},
+            {"keys": suppressed_keys, "pairs": suppressed_pairs})
 
 
 def _hydrate_pairs(conn, pairs):
@@ -112,7 +140,7 @@ def _hydrate_pairs(conn, pairs):
 
 
 def _all_candidates(conn, today):
-    candidates = _candidate_map(conn, today)
+    candidates, suppression = _candidate_map(conn, today)
     reviews = {
         (row["left_root"], row["right_root"]): row
         for row in conn.execute(
@@ -127,7 +155,7 @@ def _all_candidates(conn, today):
             pair["dismissed_at"] = (
                 review["dismissed_at"] if review["dismissed"] else None
             )
-    return list(candidates.values())
+    return list(candidates.values()), suppression
 
 
 def query_candidate_page(conn, *, page=1, page_size=50, today=None, dismissed=False):
@@ -145,7 +173,7 @@ def query_candidate_page(conn, *, page=1, page_size=50, today=None, dismissed=Fa
     if not isinstance(dismissed, bool):
         raise ValueError("dismissed must be a boolean")
     today = today or date.today()
-    pairs = _all_candidates(conn, today)
+    pairs, suppression = _all_candidates(conn, today)
     dismissed_total = sum(pair["dismissed_at"] is not None for pair in pairs)
     pairs = [pair for pair in pairs
              if (pair["dismissed_at"] is not None) == dismissed]
@@ -165,6 +193,8 @@ def query_candidate_page(conn, *, page=1, page_size=50, today=None, dismissed=Fa
         "page_size": page_size,
         "pages": math.ceil(total / page_size) if total else 0,
         "dismissed_total": dismissed_total,
+        "suppressed_keys": suppression["keys"],
+        "suppressed_pairs": suppression["pairs"],
     }
 
 
@@ -203,7 +233,7 @@ def set_candidate_dismissed(conn, left_url, right_url, dismissed, *,
             raise ValueError(
                 "duplicate chains changed since preview; refresh and review again"
             )
-        pair = _candidate_map(conn, today).get(roots)
+        pair = _candidate_map(conn, today)[0].get(roots)
         if pair is None:
             raise ValueError("no longer an eligible duplicate suggestion; refresh and retry")
         existing = conn.execute(

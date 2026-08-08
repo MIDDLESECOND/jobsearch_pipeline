@@ -494,6 +494,12 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         description = ("Previously reviewed pairs · restore to reconsider"
                        if dismissed else
                        "Cross-source · exact normalized company and title · confirm manually")
+        # A dropped mass-posting key is a real coverage gap, so say so rather than let the
+        # trimmed count read as the whole population.
+        if result.get("suppressed_pairs"):
+            description += (f" · {result['suppressed_pairs']} pair(s) across "
+                            f"{result['suppressed_keys']} mass-posted company/title key(s) "
+                            "not shown")
     elif section_id == "starred_roles":
         result = _starred_roles_page(conn, page=page, page_size=page_size)
         title = "Starred roles"

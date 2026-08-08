@@ -299,3 +299,47 @@ def test_wal_conversion_lock_loss_degrades_gracefully(tmp_path, monkeypatch, cap
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         conn.close()
+
+
+def test_eval_issues_column_is_added_and_backfilled_from_stored_json(tmp_path):
+    # A pre-v5 DB carries its contract diagnostics only inside eval_json. The column must be
+    # added additively and lifted ONCE from the stored blobs, so the review queue can find a
+    # flagged verdict with a column test rather than parsing every row on each read.
+    path = str(tmp_path / "prediag.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_jobs_ddl())
+    conn.execute(
+        "INSERT INTO jobs (job_url,title,status,verdict,eval_json) VALUES "
+        "('flagged','T','evaluated','GATE_FAIL',"
+        "'{\"eval_issues\": [\"gate-results-inconsistent\", \"gate-results-incomplete\"]}')")
+    conn.execute(
+        "INSERT INTO jobs (job_url,title,status,verdict,eval_json) VALUES "
+        "('clean','T','evaluated','PASS','{\"eval_issues\": []}')")
+    conn.execute(
+        "INSERT INTO jobs (job_url,title,status,verdict,eval_json) VALUES "
+        "('older','T','evaluated','PASS','{\"one_line\": \"predates the field\"}')")
+    conn.commit()
+    conn.close()
+
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        got = {r["job_url"]: r["eval_issues"] for r in conn.execute(
+            "SELECT job_url, eval_issues FROM jobs")}
+        assert got["flagged"] == "gate-results-inconsistent,gate-results-incomplete"
+        assert got["clean"] is None and got["older"] is None
+    finally:
+        conn.close()
+
+    # Re-opening must not re-run the scan or disturb a value the eval path has since written.
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        conn.execute("UPDATE jobs SET eval_issues='hand-set' WHERE job_url='clean'")
+        conn.commit()
+    finally:
+        conn.close()
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        assert conn.execute(
+            "SELECT eval_issues FROM jobs WHERE job_url='clean'").fetchone()[0] == "hand-set"
+    finally:
+        conn.close()

@@ -7,6 +7,41 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — Schema: `jobs.eval_issues`; flagged verdicts enter the attention queue
+
+- Audit of the contract diagnostics on real data. **Confirmed misroutes: 1** — the Micron
+  "Engineer, Agentic Solutions" row, whose own `gate_results` read six PASSes with
+  `failed_gate` NULL and `ai_artifact_depth` 0, i.e. the guide's canonical
+  depth-0 → RECRUITER_ONLY case, stored as a rejection. That is 1 of 208 GATE_FAIL rows
+  carrying `gate_results` (0.5%), and 1 flag across all 251 rows carrying `eval_issues`. The
+  check caught it the day it shipped.
+- **Two alarms that did NOT survive measurement**, recorded so they are not re-raised:
+  (a) the 72 GATE_FAILs with no named gate are not 72 suspected misjudgments — 71 predate
+  `gate_results` and are unknowable from stored evidence; (b) 6 rows showing "all six gates
+  PASS + GATE_FAIL" are not missed inconsistencies — every one carries `failed_gate='other'`,
+  which is deliberately outside the six-gate table, so an empty `eval_issues` is correct.
+  A third hypothesis — that the model routinely violates the agentic-depth disambiguation by
+  failing `tool_requirement` — also failed: of 29 such rejections mentioning agentic/MCP
+  language, reading the stored `gate_notes` shows ~9 of 10 sampled are exactly what the guide
+  sanctions (3 yrs GCP, 4+ yrs Terraform, 5+ yrs Informatica, TypeScript/Node, Java 17). The
+  keyword matched job-ad vocabulary, not the rejection's reasoning.
+- **`jobs.eval_issues`** (TEXT, comma-joined, NULL = clean) denormalizes the diagnostics out
+  of `eval_json`; the eval UPDATE is its one writer and an additive migration lifts existing
+  values once. Motive is purely read cost: the JSON predicate took 3,829 ms per Action Center
+  load on the real history versus 9 ms for a column. A PARTIAL `idx_eval_issues` keeps the
+  attention queue's OR against `status` on SQLite's MULTI-INDEX OR path — without it the OR
+  defeats `idx_status` and full-scans (230 ms). Measured after: 0.1 ms; the one-time
+  migration on the 293 MB database is 0.5 s.
+- Undecided flagged rows now appear in **Needs attention**. They had no other surface: a
+  GATE_FAIL row is in no queue and no backlog listing, and its NULL `fit_score` sorts it
+  below every scored row in the date view — the Micron row was on page 7 of 11 for its day.
+- **Deliberately not done: automatic re-routing.** Rewriting a self-contradicting GATE_FAIL
+  to RECRUITER_ONLY would trust the model's gate table over its own verdict on n=1 evidence,
+  in a judge with a measured ~18-25% verdict flip rate — automating a guess. The row is
+  surfaced for human judgment instead, and deciding it is the queue's exit.
+
+---
+
 ## 2026-08-07 — Duplicate suggestions drop mass-posted company/title keys (`MAX_BUCKET_PAIRS = 3`)
 
 - The Possible duplicates blocking key is company+title **without** location on purpose —

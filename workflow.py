@@ -304,7 +304,18 @@ def _followup_page(conn, *, page, page_size, today, followup_days, followup_max)
 
 
 def _attention_page(conn, *, page, page_size):
-    where = "j.status IN (?,?) AND j.filter_source IS NULL"
+    """Rows a human has to look at: evaluation failures, and stored verdicts whose own
+    contract diagnostics contradict them.
+
+    A flagged verdict is otherwise effectively unreachable.  A GATE_FAIL row enters no
+    Action Center queue and no backlog listing, and its fit_score is NULL so it sorts below
+    every scored row in the date view — the day the model rejected a role while its own gate
+    table said every gate passed, that row was on page 7 of 11.  Surfacing it here is
+    deliberately review, not re-routing: the verdict is left exactly as stored, and the card
+    leaves once the user decides the role.
+    """
+    where = ("j.filter_source IS NULL AND (j.status IN (?,?) "
+             "OR (j.eval_issues IS NOT NULL AND j.app_status IS NULL))")
     params = (STATUS_ERROR, STATUS_NEEDS_MANUAL)
     total = conn.execute("SELECT COUNT(*) FROM jobs j WHERE " + where, params).fetchone()[0]
     offset = (page - 1) * page_size
@@ -533,7 +544,8 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
     else:
         result = _attention_page(conn, page=page, page_size=page_size)
         title = "Needs attention"
-        description = "Evaluation errors or postings with no retrieved description"
+        description = ("Evaluation errors, postings with no retrieved description, "
+                       "or a stored verdict its own gate table contradicts")
 
     return {**result, "id": section_id, "title": title, "description": description}
 

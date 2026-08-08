@@ -392,6 +392,19 @@ via Windows Task Scheduler.
   Target-attempt detail is response-bounded; each run returns its full attempt count and an explicit
   truncation flag so an omitted tail is never presented as complete.
 
+- **A flagged verdict is reviewed, never re-routed.** `normalize_result`'s contract
+  diagnostics are denormalized onto `jobs.eval_issues` (comma-joined, NULL = clean; the eval
+  UPDATE in `evaluation.py` is the ONE writer, and a one-time migration lifts the values that
+  already sat inside `eval_json`). The column exists for one reason: testing the JSON on the
+  real history cost 3.8s per Action Center load against 9ms for a column, and the partial
+  `idx_eval_issues` keeps the attention queue's OR on the MULTI-INDEX OR path instead of a
+  full scan. Undecided flagged rows join `needs_attention`, because they have no other
+  surface — a GATE_FAIL row enters no queue and no backlog listing, and its NULL `fit_score`
+  sorts it below every scored row in the date view. Surfacing is deliberately NOT a verdict
+  change: when the model contradicts itself, auto-trusting its gate table over its verdict
+  would build automatic re-routing on an output already known to be unstable. The user
+  decides; deciding the role is the queue's exit.
+
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system
   prompt. To change *how postings are judged*, edit those markdown files — do not hardcode judgment

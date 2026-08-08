@@ -523,6 +523,11 @@ over-aggressive rule can't silently bury good jobs.
   the terminal (or reboot before the scheduled task runs).
 - **Evaluation errors in report**: usually transient API issues; those rows stay in
   status `error` and are listed in the report so you can review them manually.
+- **A rejection the model argued against itself**: occasionally a posting comes back
+  GATE_FAIL while its own gate table shows every gate passing. Those rows are flagged and
+  join **Needs attention** in the Action Center, because a rejected posting otherwise appears
+  in no queue at all. The stored verdict is left alone — you decide whether the role was
+  really a miss, and deciding it clears the card.
 
 ## Cost
 

@@ -295,6 +295,39 @@ def test_has_contact_filter_is_backlog_only_and_boolean(conn):
         workflow.query_job_page(conn, "applied", filters={"has_contact": True})
 
 
+def test_attention_queue_surfaces_flagged_verdicts_without_re_routing_them(conn):
+    """A self-contradicting rejection has no other surface: GATE_FAIL rows enter no queue
+    and no backlog listing, so without this the diagnostic is report-only."""
+    flagged = make_job(conn, job_url="flagged", verdict="GATE_FAIL", failed_gate=None,
+                       fit_score=None, bucket=None,
+                       eval_issues="gate-results-inconsistent")
+    make_job(conn, job_url="clean-fail", verdict="GATE_FAIL", failed_gate="years_floor",
+             fit_score=None, bucket=None)
+    make_job(conn, job_url="broken", status="error", verdict=None, fit_score=None,
+             bucket=None)
+    make_job(conn, job_url="decided", verdict="GATE_FAIL", failed_gate=None, fit_score=None,
+             bucket=None, eval_issues="gate-results-inconsistent",
+             app_status="passed", status_date="2026-08-05")
+    make_job(conn, job_url="overridden", verdict="GATE_FAIL", fit_score=None, bucket=None,
+             eval_issues="gate-results-inconsistent", filter_source="rule:x")
+
+    page = workflow.query_action_page(conn, "needs_attention", page=1, page_size=10)
+    assert {r["job_url"] for r in page["rows"]} == {"flagged", "broken"}
+
+    # Review, not re-routing: the stored verdict is untouched, and the backlog still
+    # excludes the row because its verdict is what it always was.
+    assert conn.execute("SELECT verdict FROM jobs WHERE job_url='flagged'"
+                        ).fetchone()[0] == "GATE_FAIL"
+    backlog = workflow.query_job_page(conn, "backlog", page=1, page_size=50,
+                                      today=date(2026, 8, 5))
+    assert "flagged" not in {r["job_url"] for r in backlog["rows"]}
+
+    # Deciding the role is the exit.
+    chain.mark_posting(conn, flagged, "passed", "2026-08-05")
+    page = workflow.query_action_page(conn, "needs_attention", page=1, page_size=10)
+    assert {r["job_url"] for r in page["rows"]} == {"broken"}
+
+
 def test_route_cadence_values_are_validated(conn):
     """A half-written config key reads as None; it must fail loudly, not drop the bar."""
     import pytest

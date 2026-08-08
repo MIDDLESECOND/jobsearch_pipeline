@@ -394,6 +394,10 @@ def _jobs_table_sql(name, if_not_exists=False):
             fit_score    INTEGER,
             bucket       INTEGER, -- 1 | 2 | 3 (channel routing; null for gate fails)
             eval_json    TEXT,
+            eval_issues  TEXT,    -- comma-joined states-side contract diagnostics for this row's
+                                  -- own stored verdict (NULL = clean). Denormalized out of
+                                  -- eval_json so the review queue is a column test, not a scan
+                                  -- of every stored JSON blob; evaluation.py is the ONE writer.
             norm_company TEXT,    -- normalized company (suffix-stripped) for repost matching
             norm_title   TEXT,    -- normalized title (abbrevs expanded) for fuzzy matching
             fingerprint  TEXT,    -- blocking key: norm_company|norm_location
@@ -783,6 +787,12 @@ def get_db(cfg):
     # Every run stage and both repost-skip reconcile passes gate on status; without this the
     # reverse passes (and the per-click dupe sweeps in the web UI) full-scan the table.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs(status)")
+    # PARTIAL on purpose: a flagged verdict is rare (1 row in ~37k rejections), and the
+    # attention queue's OR against status would otherwise full-scan the table on every
+    # Action Center load. With this, SQLite takes the MULTI-INDEX OR path and the query
+    # drops from ~230ms to ~0ms on the real history.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_issues ON jobs(eval_issues) "
+                 "WHERE eval_issues IS NOT NULL")
     conn.commit()
     return conn
 
@@ -825,6 +835,10 @@ def _migrate(conn):
         ("outcome_date", "TEXT"),     # that event's event_date
         ("resume_variant", "TEXT"),   # free text: which resume went out (set at apply time)
         ("channel", "TEXT"),          # states.ALL_CHANNELS: direct | agency | referral (applied-only)
+        # Contract diagnostics for the row's own stored verdict, denormalized out of
+        # eval_json (v5). The review queue needs a cheap predicate: testing the JSON on the
+        # real history cost 3.8s per Action Center load versus 9ms for a column.
+        ("eval_issues", "TEXT"),      # comma-joined evaluation.normalize_result findings, or NULL
     ]
     added = False
     for col, decl in new_cols:
@@ -838,6 +852,18 @@ def _migrate(conn):
     if "source" not in cols:
         conn.execute("UPDATE jobs SET source='linkedin' WHERE source IS NULL")
         print("[migrate] backfilled jobs.source='linkedin' for existing rows")
+    # One-time lift of the diagnostics already sitting inside stored eval_json. Guarded by
+    # the column's absence exactly like source above: this scans every JSON blob, which is
+    # the cost the column exists to avoid paying on every read.
+    if "eval_issues" not in cols:
+        n = conn.execute(
+            "UPDATE jobs SET eval_issues=("
+            "SELECT group_concat(je.value,',') "
+            "FROM json_each(json_extract(jobs.eval_json,'$.eval_issues')) je) "
+            "WHERE json_valid(eval_json) "
+            "AND json_array_length(json_extract(eval_json,'$.eval_issues'))>0"
+        ).rowcount
+        print(f"[migrate] backfilled jobs.eval_issues for {n} row(s)")
     conn.commit()
     _migrate_applied_to_status(conn, cols)
     _rebuild_for_stale_checks(conn)

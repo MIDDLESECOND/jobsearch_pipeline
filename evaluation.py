@@ -465,9 +465,13 @@ def evaluate_new_jobs(cfg, conn):
             failed_gate = result.get("failed_gate")
             if failed_gate and failed_gate not in GATE_NAMES:
                 failed_gate = GATE_OTHER
+            # eval_issues is denormalized onto the row so the review queue can find a
+            # self-contradicting verdict with a column test instead of parsing every
+            # stored blob; this UPDATE is its only writer.
+            issues = ",".join(result.get("eval_issues") or []) or None
             conn.execute(
                 """UPDATE jobs SET status=?, verdict=?, failed_gate=?,
-                   fit_score=?, bucket=?, eval_json=? WHERE job_url=?""",
+                   fit_score=?, bucket=?, eval_json=?, eval_issues=? WHERE job_url=?""",
                 (
                     STATUS_EVALUATED,
                     verdict,
@@ -475,6 +479,7 @@ def evaluate_new_jobs(cfg, conn):
                     result.get("fit_score"),
                     result.get("bucket"),
                     json.dumps(result, ensure_ascii=False),
+                    issues,
                     job_url,
                 ),
             )

@@ -7,6 +7,28 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-07 — recruiter_route becomes a channel-finding worklist (RO ≥15 · 14d · clears on contact)
+
+- Diagnosis: the RECRUITER_ONLY bucket was effectively untouched (8,659 evaluated rows, 38 ever
+  decided, zero recorded contacts) — partly because the Action Center + contacts features only
+  landed 08-05/08-06, but also because the queue had no completion semantics: finding a channel
+  changed nothing on screen, and the 3-day `fresh_days` window modeled a freshness race that the
+  RO verdict's own premise (cold-applying is low-value) contradicts.
+- The **Route to a human** queue is re-scoped: undecided RECRUITER_ONLY chains, `fit_score >= 15`
+  (was 14 — re-aligned with the restored bar, see entry below), first seen in the last **14 days**
+  (was 3), **and no contact recorded on the current chain**. Recording a contact (any kind) is the
+  queue's completion event, mirroring tasks_due/interview_prep exit semantics; it never decides
+  the role — the chain stays in the Backlog where Draft outreach is the next step.
+- Mechanics: a `contact_roots` CTE joins `job_contacts` through each contact row's current chain
+  root (same read rule as `outreach.contact_summaries`), rides the single backlog candidate scan
+  (no per-row probes — pinned by a new query-bounds test), and is exposed as a backlog-only
+  `has_contact` filter key. Cadence is overridable via optional `recruiter_route_days` /
+  `recruiter_route_min_score` settings. Measured on the real DB at ship time: 90 rows in the
+  queue, today one per chain (90 distinct roots, 78 distinct normalized companies, fit 15-18,
+  window 07-25..08-07), Adzuna 46 of 90. The queue inherits the backlog view's row scoping, so a
+  `dupe`-linked cross-source pair — both members still `evaluated` — occupies two cards; that is
+  pre-existing and unchanged here. No automated people-lookup: finding the person stays manual.
+
 ## 2026-08-07 — Eval runs at `reasoning_effort: "low"` (was provider-default "high")
 
 - Discovered while pricing the 0731 cost jump: `_call_deepseek` never set a reasoning

@@ -101,3 +101,27 @@ def test_generate_report_query_count_is_bounded(conn, tmp_path):
         report.generate_report(cfg, conn, for_date="2026-06-15")
     # One SELECT for the day's rows + one batched effective_decisions chunk = ~2; allow slack.
     assert nq[0] <= 5, f"generate_report issued {nq[0]} queries — N+1 regression (should be ~2)"
+
+
+def test_recruiter_route_page_query_count_is_bounded(conn):
+    """The chain-has-a-contact fact rides the single candidate scan as a CTE join; a per-row
+    contact probe would issue ~one query per RECRUITER_ONLY chain."""
+    import outreach
+    import workflow
+    from datetime import date
+
+    for i in range(50):
+        make_job(conn, job_url=f"ro{i}", title=f"SA {i}", company=f"Co {i}",
+                 verdict="RECRUITER_ONLY", fit_score=15,
+                 first_seen="2026-08-04T00:00:00")
+    for i in range(0, 50, 10):
+        row = conn.execute("SELECT * FROM jobs WHERE job_url=?", (f"ro{i}",)).fetchone()
+        outreach.add_contact(conn, row, name=f"Contact {i}", kind="recruiter")
+
+    with count_queries(conn) as nq:
+        page = workflow.query_action_page(
+            conn, "recruiter_route", page=1, page_size=10, today=date(2026, 8, 5),
+        )
+    assert page["total"] == 45  # 5 contacted chains left the queue
+    # One candidate scan + one page hydration; allow slack for CTE bookkeeping.
+    assert nq[0] <= 4, f"recruiter_route issued {nq[0]} queries — per-row contact probe regression"

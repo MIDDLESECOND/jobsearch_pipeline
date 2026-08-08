@@ -29,11 +29,20 @@ ACTION_SECTION_IDS = ("fresh_strong", "recruiter_route", "possible_duplicates",
                       "starred_roles", "upcoming_interviews", "interview_prep", "tasks_due", "followups_due",
                       "needs_attention")
 _TRIAGE_VERDICTS = (VERDICT_PASS, VERDICT_RECRUITER_ONLY)
-_UNDECIDED_BACKLOG_CTE = (
-    "WITH decided_roots(root) AS ("
+_DECIDED_ROOTS_CTE = (
+    "decided_roots(root) AS ("
     "SELECT DISTINCT COALESCE(repost_of,job_url) FROM jobs "
-    "WHERE app_status IS NOT NULL OR filter_source IS NOT NULL) "
+    "WHERE app_status IS NOT NULL OR filter_source IS NOT NULL)"
 )
+# Chains with at least one recorded contact.  Contacts are canonical-keyed at write time
+# and may sit on a former canonical after a merge, so map each contact row through jobs
+# to its CURRENT root — same read rule as outreach.contact_summaries.
+_CONTACT_ROOTS_CTE = (
+    "contact_roots(root) AS ("
+    "SELECT DISTINCT COALESCE(k.repost_of,k.job_url) "
+    "FROM job_contacts c JOIN jobs k ON k.job_url=c.job_url)"
+)
+_UNDECIDED_BACKLOG_CTE = "WITH " + _DECIDED_ROOTS_CTE + " "
 
 
 def _like_literal(value):
@@ -99,6 +108,15 @@ def _where(view, for_date, filters, today):
         if view == "backlog":
             clauses.append("j.fit_score>=?")
             params.append(min_score)
+
+    has_contact = filters.get("has_contact")
+    if has_contact is not None:
+        if not isinstance(has_contact, bool):
+            raise ValueError("has_contact must be a boolean")
+        if view != "backlog":
+            # A chain-level fact applied via a CTE only the backlog scan attaches;
+            # refusing elsewhere keeps the filter vocabulary honest.
+            raise ValueError("has_contact filter applies only to the backlog view")
 
     days = filters.get("days")
     if days is not None:
@@ -166,11 +184,20 @@ def query_job_page(conn, view, *, for_date=None, page=1, page_size=DEFAULT_PAGE_
         # root is a COALESCE expression with no index; that made Action Center take tens of
         # seconds on the real history.  The CTE preserves the same stale-cache guard while
         # scanning the jobs table once.
+        has_contact = filters.get("has_contact")
+        cte, contact_join, contact_guard = _UNDECIDED_BACKLOG_CTE, "", ""
+        if has_contact is not None:
+            cte = "WITH " + _DECIDED_ROOTS_CTE + "," + _CONTACT_ROOTS_CTE + " "
+            contact_join = (" LEFT JOIN contact_roots cr "
+                            "ON cr.root=COALESCE(j.repost_of,j.job_url)")
+            contact_guard = (" AND cr.root IS NOT NULL" if has_contact
+                             else " AND cr.root IS NULL")
         candidates = conn.execute(
-            _UNDECIDED_BACKLOG_CTE
+            cte
             + "SELECT j.job_url,j.fit_score,j.date_posted,j.first_seen FROM jobs j "
-            "LEFT JOIN decided_roots d ON d.root=COALESCE(j.repost_of,j.job_url) WHERE "
-            + where + " AND d.root IS NULL", tuple(params)
+            "LEFT JOIN decided_roots d ON d.root=COALESCE(j.repost_of,j.job_url)"
+            + contact_join + " WHERE "
+            + where + " AND d.root IS NULL" + contact_guard, tuple(params)
         ).fetchall()
         ordered = sorted(candidates, key=recency_sort_key)
         total = len(ordered)
@@ -411,7 +438,8 @@ def _interview_prep_page(conn, *, page, page_size, today, prep_days=14):
 
 def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
                       today=None, fresh_days=3, followup_days=7,
-                      followup_max=FOLLOWUP_MAX, dismissed=False, now=None):
+                      followup_max=FOLLOWUP_MAX, dismissed=False, now=None,
+                      route_days=14, route_min_score=15):
     """Return one pageable Action Center section with its display metadata."""
     if section_id not in ACTION_SECTION_IDS:
         raise ValueError(f"section must be one of {list(ACTION_SECTION_IDS)}")
@@ -422,6 +450,14 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
     if fresh_days < 1 or followup_days < 1 or followup_max < 1:
         raise ValueError("action-center cadence values must be positive")
+    # Validated here, not only in _where: an omitted YAML value reads as None, and _where
+    # skips a None min_score entirely — which would silently drop this queue's score bar
+    # instead of failing loudly on a half-written config key.
+    if isinstance(route_days, bool) or not isinstance(route_days, int) or route_days < 1:
+        raise ValueError("route_days must be a positive integer")
+    if (isinstance(route_min_score, bool) or not isinstance(route_min_score, int)
+            or not 0 <= route_min_score <= 18):
+        raise ValueError("route_min_score must be an integer from 0 to 18")
     today = today or date.today()
     now = now or datetime.now(timezone.utc)
 
@@ -434,14 +470,18 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
         title = "Fresh strong matches"
         description = f"PASS · score 16+ · last {fresh_days} calendar days"
     elif section_id == "recruiter_route":
+        # A channel-finding worklist, not a freshness race: the RO verdict's premise is
+        # that cold-applying is low-value, so the queue runs on its own wider cadence and
+        # a recorded contact — the work's completion evidence — is what clears a card.
         result = query_job_page(
             conn, "backlog", page=page, page_size=page_size,
-            filters={"verdict": VERDICT_RECRUITER_ONLY, "min_score": 14,
-                     "days": fresh_days},
+            filters={"verdict": VERDICT_RECRUITER_ONLY, "min_score": route_min_score,
+                     "days": route_days, "has_contact": False},
             today=today,
         )
         title = "Route to a human"
-        description = f"Recruiter-only · score 14+ · last {fresh_days} calendar days"
+        description = (f"Recruiter-only · score {route_min_score}+ · last {route_days} "
+                       "calendar days · exits once a contact is recorded")
     elif section_id == "possible_duplicates":
         result = query_candidate_page(
             conn, page=page, page_size=page_size, today=today,
@@ -493,7 +533,8 @@ def query_action_page(conn, section_id, *, page=1, page_size=DEFAULT_PAGE_SIZE,
 
 
 def action_center(conn, *, today=None, fresh_days=3, followup_days=7,
-                  limit=DEFAULT_ACTION_LIMIT, now=None):
+                  limit=DEFAULT_ACTION_LIMIT, now=None,
+                  route_days=14, route_min_score=15):
     """Return the small work queues that answer "what needs me now?".
 
     Rows remain ordinary jobs rows.  app.api_actions adds the shared chain/card fields;
@@ -507,5 +548,5 @@ def action_center(conn, *, today=None, fresh_days=3, followup_days=7,
     return [query_action_page(
         conn, section_id, page=1, page_size=limit, today=today,
         fresh_days=fresh_days, followup_days=followup_days,
-        now=now,
+        now=now, route_days=route_days, route_min_score=route_min_score,
     ) for section_id in ACTION_SECTION_IDS]

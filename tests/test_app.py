@@ -550,6 +550,26 @@ def test_action_section_api_is_paged(client, seed):
     assert len(got["items"]) == 1
 
 
+def test_recruiter_route_exits_after_contact_recorded(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="route-me", verdict="RECRUITER_ONLY", fit_score=15,
+             first_seen=f"{today}T09:00:00")
+
+    before = client.get("/api/actions/recruiter_route").get_json()
+    assert [i["job_url"] for i in before["items"]] == ["route-me"]
+
+    response = _post(client, "/api/contacts", {
+        "job_url": "route-me", "name": "Rex Cruiter", "kind": "recruiter",
+    })
+    assert response.status_code == 200 and response.get_json()["ok"] is True
+
+    after = client.get("/api/actions/recruiter_route").get_json()
+    assert after["total"] == 0 and after["items"] == []
+    # Leaving the queue is not a hidden decision: the chain stays in the backlog.
+    backlog = client.get("/api/jobs?view=backlog&page=1&page_size=50").get_json()
+    assert "route-me" in [i["job_url"] for i in backlog["items"]]
+
+
 def test_interview_schedule_api_card_queue_and_ics(client, seed):
     today = date.today()
     row = make_job(seed, job_url="applied", title="AI Lead", company="Acme",

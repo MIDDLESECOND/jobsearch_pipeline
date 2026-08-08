@@ -36,6 +36,13 @@ settings:
   # the button labels itself after the URL ("Send to Claude" / "Send to ChatGPT" / …). Leave
   # blank to just copy without opening a tab. Uses your chat subscription, not an API key.
   feedback_project_url: ""
+  # Optional Action Center cadence for "Route to a human" (RECRUITER_ONLY roles). That queue
+  # is a channel-finding worklist: undecided recruiter-only chains at/above the score bar,
+  # inside the window, with no recorded contact yet — recording a contact clears the card.
+  # Wider than fresh_strong's 3 days on purpose: channel-finding is batch work, not a
+  # freshness race. Keep min_score aligned with the evaluation guide's bar.
+  # recruiter_route_days: 14
+  # recruiter_route_min_score: 15
   # Optional second source: the Adzuna API. Active only for searches that define an `adzuna:`
   # block (see below), and only if ADZUNA_APP_ID / ADZUNA_APP_KEY are set (register free at
   # https://developer.adzuna.com/, then `setx ADZUNA_APP_ID ...` / `setx ADZUNA_APP_KEY ...`).

@@ -224,7 +224,11 @@ click does exactly what the matching CLI command does — including repost-chain
 opening **Action Center** groups fresh strong matches, recruiter-route candidates, upcoming
 scheduled interviews, recent screens/interviews needing preparation, possible cross-source
 duplicates, user-defined next actions that are due, applications due for follow-up, and evaluation
-errors.
+errors. **Route to a human** is a channel-finding worklist: undecided recruiter-only roles at
+score 15+ from the last 14 days whose duplicate chain has no recorded contact yet. Find a recruiter or referral
+in your own browser, record them with the card's **Add contact** button, and the card clears —
+the role itself stays undecided in the Backlog, where **Draft outreach** is the natural next step.
+Both knobs are optional config keys (`recruiter_route_days` / `recruiter_route_min_score`).
 Use **Add role** for a posting found outside the configured sources. Choose the configured search
 track whose salary floor should apply, then paste its http(s) URL, title, company, and any available
 location, posted date, salary, and JD text. The app stores it locally as

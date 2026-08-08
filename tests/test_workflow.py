@@ -201,6 +201,111 @@ def test_starred_roles_queue_is_chain_scoped_and_paged(conn):
     assert page["rows"][0]["starred_at"]
 
 
+def test_recruiter_route_requires_missing_contact_and_uses_own_window(conn):
+    import outreach
+
+    make_job(conn, job_url="needs-channel", verdict="RECRUITER_ONLY", fit_score=15,
+             first_seen="2026-08-04T10:00:00")
+    make_job(conn, job_url="older-window", verdict="RECRUITER_ONLY", fit_score=15,
+             first_seen="2026-07-26T10:00:00")
+    make_job(conn, job_url="contacted", verdict="RECRUITER_ONLY", fit_score=16,
+             first_seen="2026-08-04T11:00:00")
+    relist = make_job(conn, job_url="contacted-relist", repost_of="contacted")
+    make_job(conn, job_url="below-bar", verdict="RECRUITER_ONLY", fit_score=14,
+             first_seen="2026-08-04T12:00:00")
+    make_job(conn, job_url="strong-pass", verdict="PASS", fit_score=17,
+             first_seen="2026-08-04T13:00:00")
+    # add_contact keys the row to the chain's canonical, so recording against a relisting
+    # still clears the canonical's card.
+    outreach.add_contact(conn, relist, name="Rex Cruiter", kind="recruiter")
+
+    page = workflow.query_action_page(
+        conn, "recruiter_route", page=1, page_size=10, today=date(2026, 8, 5),
+    )
+    assert page["title"] == "Route to a human"
+    assert "contact" in page["description"]
+    assert {r["job_url"] for r in page["rows"]} == {"needs-channel", "older-window"}
+
+    # Queue exit is not a hidden decision: the contacted chain stays in the backlog.
+    backlog = workflow.query_job_page(
+        conn, "backlog", page=1, page_size=50, today=date(2026, 8, 5),
+    )
+    assert "contacted" in {r["job_url"] for r in backlog["rows"]}
+
+    # The cadence is tunable per call.
+    narrow = workflow.query_action_page(
+        conn, "recruiter_route", page=1, page_size=10, today=date(2026, 8, 5),
+        route_days=3, route_min_score=14,
+    )
+    assert {r["job_url"] for r in narrow["rows"]} == {"needs-channel", "below-bar"}
+
+
+def test_recruiter_route_reads_contacts_through_the_current_chain_root(conn):
+    """A contact written before a merge must still clear the chain it now belongs to.
+
+    outreach.add_contact keys the row to the canonical AT WRITE TIME, so a later merge can
+    leave that URL sitting on a repost.  Reading job_contacts.job_url directly would leave
+    both members in the queue; the CTE has to map through each contact's CURRENT root.
+    """
+    import outreach
+
+    make_job(conn, job_url="earlier", company="Acme", location="New York, NY",
+             title="Solutions Architect", verdict="RECRUITER_ONLY", fit_score=15,
+             first_seen="2026-08-04T09:00:00", source="linkedin")
+    later = make_job(conn, job_url="later", company="Acme", location="Manhattan, NY",
+                     title="Solutions Architect", verdict="RECRUITER_ONLY", fit_score=15,
+                     first_seen="2026-08-04T10:00:00", source="adzuna")
+    outreach.add_contact(conn, later, name="Rex Cruiter", kind="recruiter")
+    assert conn.execute("SELECT job_url FROM job_contacts").fetchone()[0] == "later"
+
+    page = workflow.query_action_page(
+        conn, "recruiter_route", page=1, page_size=10, today=date(2026, 8, 5))
+    assert [r["job_url"] for r in page["rows"]] == ["earlier"]
+
+    # The merge makes "later" a repost, so its contact row now sits on a non-root URL.
+    plan, error = chain.dupe_resolve(conn, "later", "earlier")
+    assert error is None
+    chain.dupe_commit(conn, plan)
+
+    page = workflow.query_action_page(
+        conn, "recruiter_route", page=1, page_size=10, today=date(2026, 8, 5))
+    assert page["total"] == 0 and page["rows"] == []
+
+
+def test_has_contact_filter_is_backlog_only_and_boolean(conn):
+    import outreach
+    import pytest
+
+    plain = make_job(conn, job_url="plain", fit_score=15,
+                     first_seen="2026-08-04T09:00:00")
+    known = make_job(conn, job_url="known", company="Other Co", fit_score=15,
+                     first_seen="2026-08-04T10:00:00")
+    outreach.add_contact(conn, known, name="Rex Cruiter", kind="recruiter")
+    assert plain["job_url"] == "plain"
+
+    for wanted, expected in ((True, {"known"}), (False, {"plain"})):
+        page = workflow.query_job_page(
+            conn, "backlog", page=1, page_size=50, today=date(2026, 8, 5),
+            filters={"has_contact": wanted})
+        assert {r["job_url"] for r in page["rows"]} == expected
+
+    with pytest.raises(ValueError):
+        workflow.query_job_page(conn, "backlog", filters={"has_contact": 1})
+    with pytest.raises(ValueError):
+        workflow.query_job_page(conn, "applied", filters={"has_contact": True})
+
+
+def test_route_cadence_values_are_validated(conn):
+    """A half-written config key reads as None; it must fail loudly, not drop the bar."""
+    import pytest
+
+    for bad in ({"route_min_score": None}, {"route_min_score": "15"},
+                {"route_min_score": 19}, {"route_days": None},
+                {"route_days": 14.5}, {"route_days": 0}):
+        with pytest.raises(ValueError):
+            workflow.query_action_page(conn, "recruiter_route", **bad)
+
+
 def test_action_center_includes_pageable_possible_duplicates(conn):
     today = date.today().isoformat()
     make_job(conn, job_url="li", company="Same Co", title="Data Analyst",

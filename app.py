@@ -386,13 +386,29 @@ def api_jobs():
         conn.close()
 
 
+def _route_cadence(cfg):
+    """Optional config overrides for the recruiter_route worklist cadence.
+
+    Both routes serving the Action Center must read the same values, or a section's
+    "View all" would page a different queue than the front page shows.
+    """
+    settings = cfg["settings"]
+    return {
+        "route_days": settings.get("recruiter_route_days", 14),
+        "route_min_score": settings.get("recruiter_route_min_score", 15),
+    }
+
+
 @app.route("/api/actions")
 def api_actions():
     cfg = load_config()
     cap = cfg["settings"]["max_description_chars"]
     conn = connect_db(cfg)
     try:
-        sections = action_center(conn)
+        try:
+            sections = action_center(conn, **_route_cadence(cfg))
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "message": str(e)}), 400
         payload = [_action_section_payload(conn, section, cap)
                    for section in sections]
         return jsonify({"sections": payload})
@@ -415,7 +431,7 @@ def api_action_section(section_id):
                 raise ValueError("dismissed must be 0 or 1")
             section = query_action_page(
                 conn, section_id, page=page, page_size=page_size,
-                dismissed=dismissed_raw == "1",
+                dismissed=dismissed_raw == "1", **_route_cadence(cfg),
             )
         except (TypeError, ValueError) as e:
             return jsonify({"ok": False, "message": str(e)}), 400

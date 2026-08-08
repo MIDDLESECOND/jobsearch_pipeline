@@ -2,16 +2,19 @@
 # pyright: reportAttributeAccessIssue=false
 """Does lowering DeepSeek V4 Flash's reasoning effort change judgment, or only cost?
 
-Production `_call_deepseek` sends no `reasoning_effort`, so every eval runs at the
-provider default (thinking enabled, effort "high") — and the 0731 build made high-effort
-thinking ~2.5x more verbose, which is most of the eval bill. This probe sends the SAME
-postings through three effort conditions and compares verdicts against the measured
-noise floor, exactly like guide_size_probe.py (same SEED, same stratification, same
-majority-vote reading — results are cross-comparable between the two probes):
+V4-Flash defaults to thinking-on at effort "high", and until 2026-08-07 production sent
+no `reasoning_effort` at all — so every eval bought maximum-depth reasoning, which the
+0731 build then made ~2.5x more verbose. That is most of the eval bill. This probe sends
+the SAME postings through three explicitly-named effort tiers and compares verdicts
+against the measured noise floor, exactly like guide_size_probe.py (same SEED, same
+stratification, same majority-vote reading — results are cross-comparable):
 
-  high  — request body identical to production today (no effort parameter)
-  low   — "reasoning_effort": "low"
+  high  — "reasoning_effort": "high"   (the provider default; production before 08-07)
+  low   — "reasoning_effort": "low"    (production since 08-07, chosen from this probe)
   none  — "thinking": {"type": "disabled"}  (no reasoning phase at all)
+
+Every tier is spelled out rather than described relative to production, because
+"whatever production sends" is a moving target — see the CONDITIONS comment.
 
 External evidence says thinking is neutral-to-harmful for rubric-judge tasks with
 precision constraints (VERT arXiv:2604.03376; constraint-level splits arXiv:2606.09662),
@@ -52,16 +55,17 @@ import evaluation
 RESULTS_DIR = Path(__file__).with_name("results")
 SEED = 20260807            # same seed as guide_size_probe -> same 18 postings
 SHORT_DESC = 1500
-MAX_TOKENS = 16000
 TIMEOUT = 300
 
-# Request-body deltas per condition. "high" stays empty on purpose: it must remain
-# byte-identical to what production sends today, not an explicit spelling of the
-# documented default.
+# Overrides applied to evaluation.deepseek_request_body — every tier is spelled
+# EXPLICITLY. An earlier version left "high" as {} to mean "whatever production
+# sends"; production then moved to low and that column would have measured low
+# while labelling it high, i.e. reported the two tiers identical.
 CONDITIONS = {
-    "high": {},
+    "high": {"reasoning_effort": "high"},
     "low": {"reasoning_effort": "low"},
-    "none": {"thinking": {"type": "disabled"}},
+    # None deletes the key, so this sends no effort at all beside thinking-disabled.
+    "none": {"thinking": {"type": "disabled"}, "reasoning_effort": None},
 }
 
 
@@ -92,13 +96,8 @@ def call(api_key, model, system_prompt, user_msg, extra):
         r = httpx.post(
             "https://api.deepseek.com/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": system_prompt},
-                             {"role": "user", "content": user_msg}],
-                **extra,
-            },
+            json=evaluation.deepseek_request_body(
+                model, system_prompt, user_msg, **extra),
             timeout=TIMEOUT,
         )
         r.raise_for_status()

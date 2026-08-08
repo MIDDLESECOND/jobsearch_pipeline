@@ -249,6 +249,45 @@ def test_gate_results_preserves_existing_flags():
     assert r["flags"] == ["management-drift"]
 
 
+# ----- deepseek_request_body: one definition of the production request shape -----
+# Four validation probes each hand-copied this dict and every copy silently became a
+# different experiment when production moved (2026-08-07: a probe measured the wrong
+# reasoning tier; a comparison column would have benchmarked the incumbent at a tier
+# it doesn't run; an effort probe's "high" column would have measured low).
+
+def _body(**overrides):
+    return evaluation.deepseek_request_body("m", "SYS", "USER", **overrides)
+
+
+def test_request_body_carries_the_production_settings():
+    b = _body()
+    assert b["reasoning_effort"] == evaluation.DEEPSEEK_EFFORT
+    assert b["max_tokens"] == 16000
+    assert b["temperature"] == 0
+    assert b["response_format"] == {"type": "json_object"}
+    assert [m["role"] for m in b["messages"]] == ["system", "user"]
+    assert b["messages"][0]["content"] == "SYS"
+    assert b["messages"][1]["content"] == "USER"
+
+
+def test_request_body_override_replaces_a_key():
+    assert _body(reasoning_effort="high")["reasoning_effort"] == "high"
+
+
+def test_request_body_none_override_deletes_a_key():
+    # How a caller says "send no effort at all" — e.g. beside thinking-disabled.
+    b = _body(thinking={"type": "disabled"}, reasoning_effort=None)
+    assert "reasoning_effort" not in b
+    assert b["thinking"] == {"type": "disabled"}
+
+
+def test_request_body_is_not_shared_between_calls():
+    # A mutated body must not leak into the next request.
+    a = _body()
+    a["messages"].append({"role": "user", "content": "leak"})
+    assert len(_body()["messages"]) == 2
+
+
 # ----- retryable-vs-fatal error classification + the error-row requeue -----------
 
 class _HttpxStyleError(Exception):

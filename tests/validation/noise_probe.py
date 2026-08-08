@@ -51,15 +51,14 @@ import core
 import evaluation
 
 RESULTS_DIR = Path(__file__).with_name("results")
-MAX_TOKENS = 16000
 TIMEOUT = 300
+# Overrides applied to evaluation.deepseek_request_body. "prod" is empty because the
+# builder IS production's shape — nothing here can drift when production moves.
 EFFORT_BODY = {
-    # "prod" mirrors _call_deepseek BY REFERENCE — a hardcoded copy here measured
-    # the wrong tier within minutes of the production effort changing.
-    "prod": {"reasoning_effort": evaluation.DEEPSEEK_EFFORT},
+    "prod": {},
     "high": {"reasoning_effort": "high"},
     "low": {"reasoning_effort": "low"},
-    "none": {"thinking": {"type": "disabled"}},
+    "none": {"thinking": {"type": "disabled"}, "reasoning_effort": None},
 }
 
 
@@ -68,13 +67,8 @@ def call(api_key, model, system_prompt, user_msg, extra):
         r = httpx.post(
             "https://api.deepseek.com/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": system_prompt},
-                             {"role": "user", "content": user_msg}],
-                **extra,
-            },
+            json=evaluation.deepseek_request_body(
+                model, system_prompt, user_msg, **extra),
             timeout=TIMEOUT,
         )
         r.raise_for_status()

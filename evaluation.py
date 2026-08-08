@@ -249,6 +249,34 @@ def _call_anthropic(client, model, system_prompt, user_msg):
 DEEPSEEK_EFFORT = "low"
 
 
+def deepseek_request_body(model, system_prompt, user_msg, **overrides):
+    """The ONE definition of the production DeepSeek request body.
+
+    Every validation probe compares something against "what production does", so each
+    one needs this shape — and each hand-copied version silently became a different
+    experiment the moment production moved. That happened three times on 2026-08-07
+    alone (a probe measured the wrong reasoning tier for ten minutes; a model-comparison
+    column would have benchmarked the incumbent at a tier it doesn't run; an effort
+    probe's "high" column, written as an empty override back when production sent no
+    effort at all, would have quietly measured low and reported the two tiers
+    identical). Call this instead of rebuilding the dict.
+
+    `overrides` replaces top-level keys; an override of None DELETES its key, which is
+    how a caller expresses "send no reasoning_effort at all" (e.g. alongside a
+    thinking-disabled body)."""
+    body = {
+        "model": model,
+        "max_tokens": 16000,
+        "temperature": 0,
+        "reasoning_effort": DEEPSEEK_EFFORT,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": system_prompt},
+                     {"role": "user", "content": user_msg}],
+    }
+    body.update(overrides)
+    return {k: v for k, v in body.items() if v is not None}
+
+
 def _call_deepseek(api_key, model, system_prompt, user_msg):
     """Return (text, fresh_in_tok, out_tok, cache_read_tok, cache_write_tok).
     V4 is a reasoning model — it thinks before the JSON answer, so max_tokens must
@@ -268,13 +296,7 @@ def _call_deepseek(api_key, model, system_prompt, user_msg):
     r = httpx.post(
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model, "max_tokens": 16000, "temperature": 0,
-            "reasoning_effort": DEEPSEEK_EFFORT,
-            "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": system_prompt},
-                         {"role": "user", "content": user_msg}],
-        },
+        json=deepseek_request_body(model, system_prompt, user_msg),
         timeout=180,
     )
     r.raise_for_status()

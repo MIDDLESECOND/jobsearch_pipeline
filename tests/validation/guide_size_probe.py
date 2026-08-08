@@ -53,7 +53,6 @@ LEAN_GUIDE = Path(__file__).with_name("guide_lean.local.md")
 RESULTS_DIR = Path(__file__).with_name("results")
 SEED = 20260807
 SHORT_DESC = 1500          # chars; below this a posting is a truncated snippet
-MAX_TOKENS = 16000
 TIMEOUT = 300
 
 
@@ -104,15 +103,9 @@ def call(api_key, model, system_prompt, user_msg):
         r = httpx.post(
             "https://api.deepseek.com/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                # Mirror production's reasoning depth by reference, so a re-run
-                # measures the guide against the tier the pipeline actually uses.
-                "model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
-                "reasoning_effort": evaluation.DEEPSEEK_EFFORT,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": system_prompt},
-                             {"role": "user", "content": user_msg}],
-            },
+            # Production's exact request shape by reference: the variable under test
+            # here is the GUIDE, so everything else must track the pipeline.
+            json=evaluation.deepseek_request_body(model, system_prompt, user_msg),
             timeout=TIMEOUT,
         )
         r.raise_for_status()

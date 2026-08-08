@@ -76,31 +76,13 @@ def call_deepseek(model, user_msg, extra=None):
     r = httpx.post(
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {DS_KEY}"},
-        json={
-            # V4 is a reasoning model — it thinks before the JSON answer, and 1200
-            # truncates mid-reasoning -> empty answer. Matches evaluation._call_deepseek's
-            # 16000 (the 0731 build's tail overruns 8000); a lower cap here would score
-            # flash's truncations against other models' complete answers.
-            "model": model, "max_tokens": 16000, "temperature": 0,
-            # Mirror production's reasoning depth BY REFERENCE. DeepSeek's own
-            # default is "high"; production runs low (2026-08-07), and a comparison
-            # that benchmarks the incumbent at a tier it doesn't actually run is
-            # answering the wrong question — the incumbent's cost, scale, and
-            # empty-answer rate all move with this dial.
-            "reasoning_effort": evaluation.DEEPSEEK_EFFORT,
-            # Force valid JSON — DeepSeek (esp. the reasoning-style pro) otherwise
-            # wraps the answer in prose. This is how you'd call it in production.
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": user_msg},
-            ],
-            # extra LAST so a MODELS column can override the defaults above — this
-            # is what makes a controlled same-model pair (e.g. flash low vs high)
-            # expressible; call_openai already did this and this arm silently
-            # dropped it, so any deepseek column carrying extras was a no-op.
-            **(extra or {}),
-        },
+        # Production's exact request shape by reference (max_tokens, temperature,
+        # reasoning depth, JSON mode) — a comparison that benchmarks the incumbent at
+        # settings it does not actually run answers the wrong question. `extra` from a
+        # MODELS column overrides, which is what makes a controlled same-model pair
+        # (e.g. flash low vs high) expressible; this arm used to drop `extra` silently
+        # while call_openai splatted it.
+        json=evaluation.deepseek_request_body(model, SYSTEM, user_msg, **(extra or {})),
         timeout=120,
     )
     r.raise_for_status()

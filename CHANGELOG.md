@@ -9,15 +9,27 @@ changes to *how postings are judged* do.
 
 ## 2026-08-07 — Schema: `jobs.eval_issues`; flagged verdicts enter the attention queue
 
-- Audit of the contract diagnostics on real data. **Confirmed misroutes: 1** — the Micron
-  "Engineer, Agentic Solutions" row, whose own `gate_results` read six PASSes with
-  `failed_gate` NULL and `ai_artifact_depth` 0, i.e. the guide's canonical
-  depth-0 → RECRUITER_ONLY case, stored as a rejection. That is 1 of 208 GATE_FAIL rows
-  carrying `gate_results` (0.5%), and 1 flag across all 251 rows carrying `eval_issues`. The
-  check caught it the day it shipped.
+- Audit of the contract diagnostics on real data. The live `gate_results` check flags **1**
+  row — Micron "Engineer, Agentic Solutions", six PASSes with `failed_gate` NULL and
+  `ai_artifact_depth` 0, the guide's canonical depth-0 → RECRUITER_ONLY case stored as a
+  rejection (1 of 208 GATE_FAIL rows carrying `gate_results`, 0.5%). It caught that the day
+  it shipped.
+- **A second signature reaches the whole history**, and it is the larger number. The guide
+  scores fit ONLY when every gate passes ("if ANY gate fails, stop — do not score fit"), so a
+  rejection still carrying a complete `score_breakdown` contradicts itself just as loudly —
+  and that needs no `gate_results`. `tests/validation/audit_causeless_gate_fails.py` splits
+  the 72 no-named-gate rejections into **21 scored-yet-rejected** (11 of them
+  `ai_artifact_depth` 0; their own `one_line` text says "pursue via recruiter or referral,
+  not cold application"), **43 unevaluable-input** (truncated/missing posting text — no gate
+  was ever tested, so these are a fetch problem sitting in the rejected pile instead of
+  `needs_manual`), and 8 unlabelled but genuinely-reasoned rejections. The scored-yet-rejected
+  dates cluster hard on the drift window: 9 on 07-31, 6 on 08-01, 2 on 08-02. Named targets
+  include PwC AI Engineer, Google Forward Deployed Engineer GenAI, Deloitte FDE Frontier
+  GenAI, Accenture Applied AI Engineer, EY AI Cybersecurity Architect.
+  (An earlier draft of this entry said those rows were "unknowable from stored evidence" —
+  wrong: the gate table was missing, the contradiction was not.)
 - **Two alarms that did NOT survive measurement**, recorded so they are not re-raised:
-  (a) the 72 GATE_FAILs with no named gate are not 72 suspected misjudgments — 71 predate
-  `gate_results` and are unknowable from stored evidence; (b) 6 rows showing "all six gates
+  (a) 6 rows showing "all six gates
   PASS + GATE_FAIL" are not missed inconsistencies — every one carries `failed_gate='other'`,
   which is deliberately outside the six-gate table, so an empty `eval_issues` is correct.
   A third hypothesis — that the model routinely violates the agentic-depth disambiguation by

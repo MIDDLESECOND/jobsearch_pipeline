@@ -1206,7 +1206,7 @@ function card(j, actionSection = null) {
   // Rendered with the verdict, not with the flags: it qualifies the verdict's
   // trustworthiness rather than describing the role.
   const evalIssues = (j.eval_issues||[])
-    .map(i => `<div class="evalissue">🔎 eval contract: ${esc(i)}</div>`).join("");
+    .map(i => `<div class="evalissue">🔎 eval quality: ${esc(i)}</div>`).join("");
   const gateOpts = GATES.map(g => `<option value="${g}">${g}</option>`).join("");
 
   div.innerHTML = `

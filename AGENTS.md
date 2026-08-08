@@ -153,10 +153,14 @@ no `test_*.py` names there; all test/validation scripts, existing and future, be
 `python tests/validation/backtest_v2.py` (asserts expected verdicts on known postings — the
 eval-framework regression guard; the script is committed, its cases live in
 `tests/validation/backtest_cases.local.json`, gitignored because they name real postings — the
-same split as `boundary_cases.local.json`) and `python tests/validation/compare_models.py`
-(cross-model comparison). Every validation script writes its outputs to
+same split as `boundary_cases.local.json`), `python tests/validation/compare_models.py`
+(cross-model comparison), and the drift instruments: `noise_probe.py` (population verdict-flip
+rate) → `flip_consequence.py` (re-cuts a probe by action boundaries; the data behind
+`evaluation.ARBITRATION_BAND`) and `canary.py` (frozen-sentinel judge-drift watch —
+`--init` once, then scheduled via `run_canary.bat`, `--rebaseline` after an accepted judge
+change). Every validation script writes its outputs to
 `tests/validation/results/` (gitignored) — never the repo root. Scheduling is `run_pipeline.bat`
-via Windows Task Scheduler.
+(and optionally `run_canary.bat`) via Windows Task Scheduler.
 
 ## Architecture invariants (the non-obvious parts)
 
@@ -411,6 +415,24 @@ via Windows Task Scheduler.
   change: when the model contradicts itself, auto-trusting its gate table over its verdict
   would build automatic re-routing on an output already known to be unstable. The user
   decides; deciding the role is the queue's exit.
+
+- **Verdict noise is managed at the action boundary, not everywhere.** The temp-0 judge is
+  not deterministic (MoE serving noise): ~25% of postings flip verdict on a rerun but only
+  ~8% change the resulting *action* (measured by `tests/validation/flip_consequence.py` over
+  a `noise_probe.py` run — rerun both before moving the numbers). `evaluation.py` therefore
+  arbitrates only the band where flips bite: a first draw scored with fit inside
+  `ARBITRATION_BAND` (11–17, wrapping the fit≥13 cold-apply and fit≥15 recruiter-route bars)
+  gets `ARBITRATION_EXTRA_DRAWS` more draws and a majority vote. A strict majority replaces
+  the draw (the winning draw is kept whole — never averaged); no majority keeps the
+  production draw and surfaces `eval_issues='arbitration-split'` into Needs attention —
+  review, never re-route. GATE_FAIL first draws are deliberately un-arbitrated (measured:
+  covering them costs a 73% fire rate for +6pp catch). The evidence lives in the
+  `arbitration` block inside `eval_json`. Provider-build drift (the 0731 silent swap) is a
+  SEPARATE problem arbitration cannot fix: `tests/validation/canary.py` re-evaluates a
+  frozen 24-sentinel set against a stored baseline and alerts on agreement/fit-mean/token
+  shifts; run it weekly (Task Scheduler) and `--rebaseline` only after accepting a judge
+  change (new model, new guide) — a canary alert triggers investigation
+  (`noise_probe.py`, `backtest_v2.py`), never an automatic verdict change.
 
 - **The evaluator's "brain" is external data, not code.** `profile.md` (candidate facts) and
   `evaluation_guide.md` (the gate/scoring framework) are read at runtime and embedded in the system

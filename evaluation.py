@@ -13,6 +13,7 @@ import math
 import re
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
@@ -189,6 +190,15 @@ def normalize_result(result):
         # same dict must not stack duplicates.
         if name not in issues:
             issues.append(name)
+
+    # Derived from the arbitration evidence block _evaluate_one attaches, so this
+    # stays true under re-normalization (_write_result normalizes again and rebuilds
+    # `issues` from scratch — an issue appended anywhere else would be wiped). A split
+    # (k draws with no majority verdict) is surfaced for review, never auto-rerouted,
+    # same policy as the gate-contract findings below.
+    arb = result.get("arbitration")
+    if isinstance(arb, dict) and arb.get("split"):
+        _issue("arbitration-split")
 
     if any(v is None for v in norm_gr.values()):
         _issue("gate-results-incomplete")
@@ -374,10 +384,82 @@ def build_user_msg(row):
     )
 
 
+# Boundary-band arbitration (2026-08-08). The temp-0 judge is not deterministic
+# (MoE serving noise): flip_consequence.py over the 08-07 noise probe measured 25%
+# of evaluated postings changing VERDICT on a rerun, but only 8% changing ACTION —
+# cold-apply triage reads PASS at fit>=13, the recruiter_route queue reads
+# RECRUITER_ONLY at fit>=15 (its default bar), everything else is un-acted-on. A
+# first draw landing scored inside this band triggers ARBITRATION_EXTRA_DRAWS more
+# and a majority vote: fires on ~20% of draws, catches ~87% of action flips, costs
+# ~$0.03 per 100 postings on the DEFAULT DeepSeek provider (input is cache-hit, so
+# it is ~all output tokens) — on an Anthropic model the same 20% fire rate costs
+# ~25x that, so re-price this before switching providers, don't assume it stays
+# rounding-error. GATE_FAIL first draws are deliberately NOT arbitrated —
+# covering that leak (the remaining ~13% of action flips) measured a 73% fire rate
+# for +6pp catch. Rerun tests/validation/flip_consequence.py before moving the band.
+ARBITRATION_BAND = (11, 17)
+ARBITRATION_EXTRA_DRAWS = 2
+
+
+def needs_arbitration(result):
+    """Trigger predicate over a NORMALIZED result: scored verdict, finite fit
+    inside the band. Same bool/NaN discipline as the depth cap — a malformed fit
+    must not arbitrate (it routed fail-closed already)."""
+    if result.get("verdict") not in (VERDICT_PASS, VERDICT_RECRUITER_ONLY):
+        return False
+    f = result.get("fit_score")
+    return (isinstance(f, (int, float)) and not isinstance(f, bool)
+            and math.isfinite(f) and ARBITRATION_BAND[0] <= f <= ARBITRATION_BAND[1])
+
+
+def arbitrate(draws):
+    """Majority vote over >=1 NORMALIZED draws; draws[0] is the production draw.
+    A strict-majority verdict wins and the winning draw closest below the winners'
+    median fit is kept whole (score_breakdown stays consistent with fit_score —
+    never a synthetic average). No strict majority (a 3-way split, or 1-1 when an
+    extra draw failed) keeps draws[0]'s verdict and marks the result
+    `arbitration.split` — normalize_result surfaces that as an eval_issue for
+    review, it never re-routes. Returns the chosen draw with the evidence block
+    attached; pure, no I/O."""
+    counts = Counter(d["verdict"] for d in draws)
+    top, top_n = counts.most_common(1)[0]
+    split = top_n <= len(draws) // 2
+    verdict = draws[0]["verdict"] if split else top
+    winners = [d for d in draws if d["verdict"] == verdict]
+
+    def _fit_key(d):
+        # Only draws[0]'s fit was type-checked (by needs_arbitration); an extra
+        # draw's is whatever the model emitted. Sort unusable fits last on a
+        # SEPARATE key component so the comparison never mixes types — a bare
+        # (is_none, fit) key raises TypeError on str-vs-int and would discard all
+        # three already-paid draws by crashing the worker.
+        f = d.get("fit_score")
+        ok = (isinstance(f, (int, float)) and not isinstance(f, bool)
+              and math.isfinite(f))
+        return (0, f) if ok else (1, 0)
+
+    winners.sort(key=_fit_key)
+    chosen = winners[(len(winners) - 1) // 2]
+    chosen["arbitration"] = {
+        "k": len(draws), "split": split,
+        "overrode_first": draws[0]["verdict"] != verdict,
+        "draws": [{"verdict": d["verdict"], "fit_score": d.get("fit_score"),
+                   "bucket": d.get("bucket")} for d in draws],
+    }
+    return chosen
+
+
+def _provider_call(provider, client, api_key, model, system_prompt, user_msg):
+    if provider == "anthropic":
+        return _call_anthropic(client, model, system_prompt, user_msg)
+    return _call_deepseek(api_key, model, system_prompt, user_msg)
+
+
 def _evaluate_one(row, provider, model, system_prompt, client, api_key):
     """Pure worker (no DB access): build the message, call the provider with the same
-    3-attempt backoff, parse. Returns (job_url, result_or_None, in, out, cache_read,
-    cache_write) with token counts summed across attempts — identical to the serial
+    3-attempt backoff, parse, then boundary-band arbitrate (see ARBITRATION_BAND).
+    Returns (job_url, result_or_None, in, out, cache_read, cache_write) with token
+    counts summed across attempts and arbitration draws — identical to the serial
     tally, but off the main thread so calls overlap. All DB writes stay in
     evaluate_new_jobs on the main thread (a sqlite3 conn isn't safe across threads)."""
     user_msg = build_user_msg(row)
@@ -385,10 +467,8 @@ def _evaluate_one(row, provider, model, system_prompt, client, api_key):
     result = None
     for attempt in range(3):
         try:
-            if provider == "anthropic":
-                text, a_in, a_out, a_cr, a_cw = _call_anthropic(client, model, system_prompt, user_msg)
-            else:
-                text, a_in, a_out, a_cr, a_cw = _call_deepseek(api_key, model, system_prompt, user_msg)
+            text, a_in, a_out, a_cr, a_cw = _provider_call(
+                provider, client, api_key, model, system_prompt, user_msg)
             tin += a_in
             cr += a_cr
             cw += a_cw
@@ -406,6 +486,38 @@ def _evaluate_one(row, provider, model, system_prompt, client, api_key):
             wait = 5 * (attempt + 1)
             print(f"[eval] attempt {attempt+1} failed ({e}); retry in {wait}s", file=sys.stderr)
             time.sleep(wait)
+    if result is None:
+        return row["job_url"], None, tin, tout, cr, cw
+
+    # The trigger reads the NORMALIZED routing (post-caps verdict); _write_result's
+    # later normalize_result call is idempotent on an already-normalized dict.
+    normalize_result(result)
+    if needs_arbitration(result):
+        draws = [result]
+        for _ in range(ARBITRATION_EXTRA_DRAWS):
+            # One attempt per extra draw, no backoff: the first draw just proved the
+            # provider healthy, and arbitrate() degrades honestly to fewer draws
+            # (2 that disagree = split, surfaced for review).
+            try:
+                text, a_in, a_out, a_cr, a_cw = _provider_call(
+                    provider, client, api_key, model, system_prompt, user_msg)
+                tin += a_in
+                cr += a_cr
+                cw += a_cw
+                tout += a_out
+                draws.append(normalize_result(parse_eval_json(text)))
+            except Exception as e:
+                if _http_status(e) in (401, 403):
+                    # Follows the established auth contract (abort the batch; the
+                    # row stays 'new' and re-evaluates untouched next run) at the
+                    # cost of discarding this row's already-paid first draw — a
+                    # bounded loss of at most `concurrency` draws, taken so a dead
+                    # key can't be silently absorbed by degraded arbitration.
+                    raise EvalAuthError(
+                        f"{provider} rejected the API key mid-arbitration: {e}") from e
+                print(f"[eval] arbitration draw failed ({e}); "
+                      f"voting with {len(draws)}", file=sys.stderr)
+        result = arbitrate(draws)
     return row["job_url"], result, tin, tout, cr, cw
 
 
@@ -445,6 +557,7 @@ def evaluate_new_jobs(cfg, conn):
           f"(concurrency={concurrency})")
 
     usage_in = usage_cache_write = usage_cache_read = usage_out = 0
+    arb_n = arb_override = arb_split = 0
 
     # Empty-description rows never hit the API — mark and skip on the main thread.
     todo = []
@@ -517,6 +630,11 @@ def evaluate_new_jobs(cfg, conn):
                 usage_cache_read += cr
                 usage_cache_write += cw
                 usage_out += tout
+                arb = result.get("arbitration") if result else None
+                if isinstance(arb, dict):
+                    arb_n += 1
+                    arb_override += bool(arb.get("overrode_first"))
+                    arb_split += bool(arb.get("split"))
                 for attempt in (1, 2):
                     try:
                         _write_result(job_url, result)
@@ -551,7 +669,10 @@ def evaluate_new_jobs(cfg, conn):
         (usage_in + usage_cache_read * 0.1 + usage_cache_write * 1.25) * price_in
         + usage_out * price_out
     )
+    arb_note = (f" | arbitrated {arb_n} ({arb_override} overridden, {arb_split} split)"
+                if arb_n else "")
     print(
         f"[eval] done | tokens: {usage_in} in, {usage_cache_read} cache-read, "
         f"{usage_cache_write} cache-write, {usage_out} out | est. cost ${cost:.2f}"
+        f"{arb_note}"
     )

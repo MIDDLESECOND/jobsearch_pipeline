@@ -413,7 +413,7 @@ def _render_scored_job(r, dec, now=None):
     # Evaluation-quality diagnostics ride WITH the verdict, above the role's own
     # caveats: they qualify how much to trust this card, not what the job is like.
     for iss in ev.get("eval_issues") or []:
-        out.append(f"- 🔎 eval contract: {iss}")
+        out.append(f"- 🔎 eval quality: {iss}")
     out.append(f"- {ev.get('one_line', '')}")
     bd = ev.get("score_breakdown") or {}
     if bd:

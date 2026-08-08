@@ -7,6 +7,47 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-08 — boundary-band arbitration: majority vote where a flip would change an action
+
+- **The flip problem was re-cut by consequence before building anything.** The new
+  `tests/validation/flip_consequence.py` re-reads the 08-07 noise probe by ACTION boundaries
+  (cold-apply = PASS & fit≥13, recruiter-route = RECRUITER_ONLY & fit≥15): **25%** of
+  evaluated postings flip *verdict* on a temp-0 rerun (Wilson 95% 16–37%), but only
+  **8%** (5/60, CI 4–18%) change what the user would *do*. The other 17% is verdict/
+  visibility churn on rows no action touches.
+- **`evaluation.py` now arbitrates the boundary band.** A first draw landing scored with
+  fit 11–17 (`ARBITRATION_BAND`) triggers 2 more draws and a majority vote: measured
+  **fire ~20%** of draws, **catch ~87%** of action flips, ~$0.03 per 100 postings (input
+  is cache-hit; cost is all output tokens). A strict majority replaces the first draw with
+  the winning draw closest below the winners' median fit — the draw is kept WHOLE, so
+  `score_breakdown` stays consistent with `fit_score`; the losing draws are recorded in an
+  `arbitration` evidence block inside `eval_json`.
+- **No majority = no re-route.** A 3-way split (or 1-1 when an extra draw fails) keeps the
+  production draw and surfaces `eval_issues='arbitration-split'` into **Needs attention** —
+  same review-not-reroute policy as the gate-contract diagnostics. GATE_FAIL first draws
+  are deliberately NOT arbitrated: covering that leak (the remaining ~13% of action flips)
+  measured a 73% fire rate for +6pp catch.
+- **Silent-swap watch is now scheduled measurement, not annual archaeology.** The new
+  `tests/validation/canary.py` freezes 24 sentinel postings (8 per verdict class, inputs
+  copied into `canary_set.local.json` at init so pruning can't mutate them), re-evaluates
+  them with the exact production request body, appends to `results/canary_history.jsonl`,
+  and alerts (exit 2) on: verdict agreement vs baseline <60%, |paired fit delta| >1.2
+  (postings scored in BOTH runs; 0731-scale drift was −1.3), token-median ratio outside
+  0.6–1.6× (0731 was ×2.8), or >10% bad draws (0731 went 0→50-100 retries/day). An alert
+  is a signal to run `noise_probe.py`/`backtest_v2.py`, not proof by itself.
+- **The instrument's own first alert was a calibration bug, kept as a lesson.** Two runs
+  30 minutes apart tripped the v1 thresholds (67% agreement vs a <70% floor; −2.88 on
+  *unpaired* fit means). Both were artifacts: the floor had been set from the *population*
+  noise floor (~86% pairwise), but the stratified 8/8/8 set is boundary-heavy — per-class
+  pairwise agreement is GATE_FAIL 0.85 / PASS 0.83 / RECRUITER_ONLY 0.67, stratified
+  expectation ~0.78, 2σ lower bound ~0.61 — and unpaired means mix in composition shift
+  when postings flip in/out of the scored set (the paired delta was −0.88, inside noise).
+  Thresholds are now calibrated to the set, the fit alert is paired-only, per-class
+  agreement is always printed, and `--recheck` re-compares the last entry offline so
+  threshold work costs nothing.
+
+---
+
 ## 2026-08-07 — 20 pre-`gate_results` rejections flagged for review; the 07-31 step change
 
 - The "scored yet rejected" signature was **falsification-tested before use**: if scoring

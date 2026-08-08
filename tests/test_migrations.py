@@ -391,3 +391,32 @@ def test_scored_yet_rejected_rows_are_flagged_once_and_precisely(tmp_path):
                             ).fetchone()[0] is None
     finally:
         conn.close()
+
+
+def test_stale_check_rebuild_carries_eval_issues(tmp_path):
+    # A stale-CHECK database derives the review flag and THEN rebuilds the table, both in
+    # the same open. If the rebuild dropped the column or its index, the flag would vanish
+    # the moment it was written and the row would silently leave the attention queue.
+    path = str(tmp_path / "stale_flag.db")
+    conn = sqlite3.connect(path)
+    status_ck = " CHECK (status IN (" + ", ".join(f"'{s}'" for s in _OLD_STATUSES) + "))"
+    verdict_ck = " CHECK (verdict IN (" + ", ".join(f"'{v}'" for v in _OLD_VERDICTS) + "))"
+    conn.execute(_jobs_ddl(status_ck, verdict_ck))
+    conn.execute(
+        "INSERT INTO jobs (job_url,title,status,verdict,failed_gate,eval_json) VALUES "
+        "('s','T','evaluated','GATE_FAIL',NULL,"
+        '\'{"score_breakdown": {"a":2,"b":2,"c":2,"d":2,"e":2,"ai_artifact_depth":0}}\')')
+    conn.commit()
+    conn.close()
+
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        row = conn.execute(
+            "SELECT eval_issues, verdict FROM jobs WHERE job_url='s'").fetchone()
+        assert row["eval_issues"] == "scored-yet-rejected"
+        assert row["verdict"] == "GATE_FAIL"      # flagging is review, not re-routing
+        idx = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")}
+        assert "idx_eval_issues" in idx           # the queue's predicate stays indexed
+    finally:
+        conn.close()

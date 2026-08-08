@@ -80,6 +80,19 @@ def sql_list(values):
 GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requirement",
               "work_auth", "employment_type"]
 
+# The escape hatch: a screen that cannot be cleared but that none of the six named gates
+# describes (the guide's unmeetable-stated-qualification rule — a stated experience
+# ceiling, an unsatisfiable precondition). Deliberately NOT a member of GATE_NAMES:
+# evaluation._write_result uses GATE_NAMES as the "is this one of the canonical six?"
+# test and coerces anything else to this value, so adding it there would make the
+# coercion a no-op and let a hallucinated gate name reach the DB verbatim.
+# GATE_NAMES_WITH_OTHER is the accepted-input vocabulary — what a human or the model may
+# SUPPLY — and it lived as a hand-copied `GATE_NAMES + ["other"]` in four modules
+# (the reject service core, the CLI's help text, the web UI's picker, and the eval
+# output spec) before being named here.
+GATE_OTHER = "other"
+GATE_NAMES_WITH_OTHER = GATE_NAMES + [GATE_OTHER]
+
 # Post-application outcome events (app_events.event_type). APP_EVENTS are the lifecycle
 # transitions — recording one requires the chain to be applied, and the LATEST one (by
 # event_date, insertion-order tiebreak) is cached chain-wide as jobs.outcome_status /

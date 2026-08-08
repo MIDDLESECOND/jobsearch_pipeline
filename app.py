@@ -49,7 +49,7 @@ from prep_library import (ENTRY_KINDS, MAX_LIBRARY_ENTRIES, archive_entry, confi
                           create_entry, list_entries, restore_entry, role_entry_choices,
                           set_role_link, update_entry)
 from report import BUCKET_LABELS, posting_age, recency_sort_key, score_band
-from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
+from states import (GATE_NAMES_WITH_OTHER, ALL_EVENTS, ALL_CHANNELS, STATUS_EVALUATED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_PASS,
                     VERDICT_RECRUITER_ONLY)
 from tasks import add_task, chain_tasks, change_task, task_counts, task_summaries
@@ -60,7 +60,7 @@ from workflow import DEFAULT_PAGE_SIZE, action_center, query_action_page, query_
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
 
-GATE_OPTIONS = GATE_NAMES + ["other"]
+GATE_OPTIONS = GATE_NAMES_WITH_OTHER
 
 
 @app.errorhandler(413)

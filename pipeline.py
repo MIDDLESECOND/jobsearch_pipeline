@@ -42,7 +42,7 @@ from datetime import date, datetime, timedelta
 # modules directly — do not re-export names here for them.
 from core import BASE_DIR, load_config, get_db, run_log, meta_get, meta_set
 from backup import BackupError, create_backup, verify_backup
-from states import (GATE_NAMES, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
+from states import (GATE_NAMES_WITH_OTHER, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
                     STATUS_SALARY_FILTERED)
 from chain import (
     skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
@@ -440,7 +440,7 @@ def main():
     ap.add_argument("--yes", action="store_true", help="`dupe`: skip the confirmation prompt")
     ap.add_argument("--undo", action="store_true", help="clear the status/override/link instead of setting it")
     ap.add_argument("--gate", default="other",
-                    help="hard gate a `reject` represents — one of: " + ", ".join(GATE_NAMES + ["other"]))
+                    help="hard gate a `reject` represents — one of: " + ", ".join(GATE_NAMES_WITH_OTHER))
     ap.add_argument("--pattern", help="`reject`: promote this pattern into filters.yaml (re: prefix = regex)")
     ap.add_argument("--note", help="`reject`: optional note stored with a new filter rule; "
                                    "`event`: free text stored with the event")

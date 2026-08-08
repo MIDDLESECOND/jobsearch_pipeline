@@ -24,7 +24,7 @@ import re
 import sys
 from datetime import date, datetime
 
-from states import (GATE_NAMES, APP_EVENTS, APPLIED_ONLY_EVENTS, ALL_EVENTS, EVENT_NOTE,
+from states import (GATE_NAMES_WITH_OTHER, APP_EVENTS, APPLIED_ONLY_EVENTS, ALL_EVENTS, EVENT_NOTE,
                     ALL_CHANNELS,
                     STATUS_NEW, STATUS_EVALUATED, STATUS_RULE_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, VERDICT_FAVOR, sql_list)
@@ -776,8 +776,8 @@ def reject_posting(conn, row, gate, undo=False):
         _reconcile_chain_skips(conn, row["repost_of"] or row["job_url"])
         exempt = _undo_exempt(conn, row, targets)
         return True, f"cleared override: {row['title']} — {row['company']}", sorted(targets), exempt
-    if gate not in GATE_NAMES + ["other"]:
-        return False, f"gate must be one of {GATE_NAMES + ['other']}", [], []
+    if gate not in GATE_NAMES_WITH_OTHER:
+        return False, f"gate must be one of {GATE_NAMES_WITH_OTHER}", [], []
     exempt = _forward_exempt(conn, row, targets)  # pre-state read
     today = date.today().isoformat()
     propagate_reject(conn, targets, gate, today, force_url=row["job_url"], overwrite_manual=True)

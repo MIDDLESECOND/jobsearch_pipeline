@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
-from states import (GATE_NAMES, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
+from states import (GATE_NAMES, GATE_OTHER, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
                     VERDICT_RECRUITER_ONLY, STATUS_NEW, STATUS_EVALUATED,
                     STATUS_NEEDS_MANUAL, STATUS_ERROR)
 
@@ -457,7 +457,7 @@ def evaluate_new_jobs(cfg, conn):
             verdict = result["verdict"]
             failed_gate = result.get("failed_gate")
             if failed_gate and failed_gate not in GATE_NAMES:
-                failed_gate = "other"
+                failed_gate = GATE_OTHER
             conn.execute(
                 """UPDATE jobs SET status=?, verdict=?, failed_gate=?,
                    fit_score=?, bucket=?, eval_json=? WHERE job_url=?""",

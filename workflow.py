@@ -183,7 +183,10 @@ def query_job_page(conn, view, *, for_date=None, page=1, page_size=DEFAULT_PAGE_
         # NOT EXISTS here turns into an O(candidate rows * all rows) scan because the chain
         # root is a COALESCE expression with no index; that made Action Center take tens of
         # seconds on the real history.  The CTE preserves the same stale-cache guard while
-        # scanning the jobs table once.
+        # scanning the jobs table once.  Both scans read INDEX-ONLY via idx_backlog_cover /
+        # idx_decided_cover (core.get_db): a column added to this candidates SELECT/WHERE
+        # or to the CTE must be added to its covering index too, or every row's TEXT
+        # overflow chain gets walked again (~700ms per queue on the real history).
         has_contact = filters.get("has_contact")
         cte, contact_join, contact_guard = _UNDECIDED_BACKLOG_CTE, "", ""
         if has_contact is not None:

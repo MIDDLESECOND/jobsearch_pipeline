@@ -7,6 +7,28 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-08 — covering indexes for the triage read paths (schema, no judgment change)
+
+- **Five covering indexes on `jobs`** (built in the `get_db` migration path, recreated after
+  a stale-CHECK rebuild like the existing three): `idx_backlog_cover`, `idx_decided_cover`,
+  `idx_applied_cover`, `idx_decision_pages`, and the expression-led `idx_first_seen_day`.
+  Root cause: every triage/worklist scan filters on columns stored *after* the two big TEXT
+  payloads (`description`, `eval_json`), so each scan walked every row's overflow chain —
+  200–700ms per Action Center queue on the 76k-row history, 3–4s per `/api/actions`, and the
+  web UI refetches that after **every** pass/reject click. Covering indexes make those scans
+  index-only: fresh_strong/recruiter_route 681ms → ~1ms, decided_roots CTE 243ms → ~1ms,
+  interview_prep/followups ~220ms → ~0ms, date view 331ms → ~17ms. The index comments and
+  the query sites (workflow.py, dupe_candidates.py) cross-reference each other: a column
+  added to one of those SELECT/WHEREs must be added to its index.
+- **`dupe_candidates._candidate_map` pushes the cross-source necessary condition into SQL**
+  (an `eligible` CTE keeps only company+title keys seen under >1 source in the window) and
+  iterates only cross-source pairs per key. Output is byte-identical on the real history
+  (2,548 pairs, 365/8,273 suppressed — verified old-vs-new before landing); the section
+  drops ~1.3s → ~0.4s, now dominated by the GROUP BY over the 76k-row window.
+- No verdicts, gates, scores, routing, or stored rows changed — read-path speed only.
+
+---
+
 ## 2026-08-08 — boundary-band arbitration: majority vote where a flip would change an action
 
 - **The flip problem was re-cut by consequence before building anything.** The new

@@ -46,34 +46,15 @@ def _expected_root_pair(value):
     return sorted(value)
 
 
-def _candidate_map(conn, today):
-    """Return the eligible pairs plus the counts suppressed as mass-posting keys.
+def _rank_cross_pairs(bucket, group_a, group_b):
+    """Rank every eligible pair between two same-key source groups into ``bucket``.
 
-    Returns ``(pairs_by_roots, suppression)``; ``suppression`` carries the dropped key and
-    pair counts so no caller can present a trimmed queue as a complete one.
+    Entries are ``(row, seen, root)`` triples; ``bucket`` keys are sorted root pairs and
+    values are ``(rank, pair_dict)`` with the smallest rank kept.
     """
-    cutoff = (today - timedelta(days=LOOKBACK_DAYS - 1)).isoformat()
-    rows = conn.execute(
-        "SELECT job_url,repost_of,source,norm_company,norm_title,fingerprint,first_seen "
-        "FROM jobs WHERE norm_company IS NOT NULL AND norm_company<>'' "
-        "AND norm_title IS NOT NULL AND norm_title<>'' "
-        "AND source IS NOT NULL AND source<>'' AND substr(first_seen,1,10)>=?",
-        (cutoff,),
-    ).fetchall()
-    buckets = defaultdict(list)
-    for row in rows:
-        seen = _seen_date(row)
-        if seen is not None and seen <= today:
-            buckets[(row["norm_company"], row["norm_title"])].append((row, seen))
-
-    chosen = {}
-    suppressed_keys = 0
-    suppressed_pairs = 0
-    for entries in buckets.values():
-        bucket = {}
-        for (a, a_seen), (b, b_seen) in combinations(entries, 2):
-            a_root, b_root = _root(a), _root(b)
-            if a_root == b_root or a["source"] == b["source"]:
+    for a, a_seen, a_root in group_a:
+        for b, b_seen, b_root in group_b:
+            if a_root == b_root:
                 continue
             gap = abs((a_seen - b_seen).days)
             if gap > MAX_PAIR_GAP_DAYS:
@@ -103,6 +84,61 @@ def _candidate_map(conn, today):
                     "dismissed_at": None,
                     "review_version": 0,
                 })
+
+
+def _candidate_map(conn, today):
+    """Return the eligible pairs plus the counts suppressed as mass-posting keys.
+
+    Returns ``(pairs_by_roots, suppression)``; ``suppression`` carries the dropped key and
+    pair counts so no caller can present a trimmed queue as a complete one.
+    """
+    cutoff = (today - timedelta(days=LOOKBACK_DAYS - 1)).isoformat()
+    # Served index-only by idx_first_seen_day (core.get_db): the window covers the whole
+    # table while the history is younger than LOOKBACK_DAYS (76k rows as of 2026-08), so a
+    # column added to this SELECT must be added to that index too, or the scan walks every
+    # row's TEXT overflow chain again (~700ms per Action Center load).  The eligible CTE
+    # keeps only keys observed under more than one source inside the window: a single-source
+    # key cannot produce a cross-source pair, and materializing its rows just to bucket and
+    # drop them was most of this function's cost (76k rows fetched to yield ~2.5k pairs).
+    # It is a pure NECESSARY-condition pushdown — the multi-source test runs before the
+    # per-row seen-date filter below, so it admits a superset of every key that filter could
+    # still pair, and the Python walk is unchanged.
+    rows = conn.execute(
+        "WITH eligible(norm_company,norm_title) AS ("
+        "SELECT norm_company,norm_title FROM jobs "
+        "WHERE norm_company IS NOT NULL AND norm_company<>'' "
+        "AND norm_title IS NOT NULL AND norm_title<>'' "
+        "AND source IS NOT NULL AND source<>'' AND substr(first_seen,1,10)>=? "
+        "GROUP BY norm_company,norm_title HAVING COUNT(DISTINCT source)>1) "
+        "SELECT j.job_url,j.repost_of,j.source,j.norm_company,j.norm_title,"
+        "j.fingerprint,j.first_seen FROM jobs j "
+        "JOIN eligible e ON e.norm_company=j.norm_company AND e.norm_title=j.norm_title "
+        "WHERE j.norm_company IS NOT NULL AND j.norm_company<>'' "
+        "AND j.norm_title IS NOT NULL AND j.norm_title<>'' "
+        "AND j.source IS NOT NULL AND j.source<>'' AND substr(j.first_seen,1,10)>=?",
+        (cutoff, cutoff),
+    ).fetchall()
+    # Group each key's entries by source up front: only cross-source pairs are candidates,
+    # and a single-source mass-posting (one requisition posted across many cities) would
+    # otherwise cost its full O(n^2) combinations just to skip every one.  Pure iteration
+    # pruning — the pairs considered, the winner per root pair (ranks embed both job_urls,
+    # so no two physical pairs tie), and the suppression counts are identical to the flat
+    # combinations() walk this replaces.
+    buckets = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        seen = _seen_date(row)
+        if seen is not None and seen <= today:
+            buckets[(row["norm_company"], row["norm_title"])][row["source"]].append(
+                (row, seen, _root(row)))
+
+    chosen = {}
+    suppressed_keys = 0
+    suppressed_pairs = 0
+    for by_source in buckets.values():
+        bucket = {}
+        groups = list(by_source.values())
+        for group_a, group_b in combinations(groups, 2):
+            _rank_cross_pairs(bucket, group_a, group_b)
         # Suppressed pairs deliberately stop being confirmable through this queue too: the
         # eligibility check below shares this map.  The manual assertion path is unaffected
         # (CLI ``dupe``, the UI's "duplicate" controls), so nothing becomes unlinkable.

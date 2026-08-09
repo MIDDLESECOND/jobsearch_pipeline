@@ -793,6 +793,37 @@ def get_db(cfg):
     # drops from ~230ms to ~0ms on the real history.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_issues ON jobs(eval_issues) "
                  "WHERE eval_issues IS NOT NULL")
+    # COVERING on purpose, all five: the jobs columns every triage/worklist scan filters on
+    # (app_status, filter_source, repost_of, outcome_*, norm_*) are stored AFTER the two big
+    # TEXT payloads (description, eval_json), so any scan reading them walks each row's
+    # overflow chain — 200-700ms per Action Center queue on the real 76k-row history, 3-4s
+    # per /api/actions, and the web UI refetches that after EVERY pass/reject click. Each
+    # index below carries every column its query touches, so the scan never opens the table
+    # row at all. A column added to one of these queries' SELECT/WHERE must be added to its
+    # index too, or the overflow walk silently returns (workflow.py and dupe_candidates.py
+    # carry the matching cross-references).
+    # Backlog candidates (Backlog tab + fresh_strong/recruiter_route): 681ms -> ~1ms.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_backlog_cover ON jobs("
+                 "status,verdict,fit_score,first_seen,date_posted,repost_of,job_url) "
+                 "WHERE app_status IS NULL AND filter_source IS NULL")
+    # workflow's decided_roots CTE (runs once per backlog/queue query): 243ms -> ~1ms.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decided_cover ON jobs(repost_of,job_url) "
+                 "WHERE app_status IS NOT NULL OR filter_source IS NOT NULL")
+    # Applied-chain worklists (followups_due, interview_prep): ~220ms each -> ~0ms.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_applied_cover ON jobs("
+                 "outcome_status,outcome_date,status_date,job_url) "
+                 "WHERE repost_of IS NULL AND app_status='applied'")
+    # Applied/passed decision pages (count + status_date ordering): ~300ms -> ~1ms.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_pages ON jobs("
+                 "app_status,status_date,fit_score,job_url) "
+                 "WHERE app_status IS NOT NULL")
+    # Expression-led: seeks the substr(first_seen,1,10) day-bucket predicate the date views
+    # and dupe_candidates' recent-window scan both use (an expression no plain first_seen
+    # index can serve), and carries the dupe scan's full column list so that 21k-row window
+    # reads index-only: date view 331ms -> ~17ms, dupe recent scan ~700ms -> ~70ms.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_first_seen_day ON jobs("
+                 "substr(first_seen,1,10),norm_company,norm_title,source,fingerprint,"
+                 "repost_of,job_url,first_seen)")
     conn.commit()
     return conn
 

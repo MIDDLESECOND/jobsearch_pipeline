@@ -81,7 +81,9 @@ def test_stale_check_db_is_rebuilt_and_accepts_new_statuses(tmp_path):
         # And the indexes dropped with the old table were recreated by get_db.
         idx = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")}
-        assert {"idx_fingerprint", "idx_repost_of", "idx_status"} <= idx
+        assert {"idx_fingerprint", "idx_repost_of", "idx_status", "idx_backlog_cover",
+                "idx_decided_cover", "idx_applied_cover", "idx_decision_pages",
+                "idx_first_seen_day"} <= idx
     finally:
         conn.close()
 

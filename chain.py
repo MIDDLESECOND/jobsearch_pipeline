@@ -352,6 +352,13 @@ def resolve_posting(conn, url):
     here: this is service code, not a command."""
     if not url:
         return None, "provide a url (full or unique substring of the job_url)"
+    # Exact-url fast path: the web UI always sends the full job_url, and the substring scan
+    # below reads the whole table per decision click (~0.25s on the real history, worse
+    # under CPU load). A primary-key probe answers it directly, and returns the same row
+    # the scan's exact-match disambiguation rule would pick; CLI substrings fall through.
+    exact = conn.execute("SELECT * FROM jobs WHERE job_url=?", (url,)).fetchone()
+    if exact is not None:
+        return exact, None
     # Escape LIKE metacharacters so a substring containing % or _ matches literally
     # (the resolved row drives a destructive UPDATE, so a mis-match must not happen).
     safe = url.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

@@ -7,6 +7,61 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-10 — function-precedent cap moves from the guide into code (`core_function`)
+
+**Routing change.** The function-precedent cap (added 2026-07-25) was guide-enforced only,
+phrased as "cap the verdict at RECRUITER_ONLY." Measured against the 2026-06-15..08-10 corpus
+it fired on **96 of 924** gates-passed fit ≥ 15 rows in the pre/post-sales family — about 10%.
+Nolro *Founding Solutions Engineer* scored 3/3 on all six dimensions with the cap unfired,
+while Legora and Evolver at the same total were capped correctly; the rule was not drifting,
+the judge simply was not applying it. That family is **20.7% of the entire cold-apply band**
+(828 of 4000 postings), and because those rows carry high fit they sort to the top of
+`fresh_strong` — the defect displaces correct candidates rather than merely adding noise.
+
+- **Diagnosis:** the two caps that hold (`ai_artifact_depth == 0`, `formal_leadership_required`)
+  ask the model only to REPORT a fact and let code route. The function-precedent rule asked it
+  to overturn scoring it had just produced. Same guide, same model, different reliability.
+- **New output field `core_function`** — a closed vocabulary in `states.py`
+  (`ALL_CORE_FUNCTIONS`): `presales_demo`, `post_sales_delivery`, `quota_carrying`,
+  `people_management`, `consulting_delivery`, `internal_build`, `other`. Extracted from the
+  responsibilities, explicitly WITHOUT reference to the candidate's history.
+- **`states.NO_PRECEDENT_FUNCTIONS`** holds the capped subset (the first four).
+  `evaluation.normalize_result` caps those to RECRUITER_ONLY / bucket 1 — the third
+  code-enforced cap, sharing the existing caps' branch.
+- **`consulting_delivery` is deliberately NOT capped**: Big 4 / SI engagement delivery is an
+  active target track. Widening the capped set is a judgment change and belongs here with
+  evidence.
+- **Fails OPEN** on a missing, empty, non-string, or unrecognized value, matching the
+  leadership cap: every eval_json written before this field lacks the key and `backtest_v2`
+  re-normalizes stored rows, so capping on absence would bucket-1 the whole history. An
+  unrecognized string is normalized to `None` and logged — never guessed toward a member.
+- **Bucket semantics:** a capped role gets `bucket = 1` even when `ai_artifact_depth == 3`,
+  following the leadership cap's existing precedent. Bucket 1 therefore now means "recruiter/
+  referral only" for three distinct reasons; the specific one is recoverable from `eval_json`.
+  This slightly deflates bucket-3 counts going forward — a reporting consequence, accepted.
+- Guide rewritten to match: the model extracts, the code caps, and it must NOT deflate the fit
+  total to express a precedent gap.
+- Tests: 8 cases in `tests/test_eval_routing.py` (each capped function, the two non-capped
+  ones, fail-open on absence/non-string, no-guessing on unknown strings, and that the cap
+  cannot resurrect or re-bucket a GATE_FAIL row).
+
+`backtest_cases.local.json` was checked before running: 1 of its 10 cases is in the family
+(Augment *Solutions Engineer*) and already accepts `RECRUITER_ONLY`, so no baseline edit was
+needed. Should a future presales/delivery case flip from `"PASS"`, that flip is the intended
+behavior — update the case rather than reverting the cap.
+
+`canary.py` was rebaselined (its documented trigger: an accepted guide change). A diagnostic
+run against the 08-08 baseline first, to catch over-firing before anchoring: 71% agreement, no
+alerts, and **none of its 7 flips carried the cap's signature** — the cap can only move a
+verdict toward RECRUITER_ONLY, and 4 of the 7 moved the other way. Recorded so the next
+reader does not repeat the mistake: the canary compares run-to-run, NOT against the stored
+`jobs.verdict`, so "the sentinel I expected to flip didn't" was a prediction error, not a
+cap failure — evaluating that sentinel (Databricks *Sr. Field TPM, Forward Deployed*)
+directly returns `core_function='post_sales_delivery'` → RECRUITER_ONLY / bucket 1. New
+baseline: fit_mean 9.62, 23 of 24 sentinels scored.
+
+---
+
 ## 2026-08-10 — read-only Outlook job-alert shadow report (no judgment change)
 
 - Added an opt-in `email-shadow` command backed by delegated Microsoft Graph `Mail.Read` and

@@ -19,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
 from states import (GATE_NAMES, GATE_OTHER, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
                     VERDICT_RECRUITER_ONLY, STATUS_NEW, STATUS_EVALUATED,
-                    STATUS_NEEDS_MANUAL, STATUS_ERROR)
+                    STATUS_NEEDS_MANUAL, STATUS_ERROR,
+                    ALL_CORE_FUNCTIONS, NO_PRECEDENT_FUNCTIONS)
 
 
 SYSTEM_TEMPLATE = """You are a strict job-posting evaluator for one specific candidate. \
@@ -56,11 +57,38 @@ any such requirement is a cold-screen wall regardless of fit total. Required onl
 preferred/plus leadership line stays false; so does "stakeholder leadership", "leads \
 projects", mentoring, or cross-functional coordination.
 
+CORE-FUNCTION CHECK (the third code-enforced cap):
+Set "core_function" to the ONE value naming what the person in this seat does on a normal \
+day — read the RESPONSIBILITIES, not the title, and do NOT consider the candidate's history \
+here. Report the seat; the code owns which functions lack precedent.
+- "presales_demo": demos, discovery calls, POCs, RFP responses, technical support of an \
+account/sales team BEFORE the sale.
+- "post_sales_delivery": owning delivery to EXTERNAL paying customers after the sale — \
+leading implementations/pilots/onboarding, customer workshops, deployment or adoption \
+ownership for named accounts. Forward-deployed, deployment strategist, implementation \
+consultant, and customer-success-engineering seats live here.
+- "quota_carrying": a sales number, pipeline generation, closing.
+- "people_management": direct reports are the primary job.
+- "consulting_delivery": billable project work for a consultancy's clients where the seat \
+BUILDS the deliverable (Big 4 / SI engagement delivery) rather than owning the customer \
+relationship.
+- "internal_build": building, integrating, or operating systems for the EMPLOYER'S OWN use \
+— internal stakeholders, no external customer ownership.
+- "other": none of the above fits.
+Boundaries: a seat that builds internally and occasionally shows work to a client is \
+"internal_build", not delivery — ownership of the customer outcome is the test. A seat \
+mixing presales and post-sales customer ownership: pick whichever the responsibilities \
+weight more; both are treated the same downstream. Never leave this field null.
+
 VERDICT + BUCKET ROUTING (after all gates pass):
 - ai_artifact_depth == 0  -> verdict "RECRUITER_ONLY", bucket 1. This is a HARD CAP: it holds \
 even if the total is 16-18 and every other line is strong. Never "PASS" a depth-0 role.
 - formal_leadership_required == true -> verdict "RECRUITER_ONLY", bucket 1. Same hard cap: a \
 17/18 with a required "3 years of leadership" is still a role the resume cannot screen into cold.
+- core_function in ({capped_functions}) \
+-> verdict "RECRUITER_ONLY", bucket 1. Same hard cap, applied in code: these functions have zero \
+career precedent, and skill-line overlap does not clear a cold screen without it. Score the role \
+honestly anyway — do not deflate the fit total to express this; the cap does that.
 - Acceptable-tier BI/BA with a small title gap -> verdict "PASS", bucket 2.
 - Clean low-code / Power Platform AI delivery (ai_artifact_depth == 3) -> verdict "PASS", bucket 3.
 - A gate failed -> verdict "GATE_FAIL", bucket null, fit_score null.
@@ -81,16 +109,29 @@ Respond with ONLY a JSON object, no markdown fences, no preamble:
   "fit_score": null or integer 0-18 (set whenever gates pass — i.e. for PASS and RECRUITER_ONLY),
   "score_breakdown": null or {{"ai_applied_vs_research": 0-3, "ai_artifact_depth": 0-3, "learning_value": 0-3, "technical_skill_match": 0-3, "title_trajectory": 0-3, "years_vs_stated": 0-3}},
   "formal_leadership_required": true or false (true ONLY when required — not preferred — formal people-leadership/management years are stated),
+  "core_function": one of [{all_functions}] — the seat's core DAILY function per the CORE-FUNCTION CHECK above, judged from the responsibilities alone. MANDATORY on every gates-passed role; never null.,
   "bucket": null or 1 or 2 or 3,
   "one_line": "For gates-passed roles: Can perform: ... | Can screen: ... | Career capital: builds ...; visibly lacks ... . Career capital is explanatory only. For gate failures: one-line decisive reason.",
   "flags": ["anything needing human judgment, e.g. ambiguous seniority, possible research-coding, recruiter posting with unnamed client"]
 }}"""
 
 
+def _quoted(values):
+    return ", ".join(f'"{v}"' for v in values)
+
+
 def build_system_prompt():
     profile = PROFILE_PATH.read_text(encoding="utf-8")
     guide = GUIDE_PATH.read_text(encoding="utf-8")
-    return SYSTEM_TEMPLATE.format(profile=profile, guide=guide)
+    # The two mechanical core_function lists are interpolated from states, never
+    # hand-copied: a prompt that offers a value the code doesn't know fails SILENTLY
+    # (the model emits it, normalize_result logs "unrecognized" and fails open, and the
+    # cap quietly stops covering that class). Same lesson as GATE_NAMES_WITH_OTHER. The
+    # per-value descriptions in the CORE-FUNCTION CHECK block stay prose — test_eval_
+    # routing asserts every vocabulary member is actually described there.
+    return SYSTEM_TEMPLATE.format(profile=profile, guide=guide,
+                                  all_functions=_quoted(ALL_CORE_FUNCTIONS),
+                                  capped_functions=_quoted(NO_PRECEDENT_FUNCTIONS))
 
 
 def parse_eval_json(text):
@@ -108,7 +149,12 @@ def normalize_result(result):
     leadership" is a wall the fit total talked past — the 17/18 manager-role
     case), so both are enforced in code, not left to the model: any role that passes
     the gates but scores ai_artifact_depth == 0 OR states a required formal-leadership
-    tenure is RECRUITER_ONLY / bucket 1, even at 18/18. Mutates and returns `result`."""
+    tenure is RECRUITER_ONLY / bucket 1, even at 18/18. The function-precedent cap
+    (2026-08-10) is the third: it reads the model's `core_function` extraction against
+    states.NO_PRECEDENT_FUNCTIONS. It was guide-only for six weeks and fired on ~10% of
+    the family it names, because "cap your own verdict" asks the model to overturn its
+    own scoring; reporting a fact and capping in code is what the other two do.
+    Mutates and returns `result`."""
     verdict = result.get("verdict", VERDICT_GATE_FAIL)
     if verdict not in VERDICTS:
         verdict = VERDICT_GATE_FAIL
@@ -141,7 +187,28 @@ def normalize_result(result):
         if not leadership and norm not in ("none", "false", "no", "0", ""):
             print(f"[eval] warning: unrecognized formal_leadership_required value "
                   f"{raw!r} — treating as no-requirement (fail-open)", file=sys.stderr)
-        if not valid or depth == 0 or leadership:
+        # Function-precedent cap. Fails OPEN like the leadership cap, for the same
+        # reason: every eval_json written before this field existed lacks the key, and
+        # backtest_v2 re-normalizes those stored rows — capping on absence would
+        # bucket-1 the entire history and destroy the regression baseline. Unlike the
+        # leadership cap this reads a CLOSED vocabulary, so an unrecognized string is
+        # normalized to None rather than guessed at, then logged: a silent coercion to
+        # some member would let one hallucinated value re-route a clean role, which is
+        # the failure the gate_results normalization also refuses to risk.
+        fn = result.get("core_function")
+        fn = fn.strip().lower() if isinstance(fn, str) else None
+        # An empty/whitespace value is ABSENCE, not a wrong answer — same reading the
+        # leadership cap gives "" among its recognized negatives. Warning on it would
+        # put a line on stderr for every row the model simply omitted the field on.
+        fn = fn or None
+        if fn is not None and fn not in ALL_CORE_FUNCTIONS:
+            print(f"[eval] warning: unrecognized core_function value "
+                  f"{result.get('core_function')!r} — no cap applied (fail-open)",
+                  file=sys.stderr)
+            fn = None
+        result["core_function"] = fn
+        no_precedent = fn in NO_PRECEDENT_FUNCTIONS
+        if not valid or depth == 0 or leadership or no_precedent:
             verdict = VERDICT_RECRUITER_ONLY
             result["bucket"] = 1
         if not result.get("bucket"):

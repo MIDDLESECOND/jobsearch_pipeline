@@ -175,7 +175,8 @@ recruiter — the salary band is negotiating intel); if anonymized, skip.
 
 **Routing summary:** Cold applications (verdict **PASS**) → Bucket 3 first, small-gap Bucket 2
 second, flagged `enablement-cluster` roles as insurance behind both. Bucket 1 and
-`formal_leadership_required` roles → verdict **RECRUITER_ONLY**, recruiters and referrals only.
+`formal_leadership_required` roles, and roles whose `core_function` names a no-precedent
+function → verdict **RECRUITER_ONLY**, recruiters and referrals only.
 The fix for a 50/0 is routing, not de-prioritizing AI.
 
 **Cold-apply bar:** a PASS means more than "conceptual fit" — cold-apply only when the resume
@@ -191,11 +192,24 @@ candidate profile routes to **switch (or fix) the variant first**, not apply. If
 multiple resume variants, keep an explicit variant→role-family routing map and record the
 variant with every application — outcome data is unreadable without it.
 
-**Function-precedent check (a guide-enforced cap, sibling to the code-enforced caps).** If the
-role's core *daily function* — e.g. pre-sales demos/discovery, post-sales customer-facing
-delivery ownership, quota-carried motion, people management — has zero precedent anywhere in
-the career, cap the verdict at **RECRUITER_ONLY** regardless of skill-line overlap. Skill
-adjacency does not substitute for function precedent at a cold screen.
+**Function-precedent check (the third code-enforced cap).** A role whose core *daily function*
+— e.g. pre-sales demos/discovery, post-sales customer-facing delivery ownership, quota-carried
+motion, people management — has zero precedent anywhere in the career is capped at
+**RECRUITER_ONLY** regardless of skill-line overlap. Skill adjacency does not substitute for
+function precedent at a cold screen.
+
+**Your job here is extraction, not the cap.** Emit `core_function` — one of `presales_demo`,
+`post_sales_delivery`, `quota_carrying`, `people_management`, `consulting_delivery`,
+`internal_build`, `other` — read off the *responsibilities*, never the title, and without
+reference to the candidate's history. `states.NO_PRECEDENT_FUNCTIONS` holds the capped subset
+and `evaluation.normalize_result` applies it. So (a) do **not** deflate the fit total to
+express a precedent gap — score honestly and let the cap route; (b) which functions lack
+precedent is per-candidate: edit that constant, not this section. Ownership of the external
+customer outcome is the test separating `post_sales_delivery` from `internal_build`.
+
+*Why extraction rather than a self-applied cap:* phrased as "cap the verdict yourself", this
+rule asked the model to overturn scoring it had just produced, and complied on roughly 10% of
+the family it names. The caps that hold ask only for a fact.
 
 ---
 

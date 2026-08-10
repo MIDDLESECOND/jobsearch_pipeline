@@ -4,12 +4,17 @@ The load-bearing rule (the '50/0 fix'): a role that clears the gates but whose
 ai_artifact_depth is 0 (or unparseable) is capped to RECRUITER_ONLY / bucket 1,
 even at a perfect score. Its sibling (the formal-leadership cap): a required
 formal-leadership tenure (`formal_leadership_required: true`) caps the same way,
-but fails OPEN on absence — pre-cap eval_json rows lack the key. Both enforced in
-code so they can't depend on the model complying.
+but fails OPEN on absence — pre-cap eval_json rows lack the key. The third (the
+function-precedent cap, 2026-08-10) reads the model's `core_function` extraction
+against states.NO_PRECEDENT_FUNCTIONS and also fails open. All three enforced in
+code so they can't depend on the model complying — the function cap exists precisely
+because its guide-only phrasing ("cap the verdict yourself") fired on ~10% of the
+family it names.
 """
 
 import chain
 import evaluation
+import states
 from conftest import make_job, job_status
 
 
@@ -131,6 +136,107 @@ def test_leadership_absent_or_false_fails_open():
         r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), **kw)
         assert r["verdict"] == "PASS"
         assert r["bucket"] == 3
+
+
+def test_no_precedent_function_caps_pass_to_recruiter_even_at_perfect_score():
+    # The Nolro case (2026-08-10): 3/3 on all six dimensions, depth 3 — i.e. everything
+    # the other two caps look at is clean — but the seat's daily job is owning delivery
+    # to external paying customers, which has zero career precedent.
+    r = _norm(verdict="PASS", fit_score=18, bucket=3, score_breakdown=_bd(3),
+              core_function="post_sales_delivery")
+    assert r["verdict"] == "RECRUITER_ONLY"
+    assert r["bucket"] == 1
+
+
+def test_every_no_precedent_function_caps():
+    for fn in ("presales_demo", "post_sales_delivery", "quota_carrying",
+               "people_management"):
+        r = _norm(verdict="PASS", fit_score=17, score_breakdown=_bd(3), core_function=fn)
+        assert r["verdict"] == "RECRUITER_ONLY", fn
+        assert r["bucket"] == 1, fn
+
+
+def test_precedented_functions_do_not_cap():
+    # consulting_delivery is deliberately OUTSIDE the capped set (Big 4 / SI engagement
+    # delivery is an active target track); internal_build is the precedent seat itself.
+    for fn in ("consulting_delivery", "internal_build", "other"):
+        r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), core_function=fn)
+        assert r["verdict"] == "PASS", fn
+        assert r["bucket"] == 3, fn
+
+
+def test_core_function_absent_fails_open():
+    # Same polarity as the leadership cap, same reason: every eval_json written before
+    # this field existed lacks the key, and backtest_v2 re-normalizes those stored rows.
+    for kw in ({}, {"core_function": None}, {"core_function": ""}):
+        r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), **kw)
+        assert r["verdict"] == "PASS"
+        assert r["bucket"] == 3
+
+
+def test_core_function_unrecognized_fails_open_warns_and_is_not_guessed(capsys):
+    # A closed vocabulary, so an unknown string is normalized to None rather than
+    # coerced toward some member — a silent coercion would let one hallucinated value
+    # re-route a clean role.
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3),
+              core_function="customer_facing_delivery")
+    assert r["verdict"] == "PASS"
+    assert r["bucket"] == 3
+    assert r["core_function"] is None
+    err = capsys.readouterr().err
+    assert "core_function" in err and "customer_facing_delivery" in err
+
+
+def test_core_function_is_normalized_onto_the_result():
+    r = _norm(verdict="PASS", fit_score=18, score_breakdown=_bd(3),
+              core_function="  Presales_Demo  ")
+    assert r["core_function"] == "presales_demo"
+    assert r["verdict"] == "RECRUITER_ONLY"
+
+
+def test_core_function_non_string_fails_open():
+    for bad in (3, True, ["presales_demo"], {"fn": "presales_demo"}):
+        r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), core_function=bad)
+        assert r["verdict"] == "PASS"
+        assert r["core_function"] is None
+
+
+def test_core_function_empty_string_is_absence_not_a_warning(capsys):
+    # "" means the model omitted the field, not that it answered wrongly — warning on it
+    # would put a stderr line on every such row. Matches the leadership cap, which lists
+    # "" among its recognized negatives.
+    r = _norm(verdict="PASS", fit_score=15, score_breakdown=_bd(3), core_function="   ")
+    assert r["verdict"] == "PASS"
+    assert r["core_function"] is None
+    assert "core_function" not in capsys.readouterr().err
+
+
+def test_prompt_vocabulary_cannot_drift_from_states():
+    # The failure this guards is SILENT: a prompt offering a value states.py doesn't know
+    # means the model emits it, normalize_result fails open, and the cap quietly stops
+    # covering that class. The two mechanical lists are interpolated; the per-value
+    # descriptions are prose, so assert each member is actually described.
+    for fn in states.ALL_CORE_FUNCTIONS:
+        assert f'"{fn}"' in evaluation.SYSTEM_TEMPLATE, f"{fn} has no description in the prompt"
+    assert set(states.NO_PRECEDENT_FUNCTIONS) <= set(states.ALL_CORE_FUNCTIONS)
+    rendered = evaluation.SYSTEM_TEMPLATE.format(
+        profile="P", guide="G",
+        all_functions=evaluation._quoted(states.ALL_CORE_FUNCTIONS),
+        capped_functions=evaluation._quoted(states.NO_PRECEDENT_FUNCTIONS))
+    # Every capped value must reach the model as capped, and nothing else may.
+    for fn in states.ALL_CORE_FUNCTIONS:
+        capped_in_prompt = f'"{fn}"' in rendered.split("core_function in (")[1].split(")")[0]
+        assert capped_in_prompt == (fn in states.NO_PRECEDENT_FUNCTIONS), fn
+
+
+def test_core_function_does_not_resurrect_a_gate_fail():
+    # The cap lives inside the gates-passed branch: a rejected role stays rejected, and
+    # nothing writes a bucket back onto it.
+    r = _norm(verdict="GATE_FAIL", fit_score=7, failed_gate="years_floor",
+              core_function="post_sales_delivery")
+    assert r["verdict"] == "GATE_FAIL"
+    assert r["bucket"] is None
+    assert r["fit_score"] is None
 
 
 def test_gate_fail_nulls_bucket_and_score():

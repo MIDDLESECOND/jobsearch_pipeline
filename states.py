@@ -93,6 +93,37 @@ GATE_NAMES = ["years_floor", "domain_requirement", "role_substance", "tool_requi
 GATE_OTHER = "other"
 GATE_NAMES_WITH_OTHER = GATE_NAMES + [GATE_OTHER]
 
+# The role's core DAILY function, as read off the posting (eval output `core_function`).
+# A closed vocabulary because it is a code-enforced cap's INPUT: NO_PRECEDENT_FUNCTIONS
+# names the functions with zero career precedent, and evaluation.normalize_result caps
+# those at RECRUITER_ONLY exactly as it caps ai_artifact_depth == 0 and
+# formal_leadership_required — skill adjacency does not substitute for function precedent
+# at a cold screen.
+#
+# Why the model REPORTS a function instead of applying the cap itself: the guide has
+# carried a function-precedent rule since 2026-07-25, but phrased as "cap the verdict"
+# it asked the model to overturn scoring it had just done, and it complied rarely
+# (measured 2026-08-10: 96 of 924 fit>=15 family rows, ~10%; Nolro scored 3/3 on all six
+# dimensions with the cap unfired). The two caps that DO hold ask only for a fact.
+#
+# Membership is about EXTERNAL customer ownership, not difficulty or seniority.
+# CONSULTING_DELIVERY sits deliberately OUTSIDE the capped set — Big 4 / SI delivery is
+# an active target track — and INTERNAL_BUILD is the precedent seat itself. Widening the
+# capped set is a judgment change: it belongs in CHANGELOG.md with the evidence.
+FUNCTION_PRESALES_DEMO = "presales_demo"
+FUNCTION_POST_SALES_DELIVERY = "post_sales_delivery"
+FUNCTION_QUOTA_CARRYING = "quota_carrying"
+FUNCTION_PEOPLE_MANAGEMENT = "people_management"
+FUNCTION_CONSULTING_DELIVERY = "consulting_delivery"
+FUNCTION_INTERNAL_BUILD = "internal_build"
+FUNCTION_OTHER = "other"
+ALL_CORE_FUNCTIONS = (FUNCTION_PRESALES_DEMO, FUNCTION_POST_SALES_DELIVERY,
+                      FUNCTION_QUOTA_CARRYING, FUNCTION_PEOPLE_MANAGEMENT,
+                      FUNCTION_CONSULTING_DELIVERY, FUNCTION_INTERNAL_BUILD,
+                      FUNCTION_OTHER)
+NO_PRECEDENT_FUNCTIONS = (FUNCTION_PRESALES_DEMO, FUNCTION_POST_SALES_DELIVERY,
+                          FUNCTION_QUOTA_CARRYING, FUNCTION_PEOPLE_MANAGEMENT)
+
 # Post-application outcome events (app_events.event_type). APP_EVENTS are the lifecycle
 # transitions — recording one requires the chain to be applied, and the LATEST one (by
 # event_date, insertion-order tiebreak) is cached chain-wide as jobs.outcome_status /

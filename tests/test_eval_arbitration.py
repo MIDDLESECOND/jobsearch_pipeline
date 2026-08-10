@@ -168,6 +168,7 @@ def test_in_band_first_draw_spends_exactly_two_extra_calls(monkeypatch):
     url, result, tin, tout, cr, cw = evaluation._evaluate_one(
         ROW, "deepseek", "m", "sys", None, "key")
     assert len(calls) == 3
+    assert result is not None
     assert result["arbitration"]["k"] == 3
     # Token tally sums all three draws — the cost line must not hide arbitration.
     assert (tin, tout, cr, cw) == (30, 300, 3000, 0)
@@ -176,12 +177,14 @@ def test_in_band_first_draw_spends_exactly_two_extra_calls(monkeypatch):
 def test_out_of_band_first_draw_stays_a_single_call(monkeypatch):
     calls = _script(monkeypatch, [_model_json("PASS", 8)])
     _, result, *_ = evaluation._evaluate_one(ROW, "deepseek", "m", "sys", None, "key")
+    assert result is not None
     assert len(calls) == 1 and "arbitration" not in result
 
 
 def test_gate_fail_first_draw_is_never_arbitrated(monkeypatch):
     calls = _script(monkeypatch, [_model_json("GATE_FAIL")])
     _, result, *_ = evaluation._evaluate_one(ROW, "deepseek", "m", "sys", None, "key")
+    assert result is not None
     assert len(calls) == 1 and result["verdict"] == "GATE_FAIL"
 
 
@@ -190,6 +193,7 @@ def test_majority_override_end_to_end(monkeypatch):
                           _model_json("RECRUITER_ONLY", 14),
                           _model_json("RECRUITER_ONLY", 13)])
     _, result, *_ = evaluation._evaluate_one(ROW, "deepseek", "m", "sys", None, "key")
+    assert result is not None
     assert result["verdict"] == "RECRUITER_ONLY"
     assert result["arbitration"]["overrode_first"]
 
@@ -198,6 +202,7 @@ def test_failed_extra_draw_degrades_to_a_two_draw_vote(monkeypatch):
     _script(monkeypatch, [_model_json("PASS", 14), RuntimeError("boom"),
                           _model_json("PASS", 14)])
     _, result, *_ = evaluation._evaluate_one(ROW, "deepseek", "m", "sys", None, "key")
+    assert result is not None
     # Draw 2 died, draw 3 agreed: unanimous 2-draw vote, no split, no override.
     arb = result["arbitration"]
     assert arb["k"] == 2 and not arb["split"] and not arb["overrode_first"]

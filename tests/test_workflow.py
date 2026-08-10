@@ -6,6 +6,7 @@ against synthetic fixtures only; no test opens the real jobs.db.
 """
 
 from datetime import date, datetime, timezone
+from typing import Any
 
 import chain
 from conftest import make_job
@@ -332,9 +333,11 @@ def test_route_cadence_values_are_validated(conn):
     """A half-written config key reads as None; it must fail loudly, not drop the bar."""
     import pytest
 
-    for bad in ({"route_min_score": None}, {"route_min_score": "15"},
-                {"route_min_score": 19}, {"route_days": None},
-                {"route_days": 14.5}, {"route_days": 0}):
+    bad_overrides: tuple[dict[str, Any], ...] = (
+        {"route_min_score": None}, {"route_min_score": "15"},
+        {"route_min_score": 19}, {"route_days": None},
+        {"route_days": 14.5}, {"route_days": 0})
+    for bad in bad_overrides:
         with pytest.raises(ValueError):
             workflow.query_action_page(conn, "recruiter_route", **bad)
 

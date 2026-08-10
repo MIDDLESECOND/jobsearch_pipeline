@@ -181,6 +181,7 @@ def evaluate(call, row, attempts=3):
             if attempt < attempts - 1:
                 print(f"          (attempt {attempt + 1} failed: {e}; retrying)")
                 time.sleep(3 * (attempt + 1))
+    assert last is not None
     raise last
 
 

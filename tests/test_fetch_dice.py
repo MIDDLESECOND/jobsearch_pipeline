@@ -460,7 +460,7 @@ def test_fetch_dice_bad_later_page_keeps_the_pages_already_paid_for(conn, monkey
     assert "page 2" in capsys.readouterr().err     # the truncation is still disclosed
 
 
-def test_fetch_dice_rows_without_a_url_fail_the_query(conn, monkeypatch):
+def test_fetch_dice_rows_without_a_url_fail_the_query(conn, monkeypatch, capsys):
     """detailsPageUrl AND guid renamed: every row is skipped before it counts as eligible,
     so as a success this is indistinguishable from "the filter excluded everything"."""
     jobs = [{"title": "Role", "companyName": "Co", "postedDate": "2026-08-09T12:00:00Z",
@@ -470,21 +470,74 @@ def test_fetch_dice_rows_without_a_url_fail_the_query(conn, monkeypatch):
     monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
     summary = fetch.fetch_dice(_dice_cfg(), conn)
     assert summary.failures == 1 and summary.successes == 0
+    # Assert the REASON, not just that something failed: several guards can fail this
+    # query, and a counts-only assertion would stay green with this one deleted.
+    assert "carried a posting URL" in capsys.readouterr().err
 
 
-def test_fetch_dice_rows_without_employment_type_fail_the_query(conn, monkeypatch):
+def test_fetch_dice_rows_without_employment_type_fail_the_query(conn, monkeypatch, capsys):
     """employmentType is this source's flood guard. A rename silently admits the whole C2C
     staffing population — into the DB and into the paid eval — so it refuses, exactly like
     the config-side version of the same filter emptying out."""
     jobs = [_job(f"g{i}") for i in range(3)]
     for j in jobs:
         del j["employmentType"]
-    monkeypatch.setattr(fetch, "_dice_get",
-                        lambda url: _flight_html(_search_payload(jobs)))
+    # Real detail pages on purpose. Serving the search payload for detail URLs too would
+    # make every row a detail-parse failure, and the query would fail through THAT guard —
+    # leaving this one untested while the test still passed.
+    router = _Router(
+        _flight_html(_search_payload(jobs)),
+        details={f"https://www.dice.com/job-detail/g{i}": _detail_html()
+                 for i in range(3)},
+    )
+    monkeypatch.setattr(fetch, "_dice_get", router)
     monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
     summary = fetch.fetch_dice(_dice_cfg(), conn)
     assert summary.failures == 1 and summary.successes == 0
+    assert "employment_exclude cannot apply" in capsys.readouterr().err
     assert conn.execute("SELECT COUNT(*) c FROM jobs").fetchone()["c"] == 0
+
+
+def test_fetch_dice_same_url_on_two_pages_costs_one_detail_fetch(conn, monkeypatch):
+    """Relevance ranking can shift a row between pages. Without the dedup that row is
+    fetched twice — a duplicate paid request plus politeness sleep, and a double-counted
+    eligible — which the pre-split code avoided only because page 1's insert was already
+    visible to page 2's known-URL SELECT."""
+    dup = _job("dup")
+    pages = {
+        1: _flight_html(_search_payload([dup, _job("a")], total_results=3, total_pages=2)),
+        2: _flight_html(_search_payload([dup, _job("b")], total_results=3, total_pages=2)),
+    }
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if "dice.com/jobs?" in url:
+            return pages[int(parse_qs(urlsplit(url).query)["page"][0])]
+        return _detail_html()
+
+    monkeypatch.setattr(fetch, "_dice_get", get)
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    assert fetch.fetch_dice(_dice_cfg(results_pages=2), conn) == 3
+    details = [u for u in calls if "job-detail" in u]
+    assert details.count("https://www.dice.com/job-detail/dup") == 1
+    assert len(details) == 3
+
+
+def test_fetch_dice_a_single_unparseable_detail_page_is_not_a_query_failure(
+        conn, monkeypatch):
+    """The LOWER edge of the sample threshold. Below it a missing JD is ordinary attrition:
+    one dead posting must not roll the target back and record a failure. Only the upper
+    direction (a real all-fail sweep) is a shape-change signal."""
+    router = _Router(
+        _flight_html(_search_payload([_job("aaa")])),
+        details={"https://www.dice.com/job-detail/aaa": "<html>no anchor</html>"},
+    )
+    monkeypatch.setattr(fetch, "_dice_get", router)
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    summary = fetch.fetch_dice(_dice_cfg(), conn)
+    assert summary == 0 and summary.successes == 1 and summary.failures == 0
 
 
 def test_fetch_dice_dead_detail_links_do_not_fail_the_query(conn, monkeypatch):
@@ -568,6 +621,28 @@ def test_fetch_dice_results_pages_out_of_range_falls_back(conn, monkeypatch, cap
     assert fetch.fetch_dice(_dice_cfg(results_pages=-1), conn) == 0
     assert "results_pages must be a whole number 1..20" in capsys.readouterr().err
     assert len([u for u in router.calls if "dice.com/jobs?" in u]) == 1
+
+
+def test_fetch_dice_results_pages_above_the_cap_actually_stops_at_the_fallback(
+        conn, monkeypatch, capsys):
+    """The cap must bound REQUESTS, not just print. Asserting the warning alone passes with
+    the upper bound removed, and `results_pages: 500` then issues 500 page requests per
+    phrase. Every page here returns a row so the loop keeps going if it is allowed to."""
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if "dice.com/jobs?" in url:
+            page = int(parse_qs(urlsplit(url).query)["page"][0])
+            return _flight_html(_search_payload([_job(f"p{page}")],
+                                                total_results=999, total_pages=999))
+        return _detail_html()
+
+    monkeypatch.setattr(fetch, "_dice_get", get)
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    fetch.fetch_dice(_dice_cfg(results_pages=500), conn)
+    assert "results_pages must be a whole number 1..20" in capsys.readouterr().err
+    assert len([u for u in calls if "dice.com/jobs?" in u]) == 2   # the fallback, not 500
 
 
 def test_fetch_dice_non_numeric_knobs_warn_instead_of_silently_defaulting(

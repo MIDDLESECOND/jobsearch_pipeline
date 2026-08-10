@@ -401,6 +401,7 @@ def _drive_pipeline(conn, monkeypatch, *, downstream_error=False, interrupted=Fa
         monkeypatch.setattr(pipeline, "fetch_new_jobs", target("linkedin", "failed"))
         monkeypatch.setattr(pipeline, "fetch_adzuna", target("adzuna", "failed"))
         monkeypatch.setattr(pipeline, "fetch_ats", target("ats", "failed"))
+        monkeypatch.setattr(pipeline, "fetch_dice", target("dice", "failed"))
     else:
         monkeypatch.setattr(
             pipeline, "fetch_new_jobs", target("linkedin", "success", 2)
@@ -413,6 +414,7 @@ def _drive_pipeline(conn, monkeypatch, *, downstream_error=False, interrupted=Fa
             )[0],
         )
         monkeypatch.setattr(pipeline, "fetch_ats", target("ats", "skipped"))
+        monkeypatch.setattr(pipeline, "fetch_dice", target("dice", "skipped"))
     monkeypatch.setattr(pipeline, "requeue_error_rows", lambda c: None)
     monkeypatch.setattr(pipeline, "skip_decided_reposts", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "skip_evaluated_reposts", lambda *a, **k: None)
@@ -457,6 +459,7 @@ def test_run_command_records_partial_sources_as_degraded(conn, monkeypatch):
             for row in attempts] == [
         ("linkedin", "success", None), ("adzuna", "success", None),
         ("adzuna", "failed", "timeout"), ("ats", "skipped", None),
+        ("dice", "skipped", None),
     ]
 
 

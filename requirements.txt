@@ -5,3 +5,4 @@ flask>=3.0
 pypdf>=5.0          # application-material PDF text-layer / ATS checks
 pytest>=8.0          # unit tests in tests/ — run: python -m pytest
 pyflakes>=3.0        # static undefined-name gate (tests/test_no_undefined_names.py)
+msal[broker]>=1.25,<2; platform_system == "Windows"  # Outlook Mail.Read via Windows broker

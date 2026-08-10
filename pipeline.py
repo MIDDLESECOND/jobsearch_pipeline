@@ -25,6 +25,8 @@ Usage:
   python pipeline.py prune [--days 90] [--vacuum]  # clear old rejected postings' descriptions; shrink jobs.db
   python pipeline.py backup [--output PATH]        # verified jobs.db + application_materials ZIP
   python pipeline.py backup --verify PATH          # validate an existing backup without restoring it
+  python pipeline.py email-shadow [--days 7]       # read configured Outlook job alerts into a
+                                                   # report only; --login performs first-time auth
   # add --undo to applied / passed / reject to clear what you set
 
 Requires the API key for the configured provider (config.yaml): DEEPSEEK_API_KEY by default,
@@ -49,7 +51,7 @@ from chain import (
     mark_posting, mark_expired, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
     record_event, undo_event, chain_events,
 )
-from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats
+from fetch import fetch_new_jobs, fetch_adzuna, fetch_ats, fetch_dice
 from health import (
     FetchSummary, completed_run_status, current_pipeline_run_id, fetch_error_kind,
     finish_pipeline_run, record_active_fetch_attempt, reset_active_pipeline_run,
@@ -63,6 +65,10 @@ from filters import (
 from evaluation import evaluate_new_jobs, requeue_error_rows
 from report import generate_report
 from materials import snapshot_jd
+from outlook_shadow import (
+    OutlookShadowError,
+    run_shadow as run_outlook_shadow,
+)
 
 
 # ----------------------------------------------------------------------- main
@@ -257,8 +263,17 @@ def _add_filter_rule(conn, gate, pattern, note, posting):
 
     rules = load_filters()
     # Match on `gate` (not `name`) so a hand-edited rule whose name differs from its gate
-    # is still extended rather than duplicated.
-    rule = next((r for r in rules if r.get("gate") == gate), None)
+    # is still extended rather than duplicated — but only among DESCRIPTION-scoped rules,
+    # since `any` is what this function writes. A company_any-only rule is naturally
+    # gate 'other' (none of the six named gates describes "this company is an aggregator
+    # shell"), and 'other' is also `--gate`'s default, so without this guard a bare
+    # `reject --url X --pattern "requires TS/SCI"` would append that clearance pattern to
+    # the company rule and attribute the posting to it.
+    def _company_scoped_only(r):
+        return bool(r.get("company_any")) and not r.get("any")
+
+    rule = next((r for r in rules
+                 if r.get("gate") == gate and not _company_scoped_only(r)), None)
     if rule is None:
         rule = {"name": gate, "gate": gate, "note": note or "", "any": []}
         rules.append(rule)
@@ -330,8 +345,9 @@ def _confirm(prompt):
 
 
 def _run_fetch_stage(fn, cfg, conn, label):
-    """Run one fetcher (fetch_new_jobs / fetch_adzuna / fetch_ats) as an independent failure
-    unit: an unexpected crash is logged with its traceback and the fetcher's uncommitted
+    """Run one fetcher (fetch_new_jobs / fetch_adzuna / fetch_ats / fetch_dice) as an
+    independent failure unit: an unexpected crash is logged with its traceback and the
+    fetcher's uncommitted
     partial work rolled back, then the run continues. So a single source's outage — a LinkedIn
     guest-endpoint change, an Adzuna/board envelope shift — doesn't abort the run before the
     filters, eval, and report get to work on the sources that DID succeed.
@@ -431,7 +447,7 @@ def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
                                         "expired", "reject", "event", "dupe", "prune",
-                                        "backup", "ui"])
+                                        "backup", "email-shadow", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
                                    "`event`: the date the event happened (default today)")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / "
@@ -449,8 +465,11 @@ def main():
     ap.add_argument("--resume", help="`applied`: resume variant sent (free text, stored on the chain)")
     ap.add_argument("--channel", choices=list(ALL_CHANNELS),
                     help="`applied`: how the application went out (stored on the chain)")
-    ap.add_argument("--days", type=int, default=90,
-                    help="`prune`: age floor in days — only rows first seen before this are touched (default 90)")
+    ap.add_argument("--days", type=int,
+                    help="`prune`: age floor (default 90); `email-shadow`: mail window "
+                         "(default settings.outlook_email.days)")
+    ap.add_argument("--login", action="store_true",
+                    help="`email-shadow`: allow the explicit first-time Microsoft login prompt")
     ap.add_argument("--vacuum", action="store_true",
                     help="`prune`: also VACUUM so the freed pages shrink jobs.db on disk "
                          "(under WAL the shrink lands at checkpoint — i.e. once no other "
@@ -467,6 +486,10 @@ def main():
         ap.error("--output/--verify are only valid with `backup`")
     if args.command == "backup" and args.output and args.verify_backup_path:
         ap.error("`backup` accepts either --output or --verify, not both")
+    if args.command != "email-shadow" and args.login:
+        ap.error("--login is only valid with `email-shadow`")
+    if args.command not in ("prune", "email-shadow") and args.days is not None:
+        ap.error("--days is only valid with `prune` or `email-shadow`")
 
     # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's
     # age-label anchor parses it strictly, so a typo'd date must die here with a usable
@@ -503,10 +526,6 @@ def main():
     # before any fetch/eval spend, and with a message instead of a KeyError traceback.
     try:
         cfg = load_config()
-        # Inside the guard: get_db can raise the stale-CHECK rebuild's actionable
-        # RuntimeError, which deserves the same clean exit as a config problem — in the
-        # scheduled .bat log a traceback reads as a crash, not an instruction.
-        conn = get_db(cfg)
     except FileNotFoundError:
         print("[config] config.yaml not found — copy config.example.yaml to config.yaml "
               "and edit it for your search", file=sys.stderr)
@@ -514,6 +533,65 @@ def main():
     except ValueError as e:
         print(f"[config] {e}", file=sys.stderr)
         sys.exit(2)
+
+    # The shadow scanner intentionally opens jobs.db itself in SQLite read-only/query-only
+    # mode. Branch BEFORE get_db: that normal startup path owns schema migrations and other
+    # writes, which would make a "report only" command's evidence boundary false.
+    if args.command == "email-shadow":
+        # Capture scheduled failures like the normal run. This writes a local gitignored log,
+        # but does not weaken the no-mail/no-DB-mutation boundary.
+        failed = False
+        try:
+            with run_log("email-shadow"):
+                try:
+                    summary = run_outlook_shadow(
+                        cfg,
+                        BASE_DIR,
+                        interactive=args.login,
+                        days_override=args.days,
+                    )
+                except (OutlookShadowError, ValueError) as e:
+                    print(f"[email-shadow] {e}", file=sys.stderr)
+                    failed = True
+                else:
+                    print(
+                        f"[email-shadow] {summary['emails_scanned']} email(s), "
+                        f"{summary['links_found']} unique candidate link(s): "
+                        f"{summary['unseen_links']} unseen, "
+                        f"{summary['possible_title_matches']} possible title match(es), "
+                        f"{summary['known_urls']} exact URL(s) known"
+                    )
+                    for source, source_stats in sorted(
+                        summary.get("source_stats", {}).items()
+                    ):
+                        print(
+                            f"[email-shadow] {source.replace('_', ' ')}: "
+                            f"{source_stats['candidates']} candidate(s), "
+                            f"{source_stats['unseen_links']} unseen, "
+                            f"{source_stats['possible_title_matches']} possible title match(es), "
+                            f"{source_stats['known_urls']} exact URL(s) known"
+                        )
+                    if summary.get("truncated_senders"):
+                        print(
+                            f"[email-shadow] coverage truncated for "
+                            f"{summary['truncated_senders']} configured sender(s)"
+                        )
+                    print(f"[email-shadow] report: {summary['path']}")
+                if failed:
+                    # Raised after the except suite, so it has no broker/Graph exception
+                    # context. run_log can stamp a real failure without serializing private
+                    # details from the original exception into its traceback.
+                    raise OutlookShadowError("email-shadow failed")
+        except OutlookShadowError:
+            # Exit only after run_log has restored streams and recorded the safe failure.
+            sys.exit(2)
+        return
+
+    try:
+        # get_db can raise the stale-CHECK rebuild's actionable RuntimeError, which deserves
+        # the same clean exit as a config problem — in a scheduled log a traceback reads as
+        # a crash, not an instruction.
+        conn = get_db(cfg)
     except RuntimeError as e:
         print(f"[db] {e}", file=sys.stderr)
         sys.exit(2)
@@ -522,7 +600,7 @@ def main():
         # The `status` column is a state machine and THIS ORDER IS LOAD-BEARING: each stage gates
         # on status and only the deterministic, zero-cost filters run before the *paid* eval, so an
         # obvious reject never reaches the LLM. The transitions:
-        #   fetch_new_jobs / fetch_adzuna / fetch_ats  insert rows as 'new'
+        #   fetch_new_jobs / fetch_adzuna / fetch_ats / fetch_dice  insert rows as 'new'
         #   requeue_error_rows             last run's 'error'     -> 'new'  (retry — BEFORE the
         #                                  filters, so a requeued row re-faces the current rules
         #                                  and any chain decision made while it sat in 'error')
@@ -579,6 +657,8 @@ def main():
                 _run_fetch_stage(fetch_adzuna, cfg, conn, "adzuna")
                 stage = "fetch_ats"
                 _run_fetch_stage(fetch_ats, cfg, conn, "ats")
+                stage = "fetch_dice"
+                _run_fetch_stage(fetch_dice, cfg, conn, "dice")
                 stage = "error_requeue"
                 requeue_error_rows(conn)
                 # RESTORE direction first, BEFORE the filters: a skipped row whose chain
@@ -650,7 +730,7 @@ def main():
     elif args.command == "dupe":
         cmd_dupe(conn, args.url, args.of, args.undo, args.yes)
     elif args.command == "prune":
-        cmd_prune(conn, args.days, args.vacuum)
+        cmd_prune(conn, args.days if args.days is not None else 90, args.vacuum)
     elif args.command == "backup":
         try:
             cmd_backup(conn, args.output)

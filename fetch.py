@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""The three posting source families: the LinkedIn scrape (python-jobspy guest endpoints), the
-Adzuna REST API, and the per-company ATS board APIs (Greenhouse/Lever/Ashby — public, no auth).
+"""The four posting source families: the LinkedIn scrape (python-jobspy guest endpoints), the
+Adzuna REST API, the per-company ATS board APIs (Greenhouse/Lever/Ashby — public, no auth), and
+the Dice search pages (public, logged-out — the job list is embedded in the page HTML).
 All insert unseen postings as status='new' and are otherwise source-agnostic from then on — the
 `source` column is provenance only. Imports core (the API-key resolver), posting_store (the
-shared normalize/fingerprint/insert path), and filters (_pattern_matches, so the ATS title/location
-filters speak the same pattern dialect as filters.yaml); nothing depends back on this module
-except pipeline's `run`.
+shared normalize/fingerprint/insert path), health (the per-target attempt facts every fetcher
+records), and filters (_pattern_matches + validate_pattern, so the ATS/Dice
+config filters speak the same pattern dialect as filters.yaml); nothing depends back on this
+module except pipeline's `run`.
 """
 
 import html
@@ -20,7 +22,6 @@ from core import _ensure_api_key, PARSE_MIN, PARSE_MAX, parse_iso
 from filters import _pattern_matches, validate_pattern  # one pattern dialect + validator
 from health import (FetchSummary, fetch_definition_hash, fetch_error_kind,
                     record_active_fetch_attempt, utc_now_iso)
-# for filters.yaml AND settings.ats
 from posting_store import insert_posting as _insert_posting
 
 
@@ -582,18 +583,22 @@ ATS_BOARDS = {
 }
 
 
-def _ats_clean_patterns(patterns, label):
-    """Sanitize a user pattern list (title_any / location_any), dropping each unusable pattern
+def _ats_clean_patterns(patterns, label, prefix="ats"):
+    """Sanitize a user pattern list (title_any / location_any / Dice's employment_exclude),
+    dropping each unusable pattern
     with a stderr notice via the shared filters.validate_pattern: non-strings (YAML `- re: x`
     parses as a DICT, an unquoted number as an int), blanks, empty-body `re:` (which would
     match everything), and `re:` regexes that don't compile (which would match nothing). Same
-    validator as `reject --pattern`, so the one dialect is checked identically everywhere."""
+    validator as `reject --pattern`, so the one dialect is checked identically everywhere.
+    `prefix` names the calling source in the notice, so a scheduled log attributes a Dice
+    config error to Dice rather than to the ATS boards."""
     out = []
     for p in _as_list(patterns):
         reason = validate_pattern(p)
         if reason:
             hint = " (quote `re:` patterns in YAML)" if not isinstance(p, str) else ""
-            print(f"[ats] ignoring {label} pattern {p!r} — {reason}{hint}", file=sys.stderr)
+            print(f"[{prefix}] ignoring {label} pattern {p!r} — {reason}{hint}",
+                  file=sys.stderr)
             continue
         out.append(p)
     return out
@@ -780,6 +785,494 @@ def fetch_ats(cfg, conn) -> FetchSummary:
         time.sleep(delay)
 
     print(f"[ats] {inserted} new postings inserted ({reposts} reposts of seen roles)")
+    return FetchSummary(
+        inserted, units=units, successes=successes, failures=failures
+    )
+
+
+# ------------------------------------------------------------------ Dice fetch
+#
+# Fourth source family: Dice's public search pages, read logged-out with a browser
+# User-Agent — probed 2026-08-09 with no bot wall (unlike Indeed/Glassdoor/ZipRecruiter/
+# Google, which stay off-limits). There is no sanctioned API and jobspy has no Dice
+# scraper, so this parses the page itself: the job list ships INSIDE the HTML as an
+# escaped Next.js flight payload (script chunks of `self.__next_f.push([1,"..."])`, each a
+# valid JSON string literal — decode and join them, then read real JSON). Per-query like
+# Adzuna, gated per-search by a `dice:` block (one phrase or a list; Dice cannot parse
+# LinkedIn boolean syntax, so phrases are the whole query dialect — each is sent quoted).
+# The quirks that shape the code:
+#   * the search payload has NO description, and the eval must see one — so each genuinely
+#     new URL costs one detail-page fetch. Already-known URLs are skipped BEFORE that
+#     request, which keeps the recurring re-crawl polite and cheap;
+#   * postedDate is a precise UTC timestamp (to the second). Through _ats_date it lands as
+#     local-naive seconds, so the chain's oldest observation becomes a real lower bound on
+#     req age — the instrument that catches a LinkedIn relisting claiming "day 1";
+#   * employmentType marks the C2C staffing flow ("Third Party", plus plain "Contract").
+#     The config-side employment_exclude patterns keep that population out of the DB and
+#     the paid eval — the same flood-guard role ATS title_any plays for boards. Because it
+#     is a flood guard, the code refuses a sweep in which NO row carries an employment type
+#     at all: a renamed payload field would disable the filter silently, and the population
+#     it holds back is the one that costs money;
+#   * salary is display text ("Depends on Experience", "USD 65.00 - 70.00 per hour") →
+#     stored NULL ("unstated", kept by the salary filter — the Adzuna/ATS convention). The
+#     detail page's schema.org baseSalary is a possible future source, deliberately unused
+#     until its provenance (employer-stated vs imputed) is established;
+#   * results are relevance-ranked and a sort=date param is silently ignored (probed), so
+#     page depth inside the posted-window is the completeness bound — totalResults vs
+#     fetched prints per query, so a truncated sweep is never silent.
+
+DICE_SEARCH_URL = "https://www.dice.com/jobs?q={q}&filters.postedDate={window}&page={page}"
+_DICE_WINDOWS = {1: "ONE", 3: "THREE", 7: "SEVEN"}  # the filter values Dice's UI offers
+# A real browser UA: the stock urllib UA is a stock CDN block trigger (same lesson as
+# _ats_get, sharper here because this is a page CDN, not a JSON API).
+_DICE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+_DICE_CHUNK = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
+_DICE_LIST = re.compile(r'"jobList":\s*\{')
+_DICE_DATA = re.compile(r'"data":\s*\[')
+_DICE_DETAIL = re.compile(r'"jobDetail":\s*\{')
+_DICE_TOTAL = re.compile(r'"totalResults":\s*(\d+)')
+_DICE_PAGES = re.compile(r'"totalPages":\s*(\d+)')
+# One dead detail page is ordinary attrition; an all-fail sweep over a real sample is the
+# signature of a changed detail-page shape, which must not read as "everything was known".
+_DICE_MIN_DETAIL_SAMPLE = 3
+_DICE_MAX_PAGES = 20  # ~30 postings/page; an unbounded sweep is spend, not thoroughness
+# A truncated page has no closing brace, so the object scanner would walk the whole
+# remaining flight (seconds on a multi-MB page, per detail fetch). Past this it is malformed.
+_DICE_MAX_OBJECT_SCAN = 2_000_000
+
+
+def _dice_get(url):
+    import urllib.request
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _DICE_UA, "Accept": "text/html"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _dice_flight(page_html):
+    """Join a page's flight chunks into one decoded text. Each chunk is a complete JSON
+    string literal even when the payload it carries is split mid-object across chunks, so
+    decoding chunk-by-chunk and joining in document order reassembles the stream."""
+    return "".join(json.loads(c) for c in _DICE_CHUNK.findall(page_html))
+
+
+def _dice_array_objects(text, start):
+    """Slice the top-level {...} objects of the JSON array opening at text[start] == '['.
+    A hand scanner (depth counter with in-string/escape awareness) instead of a JSON parse
+    of the whole array: the array sits inside a larger flight row we neither need nor want
+    to bind to, and titles legally contain braces."""
+    objs, depth, in_str, esc, obj_start = [], 0, False, False, None
+    for i in range(start + 1, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                objs.append(text[obj_start:i + 1])
+                obj_start = None
+        elif c == "]" and depth == 0:
+            break
+    return objs
+
+
+def _dice_object_at(text, start):
+    """The complete {...} slice of the JSON object opening at text[start] == '{', or None if
+    it never closes within _DICE_MAX_OBJECT_SCAN. Same string/escape-aware scan as
+    _dice_array_objects, and for the same reason: the object sits inside a larger flight row
+    that isn't valid JSON on its own."""
+    depth, in_str, esc = 0, False, False
+    for i in range(start, min(len(text), start + _DICE_MAX_OBJECT_SCAN)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _dice_search_page(page_html):
+    """Parse one search page → (job dicts, total_results, total_pages). Totals come from
+    the FIRST totalResults/totalPages after the jobList anchor: unrelated widgets later in
+    the flight carry their own (observed: a site-wide 6k figure 68KB downstream), and they
+    only feed the printed truncation check plus the page-loop bound, never row selection.
+    Field text is html.unescape'd: Dice serializes entities (&amp;) INSIDE the JSON
+    strings, and a polluted company would break the normalized key against the other
+    sources' clean spelling. Each job keeps both its detailsPageUrl (the stored job_url —
+    the stable identity the search payload keeps returning) and a detail_url built from
+    the guid: some postings link a direct-apply shell page that carries no JD, while
+    job-detail/<guid> serves it for every posting kind (probed 2026-08-09).
+
+    Everything is read from INSIDE the sliced jobList object, which matters twice:
+      * key order stops mattering. Anchoring on `"jobList":{"data":[` required "data" to be
+        the FIRST key, so Dice adding one ahead of it would stop every row parsing;
+      * the totals are jobList's OWN. Taking the first totalResults anywhere after the
+        anchor picked up an unrelated widget's site-wide figure (observed: 6033, 68KB
+        downstream) whenever jobList's own was absent — which made a page that parsed ZERO
+        rows report a healthy total, the exact "0 returned looks fine forever" failure.
+    total_results is None ONLY when the envelope is absent or unterminated, so the caller
+    can distinguish "nothing posted this window" from "this is not a Dice search page"."""
+    flight = _dice_flight(page_html)
+    m = _DICE_LIST.search(flight)
+    if not m:
+        return [], None, None
+    envelope = _dice_object_at(flight, m.end() - 1)
+    if envelope is None:  # truncated/dropped chunk — an envelope we cannot trust
+        return [], None, None
+    jobs = []
+    md = _DICE_DATA.search(envelope)
+    if md:
+        for obj in _dice_array_objects(envelope, md.end() - 1):
+            try:
+                r = json.loads(obj)
+            except ValueError:
+                continue
+            guid = r.get("guid")
+            url = r.get("detailsPageUrl") or (
+                f"https://www.dice.com/job-detail/{guid}" if guid else "")
+            loc = r.get("jobLocation")
+            jobs.append({
+                "url": url,
+                "detail_url": (f"https://www.dice.com/job-detail/{guid}"
+                               if guid else url),
+                "title": html.unescape(str(r.get("title") or "")),
+                "company": html.unescape(str(r.get("companyName") or "")),
+                "location": html.unescape(str((loc or {}).get("displayName") or "")
+                                          if isinstance(loc, dict) else ""),
+                "date_posted": str(r.get("postedDate") or ""),
+                "employment": str(r.get("employmentType") or ""),
+            })
+    mt = _DICE_TOTAL.search(envelope)
+    mp = _DICE_PAGES.search(envelope)
+    # The envelope IS present here, so a missing count falls back to what we parsed rather
+    # than to None — None is reserved for "no usable envelope".
+    total_results = int(mt.group(1)) if mt else len(jobs)
+    total_pages = int(mp.group(1)) if mp else None
+    return jobs, total_results, total_pages
+
+
+def _dice_description(page_html, max_chars):
+    """The detail page's JD, read from the jobDetail object ONLY. HTML → plain text via
+    _strip_html; "" when the page yields no anchored description.
+
+    Anchored, deliberately NOT longest-wins. A detail page also carries a short meta
+    description, the company profile, and a similar-jobs carousel whose entries each have
+    their own "description" — taking the longest string anywhere in the flight text returns
+    the carousel job's text or the company boilerplate whenever either outweighs the JD.
+    Nothing downstream can detect that substitution: the wrong text reaches the paid eval,
+    the verdict caches onto the chain, and marking the role applied freezes it as immutable
+    application evidence via materials.snapshot_jd. A page whose jobDetail anchor is gone
+    therefore yields "" rather than a guess — the caller counts it as a missing JD, skips
+    the insert, and the still-unseen URL retries next run."""
+    try:
+        flight = _dice_flight(page_html)
+    except ValueError:
+        return ""
+    anchors = _DICE_DETAIL.findall(flight)
+    if len(anchors) != 1:
+        # Zero: the shape changed. More than one: a nested jobDetail (a recommendations
+        # block) would make "the first match" a coin flip, and picking the wrong one stores
+        # another role's JD as this role's evidence. Refuse either way — the caller counts
+        # it as a missing JD, and an all-refuse sweep fails the target loudly.
+        return ""
+    m = _DICE_DETAIL.search(flight)
+    assert m is not None
+    obj = _dice_object_at(flight, m.end() - 1)
+    if obj is None:
+        return ""
+    try:
+        detail = json.loads(obj)
+    except ValueError:
+        return ""
+    desc = detail.get("description") if isinstance(detail, dict) else None
+    return _strip_html(desc)[:max_chars] if isinstance(desc, str) else ""
+
+
+def _dice_int(settings, key, default, low, high):
+    """One validated integer knob, warning on ANYTHING unusable. `_num` alone is not enough:
+    it happily turns a YAML bool into 1.0 (`results_pages: yes` → one page) and 2.9 into 2,
+    both silently. A swallowed value here fails in one of two invisible directions — fetching
+    nothing while still recording a healthy success, or removing a spend ceiling."""
+    raw = settings.get(key, default)
+    num = None if isinstance(raw, bool) else _num(raw)
+    if num is None or num != int(num) or not low <= int(num) <= high:
+        print(f"[dice] {key} must be a whole number {low}..{high} — got {raw!r}, "
+              f"using {default}", file=sys.stderr)
+        return default
+    return int(num)
+
+
+def _dice_phrases(block):
+    """A search's dice: block → usable phrase list. Non-string/blank entries drop with a
+    notice (the YAML footguns _as_list exists for), so one typo'd entry doesn't kill the
+    search's other phrases."""
+    phrases = []
+    for p in _as_list(block):
+        if not isinstance(p, str) or not p.strip():
+            print(f"[dice] ignoring phrase {p!r} — expected a non-empty string",
+                  file=sys.stderr)
+            continue
+        phrases.append(p.strip())
+    return phrases
+
+
+def fetch_dice(cfg, conn) -> FetchSummary:
+    """Fetch postings from Dice search pages for every search that defines a `dice:` block;
+    insert unseen postings (one detail-page fetch each for the JD) as status='new',
+    source='dice'. Config-only gate, like ATS: no dice: blocks → no-op with a notice."""
+    if not any(isinstance(search, dict) and search.get("dice")
+               for search in cfg.get("searches") or []):
+        print("[dice] no searches define a dice block — skipping Dice source")
+        record_active_fetch_attempt(
+            conn, source_family="dice", target_kind="family", target_label="dice",
+            definition_hash=None, status="skipped", skip_reason="no configured queries",
+        )
+        return FetchSummary.skipped("no configured queries")
+
+    s = cfg["settings"]
+    d = s.get("dice") or {}
+    pages_limit = _dice_int(d, "results_pages", 2, 1, _DICE_MAX_PAGES)
+    max_days = _dice_int(d, "max_days_old", 7, 1, max(_DICE_WINDOWS))
+    if max_days not in _DICE_WINDOWS:
+        print(f"[dice] max_days_old must be one of {sorted(_DICE_WINDOWS)} "
+              f"(Dice's own filter steps) — got {max_days!r}, using 7", file=sys.stderr)
+        max_days = 7
+    window = _DICE_WINDOWS[max_days]
+    delay_raw = d.get("delay_between_calls", 2)
+    delay = None if isinstance(delay_raw, bool) else _num(delay_raw)
+    if delay is None or delay < 0:  # a negative delay raises inside time.sleep, mid-query
+        print(f"[dice] delay_between_calls must be a number >= 0 — got {delay_raw!r}, "
+              f"using 2", file=sys.stderr)
+        delay = 2
+    # Absent → default C2C exclusion; explicitly [] → user opted into everything. A
+    # configured-but-all-unusable list refuses loudly (the ats location_any lesson: a
+    # silently emptied restrict-intent filter is a flood, here straight into the paid eval).
+    exclude_raw = d.get("employment_exclude")
+    if exclude_raw is None:
+        exclude_raw = ["third party"]
+    employment_exclude = _ats_clean_patterns(exclude_raw, "employment_exclude",
+                                             prefix="dice")
+    # `_as_list`, not truthiness: an explicit [] is the opt-into-everything case, but a
+    # scalar that expresses restrict-intent and cleans to nothing (employment_exclude: ""
+    # or 0) is the flood this guard exists to refuse.
+    if _as_list(exclude_raw) and not employment_exclude:
+        print("[dice] every employment_exclude pattern was unusable — skipping (an empty "
+              "filter would admit the C2C flood)", file=sys.stderr)
+        record_active_fetch_attempt(
+            conn, source_family="dice", target_kind="family", target_label="dice",
+            definition_hash=fetch_definition_hash({"employment_exclude": exclude_raw}),
+            status="failed", error_kind="parse_or_validation",
+        )
+        return FetchSummary.failed("ValueError")
+
+    today_iso = datetime.now().isoformat(timespec="seconds")
+    inserted = 0
+    reposts = 0
+    units = successes = failures = 0
+
+    for search in cfg["searches"]:
+        block = search.get("dice")
+        if not block:
+            continue
+        name = search["name"]
+        for phrase in _dice_phrases(block) or [None]:
+            units += 1
+            attempt_started = utc_now_iso()
+            definition_hash = fetch_definition_hash({
+                "source": "dice", "search_name": name, "phrase": phrase,
+                "settings": {"results_pages": pages_limit, "max_days_old": max_days,
+                             "employment_exclude": employment_exclude},
+            })
+            if phrase is None:  # the block existed but no phrase survived _dice_phrases
+                failures += 1
+                record_active_fetch_attempt(
+                    conn, source_family="dice", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="failed",
+                    error_kind="parse_or_validation", started_at=attempt_started,
+                )
+                print(f"[dice] {name}: dice block has no usable phrases — skipping",
+                      file=sys.stderr)
+                continue
+            print(f"[dice] {name}: {phrase}")
+            q = parse.quote(f'"{phrase}"')
+            returned = eligible = query_inserted = query_reposts = 0
+            detail_attempts = detail_parse_fails = detail_fetch_errors = 0
+            total_results = total_pages = None
+            try:
+                # PHASE 1 — all network I/O, no writes. The other three fetchers finish
+                # their requests before the first INSERT as a side effect of fetching whole
+                # pages; Dice fetches a detail page PER ROW, so inserting as it goes would
+                # hold the WAL writer lock across every remaining request and sleep —
+                # minutes at the shipped defaults, against core.py's 30s busy_timeout,
+                # whose comment assumes writer-vs-writer contention is brief. The local UI
+                # and an overlapping run both write to this DB.
+                pending = []
+                seen_urls = set()
+                urlless = blank_employment = 0
+                for page in range(1, pages_limit + 1):
+                    if total_pages is not None and page > total_pages:
+                        break
+                    page_jobs, page_total, page_pages = _dice_search_page(
+                        _dice_get(DICE_SEARCH_URL.format(q=q, window=window, page=page)))
+                    if total_results is None:
+                        total_results, total_pages = page_total, page_pages
+                    if not page_jobs and (page_total is None or page_total > 0):
+                        # A genuine no-results page parses as an envelope with totalResults
+                        # 0. No envelope (None), or an envelope claiming rows that none of
+                        # them parsed, means the page shape changed or a 200-status block
+                        # page came back. Same rule the Greenhouse reader states: a
+                        # wrong-shaped 200 must never read as an empty board, because
+                        # "0 returned" then looks healthy forever.
+                        why = ("carried no jobList envelope" if page_total is None
+                               else f"listed {page_total} result(s) but none parsed")
+                        if page == 1:
+                            raise ValueError(f"Dice search page {why}")
+                        # Page >= 2: page 1 already proved the shape, and its detail pages
+                        # are already paid for. Failing the query here would discard that
+                        # work — and since the rows are never inserted they stay unseen, so
+                        # the next run pays for them again, forever.
+                        print(f"[dice] {name}: page {page} {why} — keeping pages "
+                              f"1..{page - 1}", file=sys.stderr)
+                        break
+                    if not page_jobs:
+                        break
+                    returned += len(page_jobs)
+                    for r in page_jobs:
+                        url = r["url"]
+                        if not url:
+                            urlless += 1
+                            continue
+                        if not r["employment"].strip():
+                            blank_employment += 1
+                        if url in seen_urls:
+                            continue  # relevance ranking can repeat a row across pages
+                        if any(_pattern_matches(k, r["employment"])
+                               for k in employment_exclude):
+                            continue
+                        eligible += 1
+                        seen_urls.add(url)
+                        if conn.execute("SELECT 1 FROM jobs WHERE job_url=?",
+                                        (url,)).fetchone():
+                            continue  # known URL — never spend the detail fetch on it
+                        time.sleep(delay)
+                        detail_attempts += 1
+                        try:
+                            desc = _dice_description(_dice_get(r["detail_url"]),
+                                                     s["max_description_chars"])
+                        except Exception as de:  # noqa: BLE001 — one dead detail page
+                            detail_fetch_errors += 1   # must not kill the query's rows
+                            print(f"[dice] {name}: detail fetch failed for {url}: {de}",
+                                  file=sys.stderr)
+                            continue
+                        if not desc:
+                            # Fetched cleanly, no anchored JD. Don't insert: an empty
+                            # description would reach the paid eval as a judgment on
+                            # nothing. Still unseen next run, so a transient miss retries.
+                            detail_parse_fails += 1
+                            continue
+                        pending.append((r, desc))
+                    time.sleep(delay)
+                with_url = returned - urlless
+                if returned and not with_url:
+                    # Rows parsed but none carried detailsPageUrl or guid. As a success
+                    # this is indistinguishable from "the filter excluded everything", and
+                    # the source then yields nothing for as long as the rename stands.
+                    raise ValueError(f"none of {returned} rows carried a posting URL")
+                if employment_exclude and with_url and blank_employment == with_url:
+                    # employmentType is this source's flood guard: a rename silently admits
+                    # the whole C2C staffing population into the DB and the paid eval. The
+                    # config-side version of this already refuses loudly; so does this one.
+                    raise ValueError(
+                        f"none of {with_url} rows carried an employment type — "
+                        f"employment_exclude cannot apply")
+                if (detail_parse_fails >= _DICE_MIN_DETAIL_SAMPLE
+                        and detail_parse_fails == detail_attempts):
+                    # Every new URL's page was FETCHED cleanly and yielded no description:
+                    # the detail-page shape changed. As a success that is byte-identical to
+                    # a healthy "everything was already known" sweep. Network errors are
+                    # deliberately excluded — a delisted posting stays in Dice's window and
+                    # is never inserted, so counting timeouts here would re-fire every run
+                    # for a week and blame the parser for a connectivity event.
+                    raise ValueError(
+                        f"all {detail_attempts} detail pages fetched cleanly but yielded "
+                        f"no job description")
+                # PHASE 2 — writes only, no network, so the job rows and their success fact
+                # still commit as one transaction (the per-target health invariant).
+                for r, desc in pending:
+                    n, repost_of = _insert_posting(
+                        conn, url=r["url"], title=r["title"], company=r["company"],
+                        location=r["location"], search_name=name,
+                        tier=search.get("tier", "primary"),
+                        date_posted=_ats_date(r["date_posted"]),
+                        first_seen=today_iso, salary_min=None, salary_max=None,
+                        description=desc, source="dice",
+                    )
+                    query_inserted += n
+                    if n and repost_of:
+                        query_reposts += 1
+                record_active_fetch_attempt(
+                    conn, source_family="dice", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="success",
+                    returned_count=returned, eligible_count=eligible,
+                    inserted_count=query_inserted, repost_count=query_reposts,
+                    started_at=attempt_started, commit=False,
+                )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                failures += 1
+                record_active_fetch_attempt(
+                    conn, source_family="dice", target_kind="query", target_label=name,
+                    definition_hash=definition_hash, status="failed",
+                    error_kind=fetch_error_kind(e), started_at=attempt_started,
+                )
+                print(f"[dice] {name} ({phrase}) FAILED: {e}", file=sys.stderr)
+                time.sleep(delay)
+                continue
+            successes += 1
+            inserted += query_inserted
+            reposts += query_reposts
+            truncated = (f" of {total_results} listed" if total_results is not None
+                         and total_results > returned else "")
+            skipped = detail_parse_fails + detail_fetch_errors
+            detail_note = (f", {skipped} skipped on missing JD "
+                           f"({detail_fetch_errors} fetch error(s))" if skipped else "")
+            print(f"[dice] {name} ({phrase}): {returned} returned{truncated}, "
+                  f"{query_inserted} new{detail_note}")
+
+    print(f"[dice] {inserted} new postings inserted ({reposts} reposts of seen roles)")
+    if not units:
+        record_active_fetch_attempt(
+            conn, source_family="dice", target_kind="family", target_label="dice",
+            definition_hash=None, status="skipped", skip_reason="no configured queries",
+        )
+        return FetchSummary.skipped("no configured queries")
     return FetchSummary(
         inserted, units=units, successes=successes, failures=failures
     )

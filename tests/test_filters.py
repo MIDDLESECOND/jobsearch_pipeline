@@ -44,6 +44,48 @@ def test_rule_hit_empty_rule():
     assert filters._rule_hit({}, "anything") is None
 
 
+def test_rule_hit_company_scope_does_not_leak():
+    # company_any matches ONLY the company name; `any` matches ONLY title+description.
+    # Neither scope sees the other's text — a JD that merely mentions the aggregator's
+    # brand must not trip the company rule, and vice versa.
+    #
+    # The patterns here are deliberately UNANCHORED. With `re:^shellco$` the first
+    # assertion passes whether or not the scoping works, because the anchors alone can
+    # never match a surrounding sentence — the test would be green with company_any wired
+    # to the title+description blob.
+    rule = {"company_any": ["shellco"]}
+    assert filters._rule_hit(rule, "JD text mentioning shellco tooling", "Acme Corp") is None
+    assert filters._rule_hit(rule, "clean description", "ShellCo") == "shellco"
+    text_rule = {"any": ["shellco"]}
+    assert filters._rule_hit(text_rule, "clean description", "ShellCo") is None
+    assert filters._rule_hit(text_rule, "we integrate shellco", "Acme") == "shellco"
+
+
+def test_apply_hard_filters_company_rule_skips_shell_keeps_employer(conn, monkeypatch):
+    """A company_any rule fails the aggregator shell pre-eval (the eval-slot saving it
+    exists for) while the real employer's same-title posting stays 'new' for the eval."""
+    from conftest import make_job
+    make_job(conn, job_url="agg", status="new", verdict=None, company="ShellCo",
+             location="", title="AI Engineer", description="agency shell relist")
+    # The employer's own description NAMES the shell — so if company_any ever leaked into
+    # the title+description scope, this row would be filtered too and the test would fail.
+    make_job(conn, job_url="real", status="new", verdict=None,
+             company="Real Employer Inc.", location="Houston, TX", title="AI Engineer",
+             description="the employer's own posting, also listed via ShellCo")
+    monkeypatch.setattr(filters, "load_filters",
+                        lambda: [{"name": "aggregator_shell", "gate": "other",
+                                  "company_any": ["re:^shellco$"]}])
+    filters.apply_hard_filters({"settings": {}}, conn)
+    agg = conn.execute("SELECT status, verdict, filter_source, filter_gate FROM jobs "
+                       "WHERE job_url='agg'").fetchone()
+    assert agg["status"] == "rule_filtered"
+    assert agg["verdict"] == "GATE_FAIL"
+    assert agg["filter_source"] == "rule:aggregator_shell"
+    assert agg["filter_gate"] == "other"
+    real = conn.execute("SELECT status FROM jobs WHERE job_url='real'").fetchone()
+    assert real["status"] == "new"
+
+
 def test_apply_hard_filters_never_clobbers_existing_attribution(conn, monkeypatch):
     """A row rejected while it sat in 'error' returns through requeue as 'new' still carrying
     filter_source='manual' + the user's gate. The rule pass must leave it alone: re-stamping
@@ -79,3 +121,50 @@ def test_load_filters_warns_on_broken_pattern_but_keeps_rule(tmp_path, monkeypat
     assert rules and rules[0]["name"] == "seniority"  # kept, not dropped
     err = capsys.readouterr().err
     assert "is unusable" in err and "seniority" in err
+
+
+def test_load_filters_warns_on_broken_company_pattern(tmp_path, monkeypatch, capsys):
+    # company_any patterns get the same load-time validation as `any` patterns.
+    f = tmp_path / "filters.yaml"
+    f.write_text(
+        "hard_filters:\n  - name: aggregator_shell\n    gate: other\n"
+        "    company_any:\n      - 're:(shellco'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(filters, "FILTERS_PATH", f)
+    rules = filters.load_filters()
+    assert rules and rules[0]["name"] == "aggregator_shell"  # kept, not dropped
+    err = capsys.readouterr().err
+    assert "is unusable" in err and "aggregator_shell" in err
+
+
+def test_reject_pattern_never_extends_a_company_only_rule(tmp_path, monkeypatch, capsys,
+                                                          conn):
+    """`--gate` defaults to 'other', and a company_any rule is naturally gate 'other' (none
+    of the six named gates describes "this company is an aggregator shell"). Matching purely
+    on gate therefore dropped every un-gated `reject --pattern` into the COMPANY rule's
+    `any` list, and attributed the posting to it."""
+    import pipeline
+    from conftest import make_job
+
+    f = tmp_path / "filters.yaml"
+    f.write_text(
+        "hard_filters:\n  - name: aggregator_shell\n    gate: other\n"
+        "    company_any:\n      - 're:^shellco$'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(filters, "FILTERS_PATH", f)
+    monkeypatch.setattr(pipeline, "FILTERS_PATH", f)
+    make_job(conn, job_url="u", status="new", verdict=None,
+             description="requires an active TS/SCI clearance")
+    posting = conn.execute("SELECT * FROM jobs WHERE job_url='u'").fetchone()
+
+    pipeline._add_filter_rule(conn, "other", "ts/sci", None, posting)
+
+    rules = filters.load_filters()
+    shell = next(r for r in rules if r["name"] == "aggregator_shell")
+    assert shell.get("any") in (None, [])           # untouched
+    assert shell["company_any"] == ["re:^shellco$"]
+    # The description pattern landed in its own rule instead.
+    other = [r for r in rules if r is not shell]
+    assert len(other) == 1 and other[0]["any"] == ["ts/sci"]

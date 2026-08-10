@@ -27,7 +27,7 @@ def _report(conn, tmp_path):
 
 
 def _gate_fail(conn, *, eval_json, title="Engineer, Agentic Solutions"):
-    make_job(conn, title=title, company="Micron", status="evaluated",
+    make_job(conn, title=title, company="Acme Semiconductor", status="evaluated",
              verdict="GATE_FAIL", failed_gate=None, fit_score=None, bucket=None,
              first_seen=f"{DAY}T09:00:00", eval_json=json.dumps(eval_json))
 

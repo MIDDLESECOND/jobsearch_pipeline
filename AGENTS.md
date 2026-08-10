@@ -8,8 +8,9 @@ read AGENTS.md natively get it directly. One source of truth, zero sync surfaces
 
 A personal job-search pipeline: it pulls configured searches from LinkedIn (scraped via
 python-jobspy logged-out guest endpoints — **never** add login cookies), from the Adzuna API
-(sanctioned, free), and from per-company ATS boards (the Greenhouse/Lever/Ashby public JSON
-APIs), dedupes into SQLite, runs each new posting through an LLM "gate-check" evaluation, and
+(sanctioned, free), from per-company ATS boards (the Greenhouse/Lever/Ashby public JSON
+APIs), and from Dice search pages (public, logged-out, no keys), dedupes into SQLite, runs
+each new posting through an LLM "gate-check" evaluation, and
 writes one markdown report per day. Single-user CLI tool, not a service.
 
 **Module layout** (a one-way DAG; every consumer — `app.py`, the tests, the validation scripts —
@@ -55,16 +56,28 @@ re-export hub):
   `confirm_candidate` transactionally validates preview/dismissal state before reusing the guarded
   `chain.dupe_*` cores. Imports `chain` plus the standard library.
 - `filters.py` — the deterministic pre-eval salary + hard-requirement filters, and
-  `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). Imports
-  only `core` and `states`.
+  `_pattern_matches` (the one user-facing pattern dialect: substring or `re:` regex). A rule's
+  patterns are scoped: `any` matches the title+description blob, `company_any` matches the
+  company name ONLY (for aggregator shells, whose location-less relistings the fingerprint
+  can never link to the real employer's posting). Imports only `core` and `states`.
 - `posting_store.py` — the one normalize/fingerprint/repost-link/insert path shared by fetched
   and manually entered postings. Imports only `chain` and `states`.
 - `intake.py` — validated, explicit local intake for roles found outside configured sources. It
   never fetches or evaluates; new rows enter the normal pipeline as `status='new'`. Imports
   `core` and `posting_store`.
-- `fetch.py` — the three sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API,
-  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards). Imports `core`, `posting_store`, and `filters`
-  (`_pattern_matches`, so the ATS title/location filters speak the filters.yaml dialect).
+- `outlook_shadow.py` — an explicit report-only Outlook job-alert probe over delegated Microsoft
+  Graph `Mail.Read`. It requests only exact configured senders, extracts bounded allowlisted
+  Indeed/Lensa/Adzuna/Glassdoor/Robert Half job-detail links (including only locally encoded
+  redirect destinations), compares against `jobs.db` through a read-only/query-only connection,
+  and writes a gitignored report with per-source historical overlap counts. It never mutates
+  mail/DB state, follows job links or opaque tracking tokens, inserts roles, or invokes the
+  evaluator. Imports `chain` plus the standard library, and lazily imports `msal` inside the
+  auth path only (a Windows-marked dependency, so importing this module stays free on other
+  platforms); `pipeline.py` is its CLI wrapper.
+- `fetch.py` — the four sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API,
+  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards, `fetch_dice` = Dice search pages). Imports
+  `core`, `posting_store`, `health` (the per-target attempt facts every fetcher records), and
+  `filters` (`_pattern_matches`, so the ATS/Dice config filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
 - `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
@@ -91,7 +104,7 @@ absorbs changes to the concerns it already owns (chains, decisions, events, dupe
 Unit tests are in `tests/` (`python -m pytest`) — synthetic fixtures, never the real `jobs.db`.
 Other top-level files are config/data.
 
-Why three sources: LinkedIn is the one *scrape* target that still works — Indeed, Glassdoor,
+Why four sources: LinkedIn is the one *scrape* target that still works — Indeed, Glassdoor,
 ZipRecruiter, and Google Jobs are all behind anti-bot walls (probed and confirmed). Adzuna is an
 official API, so it sidesteps that entirely. It's optional: active only for searches with an
 `adzuna:` block and only when `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set, else it is skipped.
@@ -103,8 +116,18 @@ returns every open role, so the config-side `title_any` (required) and `location
 filters are what keep irrelevant roles out of the DB and the paid eval. ATS descriptions are full
 text; salaries are stored NULL ("unstated" — kept by the salary filter, same convention as Adzuna's
 predicted salaries).
+Dice (added 2026-08-09 after an overlap probe measured ~210 new company+title keys/week
+against the other three) is a page scrape like LinkedIn but with no bot wall: the job list is
+embedded in the search page HTML as an escaped Next.js flight payload, readable logged-out.
+It is per-query like Adzuna (`dice:` phrase block per search — Dice can't parse boolean
+syntax), gated purely on config. The search payload has no JD, so each genuinely NEW url
+costs one detail-page fetch (known urls are skipped before that request); `postedDate` is a
+precise timestamp (the chain's best age evidence — LinkedIn relist dates lie); salaries are
+free text → stored NULL ("unstated"); and `employment_exclude` (default `third party`) keeps
+the C2C staffing flood out of the DB and the paid eval — Dice's population is heavily
+staffing-agency, so that filter is its `title_any` equivalent.
 
-Manual intake is an explicit fourth provenance value, not a fourth fetcher. The local UI accepts
+Manual intake is an explicit extra provenance value, not another fetcher. The local UI accepts
 an http(s) posting URL plus user-pasted fields, binds it to a configured search track so the same
 salary floor applies, refuses exact-URL overwrites, and uses the shared posting-store path so
 fingerprint/repost behavior cannot drift from fetched rows. It does not scrape the supplied URL or
@@ -122,6 +145,8 @@ python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB o
 python pipeline.py stats                  # DB counts
 python pipeline.py backup [--output PATH]          # create + verify an evidence ZIP
 python pipeline.py backup --verify PATH            # read-only validation; never restores
+python pipeline.py email-shadow [--days 7]         # Outlook alert discovery report only
+# First setup only: add --login; scheduled runs fail closed rather than opening auth UI.
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
 python pipeline.py applied --url <id> [--resume V] [--channel C] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral)
@@ -158,9 +183,13 @@ same split as `boundary_cases.local.json`), `python tests/validation/compare_mod
 rate) → `flip_consequence.py` (re-cuts a probe by action boundaries; the data behind
 `evaluation.ARBITRATION_BAND`) and `canary.py` (frozen-sentinel judge-drift watch —
 `--init` once, then scheduled via `run_canary.bat`, `--rebaseline` after an accepted judge
-change). Every validation script writes its outputs to
+change). `dice_overlap_probe.py` is the frozen source-decision instrument behind adding Dice;
+it deliberately keeps its OWN flight parser (reading the raw escaped HTML, where `fetch.py`
+reads the decoded flight text) so a later fetcher change cannot retroactively alter what its
+recorded overlap log meant — do not "fix" it to import from `fetch.py`. Every validation
+script writes its outputs to
 `tests/validation/results/` (gitignored) — never the repo root. Scheduling is `run_pipeline.bat`
-(and optionally `run_canary.bat`) via Windows Task Scheduler.
+(and optionally `run_canary.bat` and `run_outlook_shadow.bat`) via Windows Task Scheduler.
 
 ## Architecture invariants (the non-obvious parts)
 
@@ -180,8 +209,9 @@ change). Every validation script writes its outputs to
   wins order-independently — its forward pass upgrades `repost_evaluated` rows — and the
   restore-before-filters order is behaviorally pinned by tests). A new
   pre-eval filter must set a non-`new` status, mirroring the existing salary/hard-filter passes,
-  and must run BEFORE the forward skip passes so their reconciles see its stamps. All three
-  fetchers (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`, then `fetch_ats`) run first and only
+  and must run BEFORE the forward skip passes so their reconciles see its stamps. All four
+  fetchers (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`, then `fetch_ats`, then
+  `fetch_dice`) run first and only
   insert `status='new'` rows, so everything downstream is source-agnostic — the `source` column is
   for provenance/flagging only. Each fetcher is wrapped by `_run_fetch_stage` (the untrusted-input
   boundary): one source's crash is logged, rolled back, and skipped so the run still reaches the
@@ -381,7 +411,7 @@ change). Every validation script writes its outputs to
   has no fabricated unstar time. `/api/events` remains the append-only application-event contract.
 
 - **Pipeline health is per configured fetch target, not inferred from insertion volume.** Every
-  LinkedIn search, Adzuna query, and ATS board records success/failure/skipped facts in
+  LinkedIn search, Adzuna query, ATS board, and Dice query records success/failure/skipped facts in
   `pipeline_fetch_attempts`; a legitimate zero-result response is success, while target inserts
   and their success fact commit together. A target failure first rolls back its partial jobs, then
   commits only a categorized failure fact. `pipeline_runs` brackets the complete cycle; an
@@ -445,8 +475,12 @@ change). Every validation script writes its outputs to
 
 - **Provider default is DeepSeek** (cheap, but deliberately under-filters — which is why the
   hard-filter / `reject` override layer exists). `filters.yaml` holds user-maintained deterministic
-  rules (substring, or `re:`-prefixed regex); `reject --pattern` appends to it, and it's
-  tool-managed/append-safe, separate from the hand-edited `config.yaml`.
+  rules (substring, or `re:`-prefixed regex, scoped by `any` vs `company_any`);
+  `reject --pattern` appends to it, and it's
+  tool-managed/append-safe, separate from the hand-edited `config.yaml`. It writes `any`
+  patterns only, and never extends a company-only rule: those are naturally `gate: other`,
+  which is also `--gate`'s default, so matching purely on gate would drop a
+  title/description pattern into a company rule and misattribute every posting it catches.
 
 ## Conventions
 

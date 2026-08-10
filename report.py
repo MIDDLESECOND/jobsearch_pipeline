@@ -318,7 +318,7 @@ def _recency_dt(date_posted, first_seen):
     label hedges with a "seen" prefix), or None (nothing usable; datetime is the sort-last
     sentinel):
 
-    - full-timestamp date_posted (Adzuna, ATS) → use it;
+    - full-timestamp date_posted (Adzuna, ATS, Dice) → use it;
     - date-only date_posted at/after first_seen's date → use first_seen, hedged as 'seen':
       it bounds the posting time within the fetch window but is not the posting time, so the
       label must not claim precision the source didn't give. The >= (not ==) also absorbs

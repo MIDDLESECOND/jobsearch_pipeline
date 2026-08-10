@@ -69,7 +69,7 @@ def load_filters():
     for rule in rules:
         if not isinstance(rule, dict):
             continue
-        for pat in rule.get("any") or []:
+        for pat in list(rule.get("any") or []) + list(rule.get("company_any") or []):
             reason = validate_pattern(pat)
             if reason:
                 print(f"[filters] rule {rule.get('name') or rule.get('gate')!r}: pattern "
@@ -82,8 +82,9 @@ def save_filters(rules):
     with open(FILTERS_PATH, "w", encoding="utf-8") as f:
         f.write("# Hard-requirement filters — postings matching a pattern are auto-failed\n")
         f.write("# before evaluation. A pattern is a case-insensitive substring unless it is\n")
-        f.write("# prefixed `re:`, which makes it a regex. Managed by `pipeline.py reject`;\n")
-        f.write("# safe to hand-edit. See README.\n")
+        f.write("# prefixed `re:`, which makes it a regex. `any` patterns match the posting's\n")
+        f.write("# title+description; `company_any` patterns match the company name only.\n")
+        f.write("# Managed by `pipeline.py reject`; safe to hand-edit. See README.\n")
         yaml.safe_dump({"hard_filters": rules}, f, sort_keys=False, allow_unicode=True)
 
 
@@ -122,10 +123,20 @@ def validate_pattern(pattern):
     return None
 
 
-def _rule_hit(rule, text):
-    """Return the first pattern in `rule` that matches `text`, or None."""
+def _rule_hit(rule, text, company=""):
+    """Return the first pattern in `rule` that matches its scoped text, or None. `any`
+    patterns match the title+description blob; `company_any` patterns match the company
+    name ONLY. The separate scope exists for aggregator shell accounts (e.g. multi-client
+    reposters posting under their own brand with no location): their relistings can't be
+    fingerprint-deduped against the real employer's posting — the shell carries no real
+    company name or location to match on — so each one burns a paid eval unless the
+    company name itself is the reject key. Scoping it keeps company names out of every
+    description rule's search space."""
     for pat in rule.get("any") or []:
         if _pattern_matches(pat, text):
+            return pat
+    for pat in rule.get("company_any") or []:
+        if _pattern_matches(pat, company):
             return pat
     return None
 
@@ -142,7 +153,7 @@ def apply_hard_filters(cfg, conn):
     # replace the manual attribution, and a later `reject --undo` (which clears only 'manual'
     # rows) would report success while clearing nothing.
     rows = conn.execute(
-        "SELECT job_url, title, description FROM jobs WHERE status=? "
+        "SELECT job_url, title, company, description FROM jobs WHERE status=? "
         "AND filter_source IS NULL", (STATUS_NEW,)
     ).fetchall()
     today = date.today().isoformat()
@@ -152,7 +163,7 @@ def apply_hard_filters(cfg, conn):
         # Rules are tried in file order; the FIRST match wins and records its gate. If a
         # posting could match several rules, reorder filters.yaml to control attribution.
         for rule in rules:
-            if _rule_hit(rule, text):
+            if _rule_hit(rule, text, r["company"] or ""):
                 conn.execute(
                     "UPDATE jobs SET status=?, verdict=?, "
                     "failed_gate=?, filter_source=?, filter_gate=?, filter_date=? WHERE job_url=?",

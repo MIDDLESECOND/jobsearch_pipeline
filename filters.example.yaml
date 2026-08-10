@@ -8,6 +8,16 @@
 # A pattern is a CASE-INSENSITIVE SUBSTRING by default. Prefix it with `re:` to make it a
 # regular expression (case-insensitive), e.g. for numeric ranges.
 #
+# Patterns under `any` match the posting's title+description. A rule may instead (or also)
+# carry `company_any` patterns, matched against the COMPANY NAME only — use this for
+# aggregator/agency shell accounts that repost many employers' roles under their own brand
+# (typically location-less), so the fingerprint can never dedup them against the real
+# employer's posting and each shell burns a paid eval. `reject --pattern` writes only `any`
+# patterns; `company_any` rules are hand-added. It also never extends a company-only rule:
+# such a rule is naturally `gate: other` (none of the six named gates describes "this
+# company is an aggregator shell") and `other` is also `--gate`'s default, so an un-gated
+# `reject --pattern` would otherwise drop a description pattern into a company rule.
+#
 # CAUTION: a match auto-fails the posting AND skips the (paid) eval entirely, so a too-broad
 # pattern silently discards good jobs. Test new patterns — `reject --pattern` prints how many
 # existing postings a pattern would catch before saving. Mind regex quantifiers: `10\+?` makes
@@ -46,3 +56,9 @@ hard_filters:
       - "w2 contract"
       - "contract-to-hire"
       - "6-month contract"
+
+  - name: aggregator_shell
+    gate: other
+    note: "Aggregator accounts reposting other employers' roles under their own brand"
+    company_any:
+      - "re:^exampleaggregator$"   # anchor exactly — a match silently skips the eval

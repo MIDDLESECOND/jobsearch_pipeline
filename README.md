@@ -3,7 +3,8 @@
 [![CI](https://github.com/MIDDLESECOND/jobsearch_pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/MIDDLESECOND/jobsearch_pipeline/actions/workflows/ci.yml)
 
 **LLM-gated job-posting triage.** Fetches postings from LinkedIn (guest endpoints), the
-Adzuna API, and company ATS boards (Greenhouse/Lever/Ashby); dedupes them; runs each
+Adzuna API, company ATS boards (Greenhouse/Lever/Ashby), and Dice search pages; dedupes
+them; runs each
 genuinely new posting through an LLM evaluation gate scored against your own profile and
 evaluation rules; and writes you one ranked markdown report a day — plus a local web UI
 for one-click triage. You open one screen, not fifty tabs.
@@ -36,6 +37,7 @@ flowchart LR
     A["LinkedIn guest search"] --> D["Fingerprint dedup<br/>URL + company/title/location"]
     B["Adzuna API"] --> D
     C["ATS boards<br/>Greenhouse / Lever / Ashby"] --> D
+    J["Dice search pages"] --> D
     D --> E["Deterministic pre-filters<br/>salary floor, filters.yaml rules"]
     E --> F["LLM evaluation gate<br/>DeepSeek or Claude<br/>6 hard gates → fit score → bucket"]
     F --> G["Daily markdown report"]
@@ -54,7 +56,13 @@ only a 500-char description snippet, flagged as such in the report and UI. The A
 boards are public no-auth JSON APIs with no search query — you list companies in
 `config.yaml`, and shared title/location filters decide what enters the pipeline — and
 their postings carry **full** job descriptions, so the evaluator sees the whole JD.
-Adzuna and the ATS boards are optional and off until configured (setup steps 6–7).
+Dice search pages are readable logged-out with no keys; postings carry a precise posted
+timestamp and full JDs (one detail-page fetch per new posting), salaries are stored as
+unstated, and a config filter excludes third-party C2C staffing listings by default.
+Adzuna, the ATS boards, and Dice are optional and off until configured (setup steps 6–8).
+Outlook job-alert discovery is a separate read-only shadow report, not another fetcher:
+it can surface Indeed, Lensa, Adzuna, Glassdoor, and Robert Half links without inserting
+them or spending evaluator tokens.
 
 ### Code layout
 
@@ -76,8 +84,9 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `dupe_candidates.py` | review-only cross-source duplicate suggestions + ignored pairs |
 | `posting_store.py` | shared normalized insertion for fetched and manual postings |
 | `intake.py` | validated, explicit local intake of externally found roles |
+| `outlook_shadow.py` | exact-sender Outlook job-alert scan and report-only DB comparison |
 | `filters.py` | deterministic pre-eval filters (salary, hard rules) |
-| `fetch.py` | the three sources: LinkedIn, Adzuna, ATS boards |
+| `fetch.py` | the four sources: LinkedIn, Adzuna, ATS boards, Dice |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
 | `report.py` | the daily markdown report |
 | `workflow.py` | bounded/filterable UI queries and Action Center queues |
@@ -159,6 +168,33 @@ bundled.
    `site:boards.greenhouse.io "data analyst"`. The `title_any` filter is required — it's what
    keeps a 500-job board from flooding the paid eval — and the first run after adding a company
    evaluates its whole matching backlog once, so add companies gradually.
+8. *(Optional)* Enable the Dice source: the `settings.dice` knobs ship in the template, so
+   all that turns it on is uncommenting the `dice:` phrase (or phrase list) on the searches
+   you want it to cover — that per-search key is the on/off switch, exactly like
+   `settings.ats.companies`.
+   No API keys — Dice's search pages are read logged-out. The first run reaches as deep into
+   the posted window as `results_pages` allows (results are relevance-ranked, and each run
+   prints how many of the listed total it actually saw) and evaluates the new roles once, so
+   start with a small `max_days_old`/`results_pages` if you want a gentler first bill.
+9. *(Optional)* Enable the Outlook job-alert shadow scan. In Microsoft Entra, register a
+   **public desktop application**. For personal Outlook/Hotmail, choose an account audience
+   that includes personal Microsoft accounts and keep `tenant: common`; for a work-only
+   single-tenant registration, put its tenant ID or verified domain in `tenant` instead.
+   Add the Windows broker redirect URI
+   `ms-appx-web://Microsoft.AAD.BrokerPlugin/<client-id>`, enable public client flows, and add
+   Microsoft Graph **delegated** `Mail.Read` (not application `Mail.Read`, and no client secret).
+   Copy the `outlook_email:` example into your private `config.yaml`; set its client ID,
+   account hint, and the exact sender addresses visible in your mailbox (for example Indeed,
+   Lensa, Amy at Adzuna, Glassdoor Jobs, and Robert Half). Display names are not sufficient;
+   copy each actual From address. Then run
+   the one interactive setup command:
+   ```
+   python pipeline.py email-shadow --login
+   ```
+   Windows' authentication broker retains the reusable sign-in; later scheduled scans run
+   silently. The permission can read mail for the signed-in account, but the scanner queries
+   only those exact configured senders and requests only message time/body. It never marks,
+   moves, or deletes mail.
 
 ## 2. Test run
 
@@ -176,8 +212,9 @@ Command Prompt) opened in the project folder. The commands:
 
 | Command | What it does |
 |---------|--------------|
-| `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. The only one that hits the network/API (costs money). |
+| `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. This is the command that can incur evaluator cost. |
 | `report` | Rebuild a report from the database — **free**, no fetching, no API calls. Defaults to today; `--date YYYY-MM-DD` for a past day. |
+| `email-shadow` | Read configured Outlook alerts and write `reports/outlook-shadow-YYYY-MM-DD.md`. Networked but no LLM cost, mailbox/DB writes, or live job-page requests; first use adds `--login`. |
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
 | `backup` | Create and independently verify a ZIP containing the SQLite snapshot plus its catalogued application materials. `--verify PATH` rechecks one without restoring it. |
 | `ui` | Launch a **local web UI** for triaging postings by clicking instead of typing (see §4). |
@@ -197,6 +234,9 @@ python pipeline.py passed  --url 4431386393 --undo   # oops, undo it
 python pipeline.py report                      # refresh the report after marking
 python pipeline.py report --date 2026-06-10    # rebuild a past day's report
 python pipeline.py stats                        # counts
+python pipeline.py email-shadow                 # silent report-only Outlook alert scan
+python pipeline.py email-shadow --login         # first-time interactive Microsoft consent
+python pipeline.py email-shadow --days 30        # bounded historical source-overlap backtest
 python pipeline.py backup                       # verified evidence ZIP under backups/
 python pipeline.py backup --verify backups\jobsearch-evidence-YYYYMMDD-HHMMSS.zip
 python pipeline.py prune --days 90 --vacuum     # (occasional) clear old rejected postings' text, shrink jobs.db
@@ -287,7 +327,8 @@ they actually retain. Older local timestamps without an offset and newer UTC-awa
 normalized to actual instants before both per-category limits and the final ordering are applied.
 
 Open **Health & yield** for structured pipeline evidence. Each configured LinkedIn search,
-Adzuna query, and ATS board is recorded as succeeded, failed, or intentionally skipped; zero new
+Adzuna query, ATS board, and Dice query is recorded as succeeded, failed, or intentionally
+skipped; zero new
 postings is not treated as a failure. Recent runs show target counts and categorized failures
 without storing raw exception messages, request URLs, credentials, or posting text. If the bounded
 response omits older target-detail rows, the UI reports the displayed and total counts instead of
@@ -426,8 +467,22 @@ cost.
 The times don't need to be exact — `hours_old: 4` in config.yaml gives each run overlap
 with the previous one, and the database dedupes anything seen twice. A waking-hours-only
 schedule leaves a small overnight LinkedIn gap (postings made ~23:00–04:00); Adzuna's
-1-day lookback and the full ATS board fetch cover those sources overnight regardless, and
+1-day lookback, the full ATS board fetch, and Dice's day-level window cover those sources
+overnight regardless, and
 raising `hours_old` on its own closes the gap if you ever notice morning misses.
+
+For the optional Outlook shadow report, create a separate once-daily task using
+`run_outlook_shadow.bat` after the interactive `--login` succeeds. Run it under the same Windows
+user that performed the login; the batch file intentionally has no `--login`, so an expired or
+revoked session fails visibly instead of opening a hidden prompt. “Unseen link” in its report
+means only that the exact URL is absent from `jobs.db`; title-only matches remain labeled as
+uncertain, sender-quota truncation is stated explicitly, and no email candidate enters the
+evaluation pipeline automatically. A 30-day run is also the historical backtest: its report
+breaks out candidate-bearing emails, candidate links, exact DB URLs, uncertain title matches,
+and unseen URLs for each supported provider. Those counts measure overlap, not causal discovery
+or job quality. Direct job-detail links and locally encoded redirect destinations are supported;
+opaque tracking tokens are intentionally not followed, because resolving them would disclose a
+click and weaken the report's no-live-job-page boundary.
 
 ## 6. Editing searches
 
@@ -503,7 +558,13 @@ year floor, contract-only). Two ways to handle it:
   also listed in `python pipeline.py --help`).
 
 A pattern is a **case-insensitive substring** unless you prefix it `re:`, which makes it a
-**regex** (e.g. `re:\b1[0-9]\+? years` for 10+ years). `filters.yaml` is gitignored and
+**regex** (e.g. `re:\b1[0-9]\+? years` for 10+ years). Patterns under `any` match the
+posting's title+description; a hand-added rule can instead carry `company_any` patterns
+(`reject --pattern` writes only `any`, and never extends a company-only rule),
+matched against the **company name** only — for aggregator accounts that repost many
+employers' roles under their own brand (usually location-less), which the fingerprint can
+never dedup against the real employer's posting, so each shell would burn a paid eval.
+`filters.yaml` is gitignored and
 hand-editable — copy `filters.example.yaml` to start, or just let `reject` build it as you go.
 Rule-failed and manually-rejected postings both appear in the auditable Hard-fail section so an
 over-aggressive rule can't silently bury good jobs.

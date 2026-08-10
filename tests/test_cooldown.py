@@ -107,9 +107,13 @@ def _drive_run(conn, monkeypatch, argv, fetch_crashes=False):
     monkeypatch.setattr(pipeline, "load_config", lambda: {"settings": {}, "searches": []})
     monkeypatch.setattr(pipeline, "get_db", lambda cfg: conn)
     monkeypatch.setattr(pipeline, "run_log", lambda label="run": contextlib.nullcontext())
+    # All four: an unstubbed fetcher runs for real and appends nothing, so it would neither
+    # appear in the order assertions nor actually crash under `fetch_crashes` — which is
+    # what test_all_fetchers_crashed_does_not_stamp is named for.
     monkeypatch.setattr(pipeline, "fetch_new_jobs", fetcher("linkedin"))
     monkeypatch.setattr(pipeline, "fetch_adzuna", fetcher("adzuna"))
     monkeypatch.setattr(pipeline, "fetch_ats", fetcher("ats"))
+    monkeypatch.setattr(pipeline, "fetch_dice", fetcher("dice"))
     for name in ("apply_salary_filter", "apply_hard_filters", "evaluate_new_jobs"):
         monkeypatch.setattr(pipeline, name, lambda c, cn, _n=name: calls.append(_n))
     for name in ("skip_decided_reposts", "skip_evaluated_reposts"):

@@ -7,6 +7,112 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-10 — read-only Outlook job-alert shadow report (no judgment change)
+
+- Added an opt-in `email-shadow` command backed by delegated Microsoft Graph `Mail.Read` and
+  the Windows authentication broker. It queries only exact configured alert senders, extracts
+  bounded Indeed/Lensa/Adzuna/Glassdoor/Robert Half job-detail anchors, and compares them with
+  `jobs.db` through a SQLite read-only/query-only connection. Locally encoded tracking
+  destinations can be unwrapped without requests; opaque trackers are never followed.
+- The output is a gitignored daily discovery report only. The command does not alter mailbox or
+  job state, follow posting links, insert roles, or invoke the LLM. Exact URL matches are distinct
+  from uncertain title-only hints so the shadow measurement cannot claim false incremental yield.
+- First authentication is explicit (`email-shadow --login`); scheduled runs never open login UI.
+  No client secret or token cache file is stored by the project; Windows' broker owns refresh.
+- A bounded 30-day run now acts as a historical overlap backtest, with candidate-bearing email,
+  candidate-link, exact-URL, possible-title, and unseen-URL counts broken out by provider. The
+  report explicitly avoids treating those counts as causal first-discovery evidence.
+- Graph pagination is bound to the original folder, exact sender, time window, selected fields,
+  order, and page size before any next page is requested. Provider route allowlists accept only
+  observed job-detail shapes, so same-domain preference, search, and profile pages cannot pollute
+  the historical counts.
+
+---
+
+## 2026-08-09 — Dice as the fourth posting source (`fetch_dice`)
+
+- **New fetcher for Dice search pages** — public, logged-out, no keys; the job list is
+  embedded in the page HTML as an escaped Next.js flight payload. Per-query like Adzuna
+  (`dice:` phrase block per search, `settings.dice` for the knobs), wrapped by
+  `_run_fetch_stage` after `fetch_ats`, inserting `status='new'` rows through the shared
+  posting-store path. No schema change; `source='dice'` is a new provenance value.
+- Why: an overlap probe (`tests/validation/dice_overlap_probe.py`, 2026-08-09) measured
+  ~210 new company+title keys per 7-day window against the existing three sources — 78
+  keeping the strictest cut (primary-tier phrases, pure full-time) — including
+  forward-deployed/SA-AI roles at direct employers the LinkedIn queries never surfaced.
+  54% of Dice's population was already-known chains, confirming it also serves as
+  cross-post evidence rather than pure novelty.
+- Evaluation-relevant mechanics: the search payload carries no JD, so each genuinely new
+  URL costs one detail-page fetch (known URLs are skipped first; a posting whose detail
+  page yields no JD is NOT inserted — an empty description must never reach the paid
+  eval — and retries as still-unseen next run). That JD is read from the detail page's
+  `jobDetail` object specifically, NOT as "the longest description string on the page":
+  a detail page also carries a meta description, the company profile, and a similar-jobs
+  carousel with its own descriptions, and longest-wins demonstrably returns one of those
+  instead. A substituted JD is undetectable downstream — it reaches the paid eval, the
+  verdict caches onto the chain, and applying freezes it as immutable packet evidence —
+  so a page without the anchor yields no JD rather than a guess. `postedDate` is a precise timestamp
+  stored through `_ats_date` (real intra-day recency; the chain's best true-age lower
+  bound). Salaries are display text → stored NULL/unstated, the Adzuna/ATS convention;
+  the detail page's schema.org `baseSalary` stays unused until its provenance
+  (employer-stated vs imputed) is established. `employment_exclude` (default
+  `third party`) keeps the C2C staffing flood out of the DB and the eval spend — the
+  probe put contract/third-party flow at roughly half of Dice's new keys.
+- The search page is parsed from INSIDE the sliced `jobList` object. Key order stops
+  mattering (anchoring on `"jobList":{"data":[` made "data" required to be the first key),
+  and the totals are jobList's own rather than the first `totalResults` anywhere after the
+  anchor — which used to pick up an unrelated widget's site-wide figure and so let a page
+  that parsed ZERO rows report a healthy total.
+- Health facts are fail-loud, matching the Greenhouse reader's rule that a wrong-shaped
+  200 must never read as an empty board. A genuine no-results page ships the envelope with
+  `totalResults: 0`; recorded as a categorized FAILURE instead are a first page with no
+  usable envelope (layout change, or a 200-status block page), an envelope claiming results
+  none of which parsed, a sweep where no row carries a posting URL or an employment type
+  (either rename silently disables the C2C flood guard, straight into the paid eval), and
+  a sweep of at least three new URLs whose detail pages all FETCH cleanly yet yield no
+  description. Network failures are excluded from that last rule on purpose: a delisted ad
+  stays in the posted window and is never inserted, so counting timeouts would re-fire
+  every run for a week and blame the parser for a connectivity event. All of these
+  previously recorded `success, returned=0` — indistinguishable from a healthy run, and a
+  false green for the cooldown's "at least one target succeeded" stamp. The config knobs
+  validate out loud for the same reason: `results_pages: -1` fetched nothing while
+  reporting success, `results_pages: yes` quietly fetched one page, and the value is now a
+  whole number bounded 1..20.
+- A LATER page that comes back unusable stops the sweep with a notice instead of failing
+  the query. Page 1's detail fetches are already paid for, and since a failed query inserts
+  nothing, failing would have discarded them and re-bought the same rows every run.
+- Detail-page fetches run BEFORE any insert, so no HTTP request or politeness sleep
+  happens inside the SQLite write transaction. Dice is the only source that fetches per
+  row, so inserting as it went held the WAL writer lock for minutes on a first crawl
+  against a 30s `busy_timeout` — long enough to fail a triage click in the local UI or an
+  overlapping scheduled run. The rows and their success fact still commit together.
+
+- **`filters.yaml` rules can now carry `company_any` patterns**, matched against the
+  posting's company name only (`any` patterns keep matching title+description — existing
+  rules' semantics unchanged). The shipped example rule is `aggregator_shell`; the actual
+  patterns live in the gitignored `filters.yaml`, since they name specific firms.
+- Why: multi-client aggregator accounts repost other employers' roles under their own
+  brand — in the observed case one account held 85 rows across 48 distinct titles with
+  every location field empty. The content fingerprint (company+location+exact title) can
+  never link such a shell to the real employer's posting, because the shell carries
+  neither the real company nor a location, so each relisting reached the paid eval. The
+  concrete trigger was a role first evaluated in July under its employer's own posting
+  and re-evaluated three weeks later under a shell's relisting — one wasted eval AND two
+  contradictory verdicts for the same role. Company-name *normalization* was considered
+  and rejected: with many unknown client employers behind one brand there is nothing to
+  normalize the shell's company to, and title-only linking is the false-repost class the
+  exact fingerprint deliberately avoids (one generic analyst title appeared under 170
+  companies in 14 days).
+- Mechanics: same `rule_filtered`/`GATE_FAIL` stamps and attribution
+  (`filter_source='rule:<name>'`) as every hard rule, so shells land in the auditable
+  Hard-fail report section, repost passes see the stamp, and the eval never runs.
+  `company_any` patterns get the same load-time validation. `reject --pattern` still
+  writes only `any` patterns, and it will not extend a company-only rule: such a rule is
+  naturally `gate: other`, which is also `--gate`'s default, so an un-gated
+  `reject --pattern` would otherwise append a description pattern to a company rule.
+
+---
+
 ## 2026-08-08 — covering indexes for the triage read paths (schema, no judgment change)
 
 - **Five covering indexes on `jobs`** (built in the `get_db` migration path, recreated after
@@ -104,7 +210,7 @@ changes to *how postings are judged* do.
 ## 2026-08-07 — Schema: `jobs.eval_issues`; flagged verdicts enter the attention queue
 
 - Audit of the contract diagnostics on real data. The live `gate_results` check flags **1**
-  row — Micron "Engineer, Agentic Solutions", six PASSes with `failed_gate` NULL and
+  row — an agentic-solutions engineering role with six PASSes, `failed_gate` NULL and
   `ai_artifact_depth` 0, the guide's canonical depth-0 → RECRUITER_ONLY case stored as a
   rejection (1 of 208 GATE_FAIL rows carrying `gate_results`, 0.5%). It caught that the day
   it shipped.
@@ -140,7 +246,7 @@ changes to *how postings are judged* do.
   migration on the 293 MB database is 0.5 s.
 - Undecided flagged rows now appear in **Needs attention**. They had no other surface: a
   GATE_FAIL row is in no queue and no backlog listing, and its NULL `fit_score` sorts it
-  below every scored row in the date view — the Micron row was on page 7 of 11 for its day.
+  below every scored row in the date view — that flagged row was on page 7 of 11 for its day.
 - **Deliberately not done: automatic re-routing.** Rewriting a self-contradicting GATE_FAIL
   to RECRUITER_ONLY would trust the model's gate table over its own verdict on n=1 evidence,
   in a judge with a measured ~18-25% verdict flip rate — automating a guess. The row is

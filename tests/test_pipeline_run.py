@@ -88,9 +88,9 @@ def test_one_source_crash_does_not_lose_the_others(conn, capsys):
     assert "adzuna fetch FAILED" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("crasher", ["linkedin", "adzuna", "ats"])
+@pytest.mark.parametrize("crasher", ["linkedin", "adzuna", "ats", "dice"])
 def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys, crasher):
-    # Integration: the real `run` block must wrap EACH of the three fetchers, so ANY single
+    # Integration: the real `run` block must wrap EACH of the four fetchers, so ANY single
     # source crashing still lets the run reach every downstream stage. Parametrizing over WHICH
     # fetcher crashes is what makes this catch an unwrapped fetcher regardless of which one it
     # is — a test that only ever crashed `adzuna` would stay green even if linkedin/ats were
@@ -111,9 +111,14 @@ def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys
     monkeypatch.setattr(pipeline, "load_config", lambda: {"settings": {}, "searches": []})
     monkeypatch.setattr(pipeline, "get_db", lambda cfg: conn)
     monkeypatch.setattr(pipeline, "run_log", lambda label="run": contextlib.nullcontext())
+    # ALL FOUR fetchers are stubbed. An unstubbed one runs for real, appends nothing to
+    # `calls`, and so becomes invisible to the order assertion below — it could then be
+    # moved anywhere in the load-bearing stage order (even after the filters) with the
+    # whole suite still green.
     monkeypatch.setattr(pipeline, "fetch_new_jobs", make("linkedin"))
     monkeypatch.setattr(pipeline, "fetch_adzuna", make("adzuna"))
     monkeypatch.setattr(pipeline, "fetch_ats", make("ats"))
+    monkeypatch.setattr(pipeline, "fetch_dice", make("dice"))
     monkeypatch.setattr(pipeline, "apply_salary_filter", lambda c, cn: calls.append("salary"))
     monkeypatch.setattr(pipeline, "apply_hard_filters", lambda c, cn: calls.append("hard"))
     def _skip_stub(name):
@@ -134,7 +139,7 @@ def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys
     pipeline.main()
 
     # Every fetcher attempted (the crasher caught), every downstream stage ran, in order.
-    assert calls == ["linkedin", "adzuna", "ats",
+    assert calls == ["linkedin", "adzuna", "ats", "dice",
                      "skip:restore", "skip_eval:restore",   # restores BEFORE the filters
                      "salary", "hard",
                      "skip:fwd", "skip_eval:fwd",           # forward skips after them

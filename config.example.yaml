@@ -88,6 +88,50 @@ settings:
     #   - slug: another-co
     #     board: lever
 
+  # Optional fourth source: Dice search pages (public, logged-out, no keys — the job list is
+  # embedded in the page HTML). Active only for searches that define a `dice:` block (see the
+  # solutions_architect example below). Dice can't parse LinkedIn boolean syntax: a dice:
+  # block is one phrase or a list of phrases, each its own search call. Postings carry a
+  # precise posted timestamp (good for recency) but NO salary numbers (stored unstated, kept
+  # by the salary filter) — and heavy contract/C2C staffing traffic, which is why
+  # employment_exclude exists.
+  dice:
+    results_pages: 2         # search pages fetched per phrase (~30 postings/page,
+                             # relevance-ranked; raise for backfill, lower for steady state).
+                             # Must be 1..20; anything else warns and falls back to 2
+    max_days_old: 7          # posted-within window; 1, 3, or 7 (Dice's own filter steps) —
+                             # any other value warns and falls back to 7.
+                             # Keep >= your run cadence; 1 suits a several-times-daily schedule
+    delay_between_calls: 2   # seconds between page/detail requests; be polite
+    # Patterns (filters.yaml dialect: substring or quoted "re:" regex) matched against the
+    # posting's employment type; matches never enter the DB. Default when omitted:
+    # ["third party"] (the corp-to-corp staffing flow). Set to [] to admit everything.
+    employment_exclude: ["third party"]
+
+  # Optional, separate Outlook job-alert SHADOW scan. This is not a fifth posting source:
+  # `python pipeline.py email-shadow` reads only the exact configured senders and writes a
+  # disposable local report. It never changes mail, follows job links, writes jobs.db, or
+  # invokes the evaluator. Register a public desktop app in Microsoft Entra, grant delegated
+  # Microsoft Graph Mail.Read, then paste its Application (client) ID below. See README §1.
+  # outlook_email:
+  #   client_id: "00000000-0000-0000-0000-000000000000"
+  #   tenant: "common"              # for personal/multitenant app registrations; a
+  #                                  # single-tenant work app uses its tenant ID/domain
+  #   login_hint: "you@example.com" # recommended if Windows knows multiple MS accounts
+  #   folder: "inbox"               # Graph well-known folder name or folder ID
+  #   senders:                       # exact addresses: no domain-wide/all-mail body read
+  #     - "replace-with-your-indeed-alert-sender@example.com"
+  #     - "replace-with-your-lensa-alert-sender@example.com"
+  #     - "replace-with-amy-at-adzuna-sender@example.com"
+  #     - "replace-with-glassdoor-jobs-sender@example.com"
+  #     - "replace-with-robert-half-sender@example.com"
+  #   days: 7                        # 1..30; overlap is harmless within each report
+  #                                  # use --days 30 for a per-provider overlap backtest
+  #   max_messages: 200              # 1..500 total, fairly quota'd across senders;
+  #                                  # quota truncation is disclosed in the report.
+  #                                  # Must be >= the number of senders above, so every
+  #                                  # configured sender gets at least one message slot
+
 # Optional: deterministic hard-requirement filters (auto-fail postings missing a hard
 # requirement before the paid eval) live in a separate `filters.yaml` — see filters.example.yaml.
 
@@ -108,6 +152,11 @@ searches:
       what_phrase: "solutions architect"
       what_or: "AI automation"
       what_exclude: "principal director staff"
+    # Optional: also run this search against Dice (needs the settings.dice block above).
+    # One phrase or a list — Dice gets each phrase quoted, nothing else of the term.
+    # This per-search key IS the on/off switch (there are no API keys to gate on), exactly
+    # like settings.ats.companies — uncomment it to start fetching Dice for this search.
+    # dice: "solutions architect"
 
   - name: solutions_engineer
     tier: primary

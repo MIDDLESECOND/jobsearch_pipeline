@@ -301,6 +301,8 @@ def _configured_attributions(cfg):
         expected.add(("linkedin", name))
         if search.get("adzuna"):
             expected.add(("adzuna", name))
+        if search.get("dice"):
+            expected.add(("dice", name))
     ats = (cfg.get("settings") or {}).get("ats") or {}
     companies = ats.get("companies") or []
     if isinstance(companies, dict) or isinstance(companies, str):

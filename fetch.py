@@ -830,7 +830,7 @@ _DICE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _DICE_CHUNK = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
 _DICE_LIST = re.compile(r'"jobList":\s*\{')
 _DICE_DATA = re.compile(r'"data":\s*\[')
-_DICE_DETAIL = re.compile(r'"jobDetail":\s*\{')
+_DICE_JSONLD = re.compile(r'"@type"\s*:\s*"JobPosting"')
 _DICE_TOTAL = re.compile(r'"totalResults":\s*(\d+)')
 _DICE_PAGES = re.compile(r'"totalPages":\s*(\d+)')
 # One dead detail page is ordinary attrition; an all-fail sweep over a real sample is the
@@ -978,39 +978,48 @@ def _dice_search_page(page_html):
 
 
 def _dice_description(page_html, max_chars):
-    """The detail page's JD, read from the jobDetail object ONLY. HTML → plain text via
-    _strip_html; "" when the page yields no anchored description.
+    """The detail page's JD, read from the page's schema.org JobPosting block ONLY.
+    HTML → plain text via _strip_html; "" when the page yields no anchored description.
 
-    Anchored, deliberately NOT longest-wins. A detail page also carries a short meta
-    description, the company profile, and a similar-jobs carousel whose entries each have
-    their own "description" — taking the longest string anywhere in the flight text returns
-    the carousel job's text or the company boilerplate whenever either outweighs the JD.
-    Nothing downstream can detect that substitution: the wrong text reaches the paid eval,
-    the verdict caches onto the chain, and marking the role applied freezes it as immutable
-    application evidence via materials.snapshot_jd. A page whose jobDetail anchor is gone
-    therefore yields "" rather than a guess — the caller counts it as a missing JD, skips
-    the insert, and the still-unseen URL retries next run."""
+    Anchored, deliberately NOT longest-wins. A detail page carries several other
+    "description" values — a short meta description, and a flight component prop — and any
+    of them can outgrow the JD. Nothing downstream can detect a substitution: the wrong text
+    reaches the paid eval, the verdict caches onto the chain, and marking the role applied
+    freezes it as immutable application evidence via materials.snapshot_jd.
+
+    The anchor is the JSON-LD block Dice embeds for search engines (`"@type":
+    "JobPosting"`), NOT a Next.js internal key. That matters: the JSON-LD is a public
+    schema.org contract that survives the framework renaming its component props, and it is
+    the same block the page's baseSalary/hiringOrganization live in. Verified against live
+    pages 2026-08-10 — exactly one marker per page, and its description reproduces
+    byte-for-byte what the earlier longest-wins reader had stored for those postings.
+
+    More than one marker means the page grew a second JobPosting (a recommendations block),
+    which would make "the first match" a coin flip; zero means the shape changed. Both yield
+    "" rather than a guess — the caller counts that as a missing JD, skips the insert, and
+    the still-unseen URL retries next run."""
     try:
         flight = _dice_flight(page_html)
     except ValueError:
         return ""
-    anchors = _DICE_DETAIL.findall(flight)
-    if len(anchors) != 1:
-        # Zero: the shape changed. More than one: a nested jobDetail (a recommendations
-        # block) would make "the first match" a coin flip, and picking the wrong one stores
-        # another role's JD as this role's evidence. Refuse either way — the caller counts
-        # it as a missing JD, and an all-refuse sweep fails the target loudly.
+    if len(_DICE_JSONLD.findall(flight)) != 1:
         return ""
-    m = _DICE_DETAIL.search(flight)
+    m = _DICE_JSONLD.search(flight)
     assert m is not None
-    obj = _dice_object_at(flight, m.end() - 1)
+    start = flight.rfind("{", 0, m.start())  # the JSON-LD object's own opening brace
+    if start == -1:
+        return ""
+    obj = _dice_object_at(flight, start)
     if obj is None:
         return ""
     try:
-        detail = json.loads(obj)
+        data = json.loads(obj)
     except ValueError:
         return ""
-    desc = detail.get("description") if isinstance(detail, dict) else None
+    # The walk-back landed on the wrong brace if this is not the posting object itself.
+    if not isinstance(data, dict) or data.get("@type") != "JobPosting":
+        return ""
+    desc = data.get("description")
     return _strip_html(desc)[:max_chars] if isinstance(desc, str) else ""
 
 
@@ -1142,6 +1151,13 @@ def fetch_dice(cfg, conn) -> FetchSummary:
                         _dice_get(DICE_SEARCH_URL.format(q=q, window=window, page=page)))
                     if total_results is None:
                         total_results, total_pages = page_total, page_pages
+                        if total_pages is None and total_results and page_jobs:
+                            # Live pages carry totalResults but no totalPages inside the
+                            # envelope (probed 2026-08-10). Derive the bound from the first
+                            # page's size, or the sweep requests a page past the end — and
+                            # that page comes back an EMPTY envelope still advertising the
+                            # full total, which is the shape of a real parse failure.
+                            total_pages = -(-total_results // len(page_jobs))
                     if not page_jobs and (page_total is None or page_total > 0):
                         # A genuine no-results page parses as an envelope with totalResults
                         # 0. No envelope (None), or an envelope claiming rows that none of

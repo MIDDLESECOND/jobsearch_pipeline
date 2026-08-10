@@ -55,19 +55,29 @@ _DETAIL_JD = ("<p>Own the pipeline &amp; ship it</p>"
               "<ul><li>SQL</li><li>Python</li></ul>")
 
 
-def _detail_html(jd=_DETAIL_JD, *, carousel=(), company_profile=None):
-    """A detail page. `carousel`/`company_profile` add the OTHER description-bearing objects
-    real pages carry — deliberately longer than the JD, so a reader that took "the longest
-    description on the page" would return one of them instead of this job's."""
-    parts = ['"jobDetail":%s' % json.dumps({"description": jd}),
-             '"meta":{"description":"short teaser"}']
+def _detail_html(jd=_DETAIL_JD, *, carousel=(), company_profile=None, postings=1):
+    """A detail page, modelling the shape probed on LIVE pages 2026-08-10: the JD lives in
+    the schema.org JSON-LD JobPosting block Dice embeds for search engines, inline in a
+    flight row, alongside other description-bearing objects.
+
+    Getting this fixture right is load-bearing. An earlier version invented a
+    `{"jobDetail": {...}}` wrapper that no real page has, so the tests happily confirmed an
+    extraction that returned NOTHING against production — caught only by fetching a real
+    page. `carousel`/`company_profile` are deliberately longer than the JD, so a reader that
+    took "the longest description on the page" would return one of them instead."""
+    rows = ["4%d:Te4b,%s" % (i, json.dumps({
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Solutions Architect",
+        "description": jd,
+    })) for i in range(postings)]
+    decoys: dict[str, object] = {"meta": {"description": "short teaser"}}
     if carousel:
-        parts.append('"similarJobs":%s'
-                     % json.dumps([{"description": c} for c in carousel]))
+        decoys["similarJobs"] = [{"description": c} for c in carousel]
     if company_profile:
-        parts.append('"companyProfile":%s'
-                     % json.dumps({"description": company_profile}))
-    return _flight_html("2e:{%s}" % ",".join(parts))
+        decoys["companyProfile"] = {"description": company_profile}
+    rows.append("2e:%s" % json.dumps(decoys))
+    return _flight_html("\n".join(rows))
 
 
 class _Router:
@@ -132,11 +142,11 @@ def test_dice_search_page_fields_and_entities():
     assert j["employment"] == "Full-time"
 
 
-def test_dice_detail_reads_the_anchored_job_detail_not_the_longest_string():
-    """The JD comes from the jobDetail object, NOT from "the longest description on the
-    page". A detail page also carries a meta description, the company profile, and a
-    similar-jobs carousel with its own descriptions — longest-wins demonstrably returns one
-    of those. A substituted JD is undetectable downstream: it reaches the paid eval, the
+def test_dice_detail_reads_the_schema_org_posting_not_the_longest_string():
+    """The JD comes from the schema.org JobPosting block, NOT from "the longest description
+    on the page". A detail page also carries a meta description, a company profile and a
+    similar-jobs carousel with their own descriptions — longest-wins demonstrably returns
+    one of those. A substituted JD is undetectable downstream: it reaches the paid eval, the
     verdict caches onto the chain, and applying freezes it as immutable packet evidence."""
     out = _dice_description(
         _detail_html(carousel=["Unrelated recommended role. " * 40],
@@ -556,11 +566,9 @@ def test_fetch_dice_dead_detail_links_do_not_fail_the_query(conn, monkeypatch):
 
 
 def test_dice_detail_ambiguous_anchor_yields_no_jd():
-    """Two jobDetail objects make "the first match" a coin flip, and picking wrong stores
+    """Two JobPosting blocks make "the first match" a coin flip, and picking wrong stores
     another role's JD as this role's evidence. Refuse instead."""
-    payload = ('2e:{"recommendations":[{"jobDetail":{"description":"WRONG ROLE"}}],'
-               '"jobDetail":{"description":"the real one"}}')
-    assert _dice_description(_flight_html(payload), 12000) == ""
+    assert _dice_description(_detail_html(postings=2), 12000) == ""
 
 
 # ------------------------------------------------------------- query shape and knobs

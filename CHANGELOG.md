@@ -46,12 +46,15 @@ changes to *how postings are judged* do.
   URL costs one detail-page fetch (known URLs are skipped first; a posting whose detail
   page yields no JD is NOT inserted — an empty description must never reach the paid
   eval — and retries as still-unseen next run). That JD is read from the detail page's
-  `jobDetail` object specifically, NOT as "the longest description string on the page":
-  a detail page also carries a meta description, the company profile, and a similar-jobs
-  carousel with its own descriptions, and longest-wins demonstrably returns one of those
-  instead. A substituted JD is undetectable downstream — it reaches the paid eval, the
-  verdict caches onto the chain, and applying freezes it as immutable packet evidence —
-  so a page without the anchor yields no JD rather than a guess. `postedDate` is a precise timestamp
+  schema.org JSON-LD `JobPosting` block specifically, NOT as "the longest description
+  string on the page": a page carries several other description values, and longest-wins
+  returns one of those whenever it outgrows the JD. A substituted JD is undetectable
+  downstream — it reaches the paid eval, the verdict caches onto the chain, and applying
+  freezes it as immutable packet evidence — so a page without exactly one anchor yields no
+  JD rather than a guess. The JSON-LD block is the anchor rather than a framework-internal
+  key because it is a public contract that survives Next.js renaming its component props;
+  verified against live pages on 2026-08-10, where its description reproduced byte-for-byte
+  what the longest-wins reader had already stored. `postedDate` is a precise timestamp
   stored through `_ats_date` (real intra-day recency; the chain's best true-age lower
   bound). Salaries are display text → stored NULL/unstated, the Adzuna/ATS convention;
   the detail page's schema.org `baseSalary` stays unused until its provenance

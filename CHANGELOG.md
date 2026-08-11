@@ -7,6 +7,54 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-11 — title_trajectory: one-rung functional-lateral scores 2
+
+**Scoring calibration (user decision, 2026-08-11).** The law-firm AI-analyst family (Godfrey &
+Kahn *AI Solutions Analyst*, 2026-08-10; Steptoe & Johnson PLLC *AI Solutions Analyst*,
+2026-08-11) posed the same swing line twice: SA → Analyst drops one title rung (reports to a
+manager, supervises none, strategy ownership explicitly carved out), but the seat's substance —
+configuration, integration, testing, runbook documentation — is the current operating level.
+Decision: that shape scores `title_trajectory` **2** (functional lateral), not 1 (de-level).
+Junior-coded BI/reporting de-levels and ≥2-rung reaches stay 0–1; the management-drift and
+enablement-cluster 0–1 rules are untouched.
+
+- Scoring-table cell amended in BOTH hand-synced guide copies (pipeline `evaluation_guide.md`
+  + the Downloads Claude-Project copy) the same day — the known bidirectional guide-divergence
+  failure mode.
+- **The pipeline judge already scored both postings 2** (17/18 and 16/18 PASS), so this
+  ratifies existing pipeline behavior; the drift being closed was the manual/Project-side
+  scoring, which had them at 1 (14/18, under the cold-apply bar). No code change, no backfill,
+  no expected verdict movement on re-eval.
+- Effect: both manual evals move 14 → 15 and clear the fit ≥ 15 cold-apply bar. Freshness
+  verified from the fetch window rather than the LinkedIn UI: `hours_old: 4` bounds posting
+  time to ≤4h before `first_seen` (G&K 2026-08-10 17:00, Steptoe 2026-08-11 09:22).
+
+## 2026-08-10 — employment-type gate: fully-remote contract exception
+
+**Judgment change (user decision, 2026-08-10).** Contract engagements are now acceptable when
+the seat is **fully remote** — relocating or commuting for a temporary seat stays disqualifying.
+Contract/contract-to-hire/temporary/fixed-term (including staffing-agency W2) passes the gate
+only when the posting states a fully remote arrangement; on-site, hybrid, "remote or hybrid,"
+and arrangement-unstated all still FAIL (ambiguity fails closed). Part-time and internship/co-op
+remain unconditional fails; the unstated-employment-TYPE default-PASS is unchanged. A passing
+remote contract carries a `remote-contract` flag in `flags` for triage (compare hourly rates
+annualized minus a benefits gap; a pre-October start needs outside-employment clearance).
+
+- Gate text amended the same day in BOTH hand-synced copies — the pipeline's
+  `evaluation_guide.md` and the Claude Project copy in Downloads — to head off the known
+  bidirectional guide-divergence failure mode. The ITMC worked example's contract aside got a
+  dated annotation.
+- Enforcement layer: this gate lives in the LLM eval only. `filters.yaml` never had a contract
+  rule, so there is no deterministic-filter change and no code change.
+- **Backfill:** 5,584 employment_type GATE_FAIL rows predate the amendment. The remote-signaled
+  ∩ contract-worded ∩ ≤45-day ∩ undecided subset (305 rows → 277 chains after folding chain
+  siblings and dropping 3 chains already holding PASS/RECRUITER_ONLY) was requeued: one
+  best-evidence representative per chain (full-text source over Adzuna snippet, then longest
+  description) reset to `status='new'` with its old verdict retained, riding
+  `skip_evaluated_reposts`' manual-reset carve-out (`verdict IS NULL` guard) so the forward
+  skip pass leaves them for the next run's re-eval. Remote contracts whose stored text carries
+  no detectable remote/contract signal (Adzuna's 500-char truncation) stay dead — accepted.
+
 ## 2026-08-10 — function-precedent cap moves from the guide into code (`core_function`)
 
 **Routing change.** The function-precedent cap (added 2026-07-25) was guide-enforced only,

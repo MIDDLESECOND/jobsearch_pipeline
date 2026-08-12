@@ -1,6 +1,6 @@
 @echo off
 rem Weekly judge-drift canary (tests/validation/canary.py): re-evaluates the frozen
-rem sentinel set and alerts on drift vs the stored baseline. Exit 2 = drift alert —
+rem sentinel set and alerts on drift vs the stored baseline. Exit 2 = drift alert  - 
 rem Task Scheduler surfaces it as "Last Run Result" 0x2; details go to the log below.
 rem Register (weekly, Monday 08:30, adjust freely):
 rem   schtasks /Create /TN "jobsearch-canary" /SC WEEKLY /D MON /ST 08:30 ^

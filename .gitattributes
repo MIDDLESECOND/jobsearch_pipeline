@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows batch files are consumed by cmd.exe, which parses them by byte offset and
+# resynchronizes on CR. Checked out with LF (or carrying a multi-byte UTF-8 character
+# in a comment), cmd loses its place and executes the tail of a `rem` line as a
+# command: the schedulers spent weeks printing "'m' is not recognized as an internal
+# or external command" before anyone traced it. Keep .bat CRLF here, and keep their
+# contents pure ASCII (no em dashes in comments) -- either alone can trigger it.
+*.bat text eol=crlf

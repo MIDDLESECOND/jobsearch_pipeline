@@ -513,6 +513,12 @@ Windows Task Scheduler.
 - **Windows environment**: PowerShell/cmd; API keys via `setx` with a registry-read fallback
   (`_ensure_api_key`): `DEEPSEEK_API_KEY` (default eval provider) or `ANTHROPIC_API_KEY`, plus
   `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` for the optional Adzuna source.
+- **Scheduler `.bat` files are pure ASCII** (`.gitattributes` pins them to CRLF; the ASCII half
+  is on you). cmd.exe parses by byte offset and resynchronizes on CR, so one multi-byte UTF-8
+  character in a comment — an em dash is the usual culprit — desynchronizes it and the tail of
+  the NEXT `rem` line gets executed: `'m' is not recognized as an internal or external command`.
+  The real command still runs, which is why `run_pipeline.bat` printed one of these on every
+  scheduled run for weeks before anyone traced it. Write `-`, not `—`, inside a `.bat`.
 
 ## Frontier Radar instructions for Codex
 

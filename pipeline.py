@@ -64,6 +64,7 @@ from filters import (
 )
 from evaluation import evaluate_new_jobs, requeue_error_rows
 from report import generate_report
+import second_judge
 from materials import snapshot_jd
 from outlook_shadow import (
     OutlookShadowError,
@@ -447,7 +448,7 @@ def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
                                         "expired", "reject", "event", "dupe", "prune",
-                                        "backup", "email-shadow", "ui"])
+                                        "backup", "email-shadow", "second-judge", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
                                    "`event`: the date the event happened (default today)")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / "
@@ -480,6 +481,14 @@ def main():
     ap.add_argument("--scheduled", action="store_true",
                     help=f"`run`: invoked by the scheduler — skip (no-op) if the last successful "
                          f"run ended < {COOLDOWN_MINUTES} min ago; a bare `run` always executes")
+    ap.add_argument("--wait", type=int, default=90,
+                    help="`second-judge`: minutes to poll for the batch before leaving the "
+                         "remainder for the next invocation (default 90; 0 = submit and leave)")
+    ap.add_argument("--collect-only", action="store_true",
+                    help="`second-judge`: only ingest already-submitted batches, submit nothing")
+    ap.add_argument("--backfill-days", type=int,
+                    help="`second-judge`: widen the first_seen window beyond the default "
+                         f"{second_judge.DELTA_DAYS} days (deliberate backfill only)")
     args = ap.parse_args()
 
     if args.command != "backup" and (args.output or args.verify_backup_path):
@@ -490,6 +499,8 @@ def main():
         ap.error("--login is only valid with `email-shadow`")
     if args.command not in ("prune", "email-shadow") and args.days is not None:
         ap.error("--days is only valid with `prune` or `email-shadow`")
+    if args.command != "second-judge" and (args.collect_only or args.backfill_days is not None):
+        ap.error("--collect-only/--backfill-days are only valid with `second-judge`")
 
     # Validate --date at the CLI edge, BEFORE any fetch/eval money is spent: the report's
     # age-label anchor parses it strictly, so a typo'd date must die here with a usable
@@ -717,6 +728,24 @@ def main():
                 reset_active_pipeline_run(token)
     elif args.command == "report":
         generate_report(cfg, conn, args.date)
+    elif args.command == "second-judge":
+        # The review layer is deliberately OUTSIDE the `run` stage machine: it spends
+        # money on rows `run` already finished with, and a crash here must never
+        # block fetching/eval/reporting. run_log captures it like any scheduled cycle.
+        with run_log("second-judge"):
+            if args.collect_only:
+                _all_done, days = second_judge.collect(conn)
+            else:
+                days = second_judge.run(conn, wait_minutes=args.wait,
+                                        backfill_days=args.backfill_days)
+            # Rebuild exactly the reports whose rows gained opinions this invocation
+            # (collect returns their first_seen days) — a fixed today+yesterday pair
+            # both missed late-landing older days and rewrote untouched reports on
+            # every no-op scheduled slot.
+            for day in sorted(days):
+                generate_report(cfg, conn, day)
+            if not days:
+                print("[second-judge] no opinions landed — reports unchanged")
     elif args.command == "stats":
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):

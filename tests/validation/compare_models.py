@@ -28,31 +28,42 @@ import evaluation  # build_system_prompt / build_user_msg / parse_eval_json / no
 from _common import RESULTS_DIR, DB_PATH  # noqa: E402
 
 SAMPLE_N = 25
-# (label, provider, model, extra request params). The anthropic columns are
-# parked below MODELS — the stored ANTHROPIC_API_KEY 401'd on 2026-07-31; re-add
-# them if the key is ever refreshed. luna vs luna-high is a controlled pair:
-# same model, only the reasoning budget differs.
+# (label, provider, model, extra request params). luna vs luna-high is a
+# controlled pair: same model, only the reasoning budget differs. The
+# openrouter columns auto-drop when OPENROUTER_API_KEY is absent (same
+# pattern as openai/kimi). NOTE a bare full-roster run is no longer cheap
+# (~$15 printed across all columns) — sweep scripts usually trim MODELS to
+# the columns under study.
 MODELS = [
     ("ds-flash",  "deepseek", "deepseek-v4-flash", {}),
     ("ds-pro",    "deepseek", "deepseek-v4-pro", {}),
     ("luna",      "openai",   "gpt-5.6-luna", {}),
     ("luna-high", "openai",   "gpt-5.6-luna", {"reasoning_effort": "high"}),
     ("kimi",      "kimi",     "kimi-k2.6", {}),
-]
-_PARKED = [
-    ("sonnet",   "anthropic", "claude-sonnet-4-6", {}),
-    ("haiku",    "anthropic", "claude-haiku-4-5", {}),
+    ("opus",      "anthropic", "claude-opus-5", {}),
+    ("fable",     "anthropic", "claude-fable-5", {}),
+    ("sonnet",    "anthropic", "claude-sonnet-5", {}),
+    ("haiku",     "anthropic", "claude-haiku-4-5", {}),
+    ("grok",      "openrouter", "x-ai/grok-4.20", {}),
+    ("gem-fl",    "openrouter", "google/gemini-3.5-flash", {}),
+    ("gem-lite",  "openrouter", "google/gemini-3.5-flash-lite", {}),
+    ("glm",       "openrouter", "z-ai/glm-5.2", {}),
 ]
 REF = "ds-flash"  # agreement baseline: the incumbent (was "sonnet" pre-401)
 # $ per token (input, output). Rates verified 2026-07-31 (Luna post the 07-30
 # 80% cut); tokens are measured exactly so you can recompute if cards change.
+# Anthropic/DeepSeek rates come from the one production table (evaluation.MODEL_PRICES —
+# claude-sonnet-5 is steady-state list there; intro $2/$10 applies through 2026-08-31);
+# only models the pipeline can't run through evaluation.py are priced here.
 PRICES = {
-    "claude-sonnet-4-6": (3.0 / 1e6, 15.0 / 1e6),
-    "claude-haiku-4-5":  (1.0 / 1e6, 5.0 / 1e6),
-    "deepseek-v4-flash": (0.14 / 1e6, 0.28 / 1e6),
-    "deepseek-v4-pro":   (0.435 / 1e6, 0.87 / 1e6),
+    **evaluation.MODEL_PRICES,
     "gpt-5.6-luna":      (0.20 / 1e6, 1.20 / 1e6),
     "kimi-k2.6":         (0.95 / 1e6, 4.00 / 1e6),
+    # openrouter columns: OpenRouter's live per-model rates, 2026-08-12
+    "x-ai/grok-4.20":               (1.25 / 1e6, 2.50 / 1e6),
+    "google/gemini-3.5-flash":      (1.50 / 1e6, 9.00 / 1e6),
+    "google/gemini-3.5-flash-lite": (0.30 / 1e6, 2.50 / 1e6),
+    "z-ai/glm-5.2":                 (0.50 / 1e6, 3.15 / 1e6),
 }
 
 core._ensure_api_key()
@@ -61,15 +72,36 @@ aclient = anthropic.Anthropic()
 DS_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 OAI_KEY = core._ensure_api_key("OPENAI_API_KEY") or ""
 MS_KEY = core._ensure_api_key("KIMI_API_JOBPIPELINE_KEY") or ""
+OR_KEY = core._ensure_api_key("OPENROUTER_API_KEY") or ""
 SYSTEM = evaluation.build_system_prompt()
 
 
 def call_anthropic(model, user_msg, extra=None):
+    # Claude 5 family: `temperature` is rejected there but restored for older
+    # models (evaluation.anthropic_extras — pre-Claude-5 baselines were measured
+    # at temperature 0 and must stay comparable), thinking is on by default and
+    # counts against max_tokens (the old 1200 cap would truncate mid-JSON), and
+    # the content list may lead with thinking blocks (evaluation.first_text). The
+    # cache_control block mirrors production (_call_anthropic) so 25 sequential
+    # calls don't each pay the full ~15k-token system prompt.
+    kwargs = evaluation.anthropic_extras(model)
+    kwargs.update(extra or {})
     r = aclient.messages.create(
-        model=model, max_tokens=1200, temperature=0,
-        system=SYSTEM, messages=[{"role": "user", "content": user_msg}],
+        model=model, max_tokens=8000,
+        system=[{"type": "text", "text": SYSTEM,
+                 "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_msg}],
+        **kwargs,
     )
-    return r.content[0].text, r.usage.input_tokens, r.usage.output_tokens
+    text = evaluation.first_text(r.content)
+    if not text:
+        raise RuntimeError(f"{model}: no text in response (stop_reason={r.stop_reason})")
+    u = r.usage
+    # Bill cache reads/writes at the full input price — the same deliberate
+    # over-estimate convention as the deepseek arm.
+    tin = (u.input_tokens + (getattr(u, "cache_read_input_tokens", 0) or 0)
+           + (getattr(u, "cache_creation_input_tokens", 0) or 0))
+    return text, tin, u.output_tokens
 
 
 def call_deepseek(model, user_msg, extra=None):
@@ -144,8 +176,36 @@ def call_kimi(model, user_msg, extra=None):
             u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
 
 
+def call_openrouter(model, user_msg, extra=None):
+    # OpenRouter fronts many providers behind one OpenAI-compatible key; the
+    # slug picks the provider (x-ai/..., google/..., z-ai/...). Same request
+    # shape as the other thinking-model arms: 16k cap + JSON mode. If a route
+    # rejects response_format the column just records ERR — drop the param
+    # for that column via `extra` rather than loosening every arm.
+    r = httpx.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OR_KEY}"},
+        json={
+            "model": model, "max_tokens": 16000,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            **(extra or {}),
+        },
+        timeout=180,
+    )
+    r.raise_for_status()
+    d = r.json()
+    u = d.get("usage", {})
+    return (d["choices"][0]["message"]["content"],
+            u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+
+
 CALLERS = {"anthropic": call_anthropic, "deepseek": call_deepseek,
-           "openai": call_openai, "kimi": call_kimi}
+           "openai": call_openai, "kimi": call_kimi,
+           "openrouter": call_openrouter}
 
 
 def evaluate(provider, model, user_msg, extra=None):
@@ -177,6 +237,9 @@ def main():
     if not MS_KEY:
         print("KIMI_API_JOBPIPELINE_KEY not set — skipping the kimi column\n")
         MODELS[:] = [m for m in MODELS if m[1] != "kimi"]
+    if not OR_KEY:
+        print("OPENROUTER_API_KEY not set — skipping the openrouter columns\n")
+        MODELS[:] = [m for m in MODELS if m[1] != "openrouter"]
     c = sqlite3.connect(DB_PATH); c.row_factory = sqlite3.Row
     rows = c.execute(
         "SELECT * FROM jobs WHERE length(trim(description))>0 "

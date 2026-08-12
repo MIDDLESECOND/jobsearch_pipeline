@@ -7,6 +7,81 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-12 — Second-opinion layer (Batch API) + Copilot facts in profile.md
+
+**New review layer; no verdict changes anywhere.** `second_judge.py` re-reads the day's
+interesting zone — PASS fit ≥ 13 plus RECRUITER_ONLY fit ≥ 15, undecided, unfiltered,
+posted ≤ 14 days — through the Anthropic Message Batches API (claude-opus-5, 50% batch
+rates) using the SAME system prompt, user message, parser, and `normalize_result` caps as
+the primary judge. Opinions land in the new `second_opinions` table and render in the daily
+report as a "Second opinion" section (⬇ demotions / ⬆ promotions with the second judge's
+reason, including cold-apply-bar crossings inside a shared PASS verdict); they are triage
+evidence and never write back to `jobs.verdict`/`eval_json` — review, never re-route, same
+philosophy as `eval_issues` surfacing. The layer is deliberately outside the `run` stage
+machine (`pipeline.py second-judge`, `run_second_judge.bat`): the report never waits on it,
+so a slow batch costs nothing but opinion latency.
+
+Model selection evidence: a two-day nine-judge measurement on a frozen stratified sample
+(28 truncated + 21 full-text + 1, drawn from the real fit ≥ 15 population), anchored by a
+12-case arbitration run through the production judge — the deployed model matched the
+arbiter 9/11 directly; every cheaper candidate's misses concentrated in the exact
+demotion class this layer exists to catch (title/level reach kept as PASS). The 13–14
+PASS band and the RO band exist to catch the primary judge's ~22% draw-noise burials in
+the opposite direction; a 2026-08-19 cost/yield review prunes any zero-yield band.
+
+- Schema: + `second_opinions` (additive, created in the DB-open path; no CHECKs by
+  convention — vocabulary is code-enforced).
+- `profile.md`: + Microsoft Copilot facts (2026-08-11 ruling): M365 Copilot daily use =
+  requirement met; Copilot Studio = prototyping-level only, no production deliverable —
+  production-Studio requirements carry the artifact-depth gap shape. Closes the one
+  judgment-relevant gap the 2026-08-12 Project↔pipeline sync audit found (the pipeline
+  judge was previously blind to all Copilot facts).
+- `evaluation._call_anthropic`: Claude-5-family compatible (drop `temperature`, rejected
+  there; `max_tokens` 1200 → 8000 — thinking counts against the cap; take the first text
+  block, content may lead with thinking blocks). Needed by the second judge's model family
+  and by `backtest_v2` on the anthropic provider.
+
+Same-day post-review hardening (code review, 10 findings — no judgment changes):
+
+- Schema: + `second_opinions.retry_count` (additive migration). Errored opinions now get a
+  bounded requeue (2 attempts, 6h cooling-off) instead of permanent exile; `submit` commits
+  intent rows BEFORE the paid `batches.create` and `collect` ages interrupted submissions
+  into errors, so a crash can no longer produce a silently double-paid batch.
+- Zone + opinion reads are chain-scoped: one submission per duplicate chain, and an opinion
+  maps to every current-chain member (`opinion_summaries`, now the single read model behind
+  both the report section and the UI card). The first_seen window is computed on the local
+  clock (was SQLite UTC `date('now')` — shrank the evening window) and held at 2 days on the
+  apply-timing evidence (2026-08-09: reply peak 2-4 days post-listing, ~28%/day decay after;
+  behavior rule "当天/次日投"): wide enough for cap-overflow tails and late-requeued rows,
+  narrow enough that an opinion still lands while it can change an action — a row undecided
+  for 3+ days was passed on by inaction. `first_seen` is the only age evidence the LinkedIn
+  half of the zone has (no `date_posted` from the guest endpoint), which is why it, not
+  `FRESH_DAYS`, is the timing lever; reviewing older rows is a deliberate `--backfill-days`
+  act (~$4 per extra day at ~90 zone rows/day). Freshness reads through
+  `core.recency_dt` (moved from `report._recency_dt` — still the ONE posted-at reading).
+- Action bars codified: `states.COLD_APPLY_MIN_FIT` (13) / `RECRUITER_ROUTE_MIN_FIT` (15),
+  and `states.classify_disagreement` now flags a crossing of EITHER bar inside an unchanged
+  verdict — RECRUITER_ONLY 16 → 8 was previously invisible.
+- `evaluation.anthropic_extras`: `temperature=0` restored for pre-Claude-5 models (baseline
+  comparability); Claude-5 list prices added to `MODEL_PRICES`, and the second judge's batch
+  rates derive from that one table. Empty anthropic responses (refusal / thinking exhausted
+  max_tokens) now raise/record the real stop_reason instead of parsing "" downstream.
+- `pipeline.py second-judge` rebuilds exactly the reports whose rows gained opinions (was a
+  fixed today+yesterday pair, and it now follows duplicate chains — an opinion on a relisting
+  also changes its canonical's day); an all-pending day renders no report section at all.
+- `collect` must never hold SQLite's writer lock while it polls or streams. Observed live on
+  2026-08-12: an unconditional (0-row, uncommitted) UPDATE at the top of the poll loop starved
+  the concurrently scheduled `run` — six eval results were dropped with "database is locked"
+  and left `new`. The stale-submission sweep is now SELECT-gated and transaction-wrapped, and
+  batch results are drained from the network BEFORE the write transaction opens.
+- Retries no longer delete evidence: a released error moves to `status='retry'` (spend and
+  `retry_count` stay on the row, `submit` reuses it in place via upsert), and token/cost
+  columns accumulate across attempts, so summing `cost_usd` gives real spend per posting.
+- `evaluation.anthropic_extras` is an ALLOWLIST of the older ids that accept `temperature`
+  (an unknown/newer model omits it rather than 400-ing every call), and a billed no-text
+  response raises `EmptyResponseError` — non-retryable, carrying its usage so the run's cost
+  line still counts money that was actually spent.
+
 ## 2026-08-11 — title_trajectory: one-rung functional-lateral scores 2
 
 **Scoring calibration (user decision, 2026-08-11).** The law-firm AI-analyst family (Godfrey &

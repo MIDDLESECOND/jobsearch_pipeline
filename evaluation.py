@@ -305,23 +305,79 @@ MODEL_PRICES = {
     "claude-sonnet-4-6":          (3.0 / 1e6, 15.0 / 1e6),
     "claude-haiku-4-5":           (1.0 / 1e6, 5.0 / 1e6),
     "claude-haiku-4-5-20251001":  (1.0 / 1e6, 5.0 / 1e6),
+    # Claude 5 list prices; second_judge derives its Batch-API rates from these
+    # (x0.5, cache read x0.1, cache write x1.25) instead of keeping its own table.
+    "claude-sonnet-5":            (3.0 / 1e6, 15.0 / 1e6),
+    "claude-opus-5":              (5.0 / 1e6, 25.0 / 1e6),
+    "claude-fable-5":             (10.0 / 1e6, 50.0 / 1e6),
     "deepseek-v4-flash":          (0.14 / 1e6, 0.28 / 1e6),
     "deepseek-v4-pro":            (0.435 / 1e6, 0.87 / 1e6),
 }
 
+# Claude 5-era models reject any non-default `temperature` outright. This is an
+# ALLOWLIST of the older ids that still accept it, not a denylist of the ones that
+# don't: an unknown/newer model must default to omitting temperature (harmless) rather
+# than sending it and 400-ing every request (fatal, and _retryable won't retry a 400).
+# temperature=0 on these keeps them as deterministic as the serving stack allows, and
+# keeps backtest/compare baselines comparable with pre-2026-08 measurements.
+_TEMP_ACCEPTED = ("claude-sonnet-4-6", "claude-haiku-4-5", "claude-3")
+
+
+def anthropic_extras(model):
+    """Request kwargs that vary by Anthropic model generation (see _TEMP_ACCEPTED).
+    Prefix match, so dated model ids (…-20251001) follow their family."""
+    return {"temperature": 0} if model.startswith(_TEMP_ACCEPTED) else {}
+
+
+class EmptyResponseError(RuntimeError):
+    """The provider billed us but returned no text — a refusal, or thinking that
+    exhausted max_tokens. Deterministic for the same input, so it is deliberately NOT
+    retryable (_retryable), and it carries the usage of the call that produced it so
+    the caller can still bill spend that really happened."""
+
+    def __init__(self, message, in_tokens=0, out_tokens=0, cache_read=0, cache_write=0):
+        super().__init__(message)
+        self.in_tokens = in_tokens
+        self.out_tokens = out_tokens
+        self.cache_read = cache_read
+        self.cache_write = cache_write
+
+
+def first_text(content):
+    """First text block's text, '' when there is none — Claude 5 content may lead
+    with thinking blocks, so content[0] is not reliably the answer. Every Anthropic
+    reader (here, second_judge.collect, compare_models) goes through this."""
+    return next((b.text for b in content if getattr(b, "type", "") == "text"), "")
+
 
 def _call_anthropic(client, model, system_prompt, user_msg):
-    """Return (text, fresh_in_tok, out_tok, cache_read_tok, cache_write_tok)."""
+    """Return (text, fresh_in_tok, out_tok, cache_read_tok, cache_write_tok).
+
+    Claude 5 family compatible (2026-08-12): `temperature` is conditional
+    (anthropic_extras — rejected outright on Claude 5), thinking is on by default
+    and counts against max_tokens (the old 1200 cap would truncate mid-JSON), and
+    the content list may lead with thinking blocks (first_text). An empty answer
+    (refusal, or thinking that exhausted max_tokens) raises EmptyResponseError —
+    carrying its usage, because that call was billed — instead of letting "" reach
+    the JSON parser as a misleading parse error and then be retried three times.
+    """
     resp = client.messages.create(
         model=model,
-        max_tokens=1200,
-        temperature=0,
+        max_tokens=8000,
         system=[{"type": "text", "text": system_prompt,
                  "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_msg}],
+        **anthropic_extras(model),
     )
     u = resp.usage
-    return (resp.content[0].text, u.input_tokens, u.output_tokens,
+    text = first_text(resp.content)
+    if not text.strip():
+        raise EmptyResponseError(
+            f"anthropic returned no text (stop_reason={resp.stop_reason})",
+            in_tokens=u.input_tokens, out_tokens=u.output_tokens,
+            cache_read=getattr(u, "cache_read_input_tokens", 0) or 0,
+            cache_write=getattr(u, "cache_creation_input_tokens", 0) or 0)
+    return (text, u.input_tokens, u.output_tokens,
             getattr(u, "cache_read_input_tokens", 0) or 0,
             getattr(u, "cache_creation_input_tokens", 0) or 0)
 
@@ -413,6 +469,10 @@ def _retryable(e):
     server errors (5xx), and non-HTTP failures (network drops; a malformed model response —
     it can re-emit). Any other 4xx is OUR request being wrong (bad model id, oversized
     payload) — retrying triples the latency for the same failure."""
+    # The one non-HTTP failure that will NOT heal: a billed no-text response. The same
+    # prompt refuses (or overruns thinking) again, so retrying just pays for it 3x.
+    if isinstance(e, EmptyResponseError):
+        return False
     status = _http_status(e)
     if status is None:
         return True
@@ -543,6 +603,12 @@ def _evaluate_one(row, provider, model, system_prompt, client, api_key):
             result = parse_eval_json(text)
             break
         except Exception as e:
+            # A failed call can still have been billed (EmptyResponseError carries its
+            # usage). Tally it here or the run's cost line under-reports real spend.
+            tin += getattr(e, "in_tokens", 0)
+            tout += getattr(e, "out_tokens", 0)
+            cr += getattr(e, "cache_read", 0)
+            cw += getattr(e, "cache_write", 0)
             status = _http_status(e)
             if status in (401, 403):
                 # Wrong credentials fail every row identically — abort the whole batch.

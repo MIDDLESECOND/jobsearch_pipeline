@@ -86,6 +86,41 @@ def parse_iso(s):
     return dt, not any(c in s for c in "T: ")
 
 
+def recency_dt(date_posted, first_seen):
+    """The effective "posted at" instant for a row — the ONE implementation behind the
+    report/UI age label (report.posting_age), the triage sort key (report.recency_sort_key),
+    and second_judge's freshness window, so the three can't disagree. Lives here (not
+    report.py) because it belongs with parse_iso: producer and every consumer of the stored
+    date shapes read one pair of functions at the bottom of the DAG.
+    Returns (datetime, mode) with mode 'posted' (real timestamp precision), 'posted_day'
+    (day granularity only), 'seen' (first_seen stands in — an explicit LOWER BOUND, which the
+    label hedges with a "seen" prefix), or None (nothing usable; datetime is the sort-last
+    sentinel):
+
+    - full-timestamp date_posted (Adzuna, ATS, Dice) → use it;
+    - date-only date_posted at/after first_seen's date → use first_seen, hedged as 'seen':
+      it bounds the posting time within the fetch window but is not the posting time, so the
+      label must not claim precision the source didn't give. The >= (not ==) also absorbs
+      board-timezone calendar dates a day ahead of local time — comparing == would send those
+      to the posted_day branch with a FUTURE midnight that pins the row above everything fresh;
+    - date-only date_posted OLDER than first_seen's date (ATS backlog, stale relist) → midnight
+      of that date — a months-old board posting must not masquerade as fresh just because we
+      only saw it today.
+    """
+    posted = parse_iso(date_posted)
+    seen = parse_iso(first_seen)
+    if posted:
+        pdt, day_only = posted
+        if not day_only:
+            return pdt, "posted"
+        if seen and pdt.date() >= seen[0].date():
+            return seen[0], "seen"
+        return pdt, "posted_day"
+    if seen:
+        return seen[0], "seen"
+    return PARSE_MIN, None
+
+
 # ------------------------------------------------------------------- run log
 #
 # Capture is app-level, not shell-level: a `run` tees stdout+stderr into
@@ -657,6 +692,51 @@ def _pipeline_fetch_attempts_table_sql():
     """
 
 
+def _second_opinions_table_sql():
+    """Second-judge opinions over the interesting zone (second_judge.py). One row per
+    posting ever submitted; opinions are evidence rendered in the report and NEVER
+    write back to jobs.verdict/eval_json (review, never re-route). No CHECK on
+    verdict/status on purpose — this is machine evidence whose vocabulary follows the
+    judge and the code around it; a baked-in CHECK would go stale exactly the way the
+    jobs status CHECK did (_rebuild_for_stale_checks) and abort runs over columns
+    nothing downstream state-machines on."""
+    return """
+        CREATE TABLE IF NOT EXISTS second_opinions (
+            job_url      TEXT PRIMARY KEY,
+            custom_id    TEXT NOT NULL,
+            batch_id     TEXT,
+            model        TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            collected_at TEXT,
+            verdict      TEXT,
+            fit_score    INTEGER,
+            bucket       INTEGER,
+            failed_gate  TEXT,
+            gate_notes   TEXT,
+            eval_issues  TEXT,
+            in_tokens    INTEGER,
+            out_tokens   INTEGER,
+            cache_read_tokens  INTEGER,
+            cache_write_tokens INTEGER,
+            cost_usd     REAL,
+            error        TEXT,
+            retry_count  INTEGER NOT NULL DEFAULT 0
+        )
+    """
+
+
+def _migrate_second_opinions(conn):
+    """Add bounded-retry accounting to databases created before the error requeue."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(second_opinions)")}
+    if "retry_count" not in cols:
+        conn.execute(
+            "ALTER TABLE second_opinions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        print("[migrate] added second_opinions.retry_count")
+
+
 def _migrate_job_tasks(conn):
     """Add optimistic-concurrency state to databases opened during feature development."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(job_tasks)")}
@@ -745,6 +825,8 @@ def get_db(cfg):
     conn.execute(_dupe_candidate_dismissals_table_sql())
     conn.execute(_pipeline_runs_table_sql())
     conn.execute(_pipeline_fetch_attempts_table_sql())
+    conn.execute(_second_opinions_table_sql())
+    _migrate_second_opinions(conn)
     _migrate_job_tasks(conn)
     _migrate_application_materials(conn)
     _migrate_dupe_candidate_dismissals(conn)

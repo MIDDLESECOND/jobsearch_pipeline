@@ -56,6 +56,12 @@
      one more caveat about the job. */
   .evalissue { font-size: .72rem; color: #6b7280; font-family: ui-monospace, monospace;
                margin: .1rem 0; }
+  /* Second-judge DISAGREEMENT (second_judge.opinion_summaries serializes nothing
+     else): a warning at the decision point, loud for demotions because that is
+     the wasted-application direction. Agreement/pending spend zero pixels. */
+  .secondop { font-size: .8rem; font-weight: 600; margin: .15rem 0; }
+  .secondop.demote { color: #b91c1c; }
+  .secondop.promote { color: #15803d; }
   .oneline { font-size: .85rem; margin: .3rem 0; }
   .tag { font-size: .72rem; background: #eef; color: #335; padding: .05rem .4rem;
          border-radius: 4px; margin-left: .3rem; }
@@ -1208,6 +1214,10 @@ function card(j, actionSection = null) {
   // trustworthiness rather than describing the role.
   const evalIssues = (j.eval_issues||[])
     .map(i => `<div class="evalissue">🔎 eval quality: ${esc(i)}</div>`).join("");
+  // Second-judge disagreement only (agreement/pending arrive as null) — rendered
+  // beside the verdict it contradicts, on the surface where decisions get clicked.
+  const so = j.second_opinion;
+  const secondOp = so ? `<div class="secondop ${so.direction}">${so.direction === "demote" ? "⬇" : "⬆"} second judge: <b>${esc(so.verdict || "?")}${so.fit_score != null ? ` (${so.fit_score})` : ""}</b>${so.note ? " — " + esc(so.note) : ""}</div>` : "";
   const gateOpts = GATES.map(g => `<option value="${g}">${g}</option>`).join("");
 
   div.innerHTML = `
@@ -1219,6 +1229,7 @@ function card(j, actionSection = null) {
     ${materialPanelHTML(j)}
     <div class="meta">${verdict}${score}</div>
     ${evalIssues}
+    ${secondOp}
     ${j.bucket_label ? `<div class="meta">${esc(j.bucket_label)}</div>` : ""}
     ${j.failed_gate ? `<div class="meta">failed gate: <b>${esc(j.failed_gate)}</b></div>` : ""}
     <div class="meta">${esc(j.location||"")} · tier: ${esc(j.tier||"")} · search: <code>${esc(j.search_name||"")}</code>${salary ? " · " + esc(salary) : ""}${j.source === "adzuna" ? ` · source: <code>adzuna</code> <span class="trunc">📋 500-char snippet — may be stale; verify on employer site</span>` : (j.source && j.source !== "linkedin" ? ` · source: <code>${esc(j.source)}</code>` : "")}${j.age_label ? ` · 🕐 ${esc(j.age_label)}` : ""}</div>

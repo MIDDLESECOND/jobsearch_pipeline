@@ -16,8 +16,10 @@ writes one markdown report per day. Single-user CLI tool, not a service.
 **Module layout** (a one-way DAG; every consumer — `app.py`, the tests, the validation scripts —
 imports the module that owns a name directly; `pipeline.py` is the CLI orchestrator only, NOT a
 re-export hub):
-- `states.py` — the status/verdict/gate vocabulary and the `status` state-machine doc. The leaf;
-  imports nothing.
+- `states.py` — the status/verdict/gate vocabulary and the `status` state-machine doc, plus the
+  fit-score action bars (`COLD_APPLY_MIN_FIT`/`RECRUITER_ROUTE_MIN_FIT`) and
+  `classify_disagreement` (the ONE "second judge disagrees" definition the report section and
+  UI card share). The leaf; imports nothing.
 - `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
   `effective_decision`, propagation), plus the decision service cores both front-ends share:
   `resolve_posting`, `mark_posting`, `reject_posting`, `dupe_resolve`/`dupe_commit`/
@@ -25,9 +27,11 @@ re-export hub):
   `chain_events`/`set_resume` over the `app_events` table; `_recompute_outcome` is the ONE
   writer of the cached `outcome_status`/`outcome_date` columns). Imports only `states` + stdlib.
 - `core.py` — paths, `load_config` (+ shape validation), the SQLite open/schema/**migrations**,
-  `_ensure_api_key`, and `parse_iso` (the ONE posting-date parser + sanity window — the fetch-side
-  normalizer and the report/UI recency triage both go through it, so the stored `date_posted`
-  shape's producer and consumers can't drift). The foundation; imports only `chain` and `states`.
+  `_ensure_api_key`, and `parse_iso`/`recency_dt` (the ONE posting-date parser + sanity window
+  and the ONE effective posted-at reading — the fetch-side normalizer, the report/UI recency
+  triage, and the second judge's freshness window all go through them, so the stored
+  `date_posted` shape's producer and consumers can't drift). The foundation; imports only
+  `chain` and `states`.
 - `materials.py` — application-packet evidence: automatic JD snapshots, content-addressed
   resume/cover-letter storage, document extraction + ATS diagnostics, chain-scoped packet reads,
   downloads, and interview-prep clipboard context. Imports `core`, `chain`, and `prep_library`.
@@ -79,7 +83,17 @@ re-export hub):
   `core`, `posting_store`, `health` (the per-target attempt facts every fetcher records), and
   `filters` (`_pattern_matches`, so the ATS/Dice config filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
-- `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`).
+- `second_judge.py` — the second-opinion review layer: zone selection over evaluated rows
+  (undecided PASS/RECRUITER_ONLY at the `states.py` action bars, posted ≤14 days, one
+  submission per duplicate chain), Anthropic Batch API submit/collect into the
+  `second_opinions` table (intent rows commit BEFORE the paid create; errored rows get a
+  bounded requeue), and `opinion_summaries` — the chain-scoped read model the report section
+  and the UI card both render from. Opinions NEVER write back to `jobs.verdict`/`eval_json`
+  (review, never re-route). Imports `core`, `evaluation` (the same prompt/parse/normalize
+  path and price table as the primary judge), and `states`; the anthropic SDK loads lazily
+  inside the network paths. Driven by `pipeline.py second-judge` / `run_second_judge.bat`.
+- `report.py` — the daily markdown report + renderers (uses `chain.effective_decision` and
+  `second_judge.opinion_summaries`).
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
   imports `report`/`chain`/`states`/`dupe_candidates`, performs no mutations, and keeps dashboard-query logic
   out of both the decision service and Flask routes.
@@ -146,6 +160,7 @@ python pipeline.py stats                  # DB counts
 python pipeline.py backup [--output PATH]          # create + verify an evidence ZIP
 python pipeline.py backup --verify PATH            # read-only validation; never restores
 python pipeline.py email-shadow [--days 7]         # Outlook alert discovery report only
+python pipeline.py second-judge [--wait M] [--collect-only] [--backfill-days N]   # Batch-API second opinions over the actionable zone; review-only, never re-routes
 # First setup only: add --login; scheduled runs fail closed rather than opening auth UI.
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
@@ -189,7 +204,8 @@ reads the decoded flight text) so a later fetcher change cannot retroactively al
 recorded overlap log meant — do not "fix" it to import from `fetch.py`. Every validation
 script writes its outputs to
 `tests/validation/results/` (gitignored) — never the repo root. Scheduling is `run_pipeline.bat`
-(and optionally `run_canary.bat` and `run_outlook_shadow.bat`) via Windows Task Scheduler.
+(and optionally `run_second_judge.bat`, `run_canary.bat`, and `run_outlook_shadow.bat`) via
+Windows Task Scheduler.
 
 ## Architecture invariants (the non-obvious parts)
 

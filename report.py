@@ -13,8 +13,9 @@ metadata: it is never an eval-prompt input and never a filter.
 import json
 from datetime import date, datetime, time
 
-from core import BASE_DIR, PARSE_MIN, PARSE_MAX, parse_iso
+from core import BASE_DIR, PARSE_MIN, PARSE_MAX, recency_dt
 from chain import effective_decisions
+from second_judge import opinion_summaries
 from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
                     STATUS_NEEDS_MANUAL, STATUS_ERROR, STATUS_SALARY_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED)
@@ -115,6 +116,8 @@ def generate_report(cfg, conn, for_date=None):
         for r in recruiter:
             lines.extend(_render_scored_job(r, decisions[r["job_url"]], now))
 
+    lines.extend(_second_opinion_lines(conn, passes + recruiter))
+
     if repost_evaluated:
         # Not necessarily reposts: a still-'new' CANONICAL whose verdict sits on a sibling
         # (requeued error row, dupe merge) lands here too — the title says "roles", not
@@ -203,6 +206,62 @@ def generate_report(cfg, conn, for_date=None):
     out_path = out_dir / f"report_{d}.md"
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"[report] written: {out_path}")
+
+
+def _second_opinion_lines(conn, rows):
+    """The second judge's read of today's interesting zone (second_judge.py) —
+    evidence rendered BESIDE the primary verdicts, never a replacement for them.
+    The summaries come from second_judge.opinion_summaries — the SAME chain-scoped
+    read the UI card uses, sharing one disagreement definition and one note cut —
+    so the two surfaces can't drift. Disagreements render loud (⬇/⬆ with the
+    second judge's reason); agreement collapses to a tally; a day whose opinions
+    are all still pending renders NOTHING (the section only earns attention once
+    there is a judgment or an error to look at — the report never waits on the
+    second judge)."""
+    ops = opinion_summaries(conn, rows)
+    demote, promote, agree, pending, errors = [], [], 0, 0, 0
+    models = set()
+    for r in rows:
+        o = ops[r["job_url"]]
+        if o is None:
+            continue
+        # 'retry' is a released error awaiting its bounded re-attempt: nothing to read
+        # yet, and the exhausted ones stay 'error', so it counts as in-flight here.
+        if o["status"] in ("pending", "submitting", "retry"):
+            pending += 1
+            continue
+        if o["status"] != "done":
+            errors += 1
+            continue
+        models.add(o["model"])
+        if o["direction"] == "demote":
+            demote.append((r, o))
+        elif o["direction"] == "promote":
+            promote.append((r, o))
+        else:
+            agree += 1
+    if not (demote or promote or agree or errors):
+        return []
+    judge = ", ".join(sorted(models))
+    lines = ["## 🧑‍⚖️ Second opinion — review layer, primary verdicts unchanged", ""]
+    lines.append(
+        f"*{agree + len(demote) + len(promote)} reviewed · {agree} agree · "
+        f"{len(demote)} demoted · {len(promote)} promoted · {pending} pending · "
+        f"{errors} error(s). Opinions are triage evidence from the second judge"
+        f"{f' ({judge})' if judge else ''}; the sections above keep the primary verdicts.*"
+    )
+    lines.append("")
+    for tag, pairs in (("⬇", demote), ("⬆", promote)):
+        for r, o in pairs:
+            why = o["note"] or ""
+            second_fit = o["fit_score"] if o["fit_score"] is not None else "—"
+            lines.append(
+                f"- {tag} **{r['title']} — {r['company']}** · "
+                f"{r['verdict']}({r['fit_score']}) → **{o['verdict']}({second_fit})**"
+                f"{' · ' + why if why else ''} · [link]({r['job_url']})"
+            )
+    lines.append("")
+    return lines
 
 
 def _seen_day(dec):
@@ -310,36 +369,10 @@ def score_band(score):
 # a fake-fresh row to the top of the sort. PARSE_MIN doubles as the sort-last sentinel.
 
 
-def _recency_dt(date_posted, first_seen):
-    """The effective "posted at" instant for a row — the ONE implementation behind both the age
-    label (posting_age) and the sort key (recency_sort_key), so the two can't disagree.
-    Returns (datetime, mode) with mode 'posted' (real timestamp precision), 'posted_day'
-    (day granularity only), 'seen' (first_seen stands in — an explicit LOWER BOUND, which the
-    label hedges with a "seen" prefix), or None (nothing usable; datetime is the sort-last
-    sentinel):
-
-    - full-timestamp date_posted (Adzuna, ATS, Dice) → use it;
-    - date-only date_posted at/after first_seen's date → use first_seen, hedged as 'seen':
-      it bounds the posting time within the fetch window but is not the posting time, so the
-      label must not claim precision the source didn't give. The >= (not ==) also absorbs
-      board-timezone calendar dates a day ahead of local time — comparing == would send those
-      to the posted_day branch with a FUTURE midnight that pins the row above everything fresh;
-    - date-only date_posted OLDER than first_seen's date (ATS backlog, stale relist) → midnight
-      of that date — a months-old board posting must not masquerade as fresh just because we
-      only saw it today.
-    """
-    posted = parse_iso(date_posted)
-    seen = parse_iso(first_seen)
-    if posted:
-        pdt, day_only = posted
-        if not day_only:
-            return pdt, "posted"
-        if seen and pdt.date() >= seen[0].date():
-            return seen[0], "seen"
-        return pdt, "posted_day"
-    if seen:
-        return seen[0], "seen"
-    return PARSE_MIN, None
+# The effective posted-at reading (formerly defined here) lives in core.recency_dt now,
+# beside parse_iso — second_judge's freshness window shares it, and importing report from
+# there would invert the DAG. The alias keeps this module's call sites unchanged.
+_recency_dt = recency_dt
 
 
 def _span_label(hours):

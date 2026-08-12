@@ -69,6 +69,45 @@ VERDICT_FAVOR = {VERDICT_PASS: 2, VERDICT_RECRUITER_ONLY: 1, VERDICT_GATE_FAIL: 
 # silently dropped by chain_verdict's `in VERDICT_FAVOR` filter — one list, one owner.
 VERDICTS = list(VERDICT_FAVOR)
 
+# The two fit-score action bars, code-owned so every consumer reads the same lines:
+# COLD_APPLY_MIN_FIT is the guide's PASS action bar ("apply at 13+" — the line
+# evaluation.ARBITRATION_BAND wraps); RECRUITER_ROUTE_MIN_FIT is the recruiter-route
+# bar (workflow's recruiter_route default) and the standing allocation's practical
+# cold-apply threshold. Both are real action lines, which is why classify_disagreement
+# below flags a crossing of EITHER inside an unchanged verdict.
+COLD_APPLY_MIN_FIT = 13
+RECRUITER_ROUTE_MIN_FIT = 15
+
+
+def _fit_band(verdict, fit):
+    """Which action bars this (verdict, fit) reading clears — a small ordinal within a
+    verdict. PASS climbs both bars; RECRUITER_ONLY acts only at the recruiter bar;
+    GATE_FAIL never acts. A missing fit counts as clearing nothing."""
+    fit = fit or 0
+    if verdict == VERDICT_PASS:
+        return (fit >= COLD_APPLY_MIN_FIT) + (fit >= RECRUITER_ROUTE_MIN_FIT)
+    if verdict == VERDICT_RECRUITER_ONLY:
+        return 1 if fit >= RECRUITER_ROUTE_MIN_FIT else 0
+    return 0
+
+
+def classify_disagreement(row_verdict, row_fit, op_verdict, op_fit):
+    """'demote' / 'promote' / None — the ONE definition of "the second judge disagrees
+    with the primary", shared by the report section (report._second_opinion_lines) and
+    the UI card warning (both via second_judge.opinion_summaries): change it here and
+    both surfaces move together. A verdict-level move ranks by VERDICT_FAVOR; within a
+    shared verdict, crossing any action bar (_fit_band) counts — PASS 16→14 and
+    RECRUITER_ONLY 16→8 are real demotions even though the verdict held."""
+    f1 = VERDICT_FAVOR.get(row_verdict, -1)
+    f2 = VERDICT_FAVOR.get(op_verdict, -1)
+    if f2 != f1:
+        return "demote" if f2 < f1 else "promote"
+    b1 = _fit_band(row_verdict, row_fit)
+    b2 = _fit_band(op_verdict, op_fit)
+    if b2 != b1:
+        return "demote" if b2 < b1 else "promote"
+    return None
+
 
 def sql_list(values):
     """The one spelling of a quoted SQL IN-list over a vocabulary (`'a', 'b', ...`) — used by

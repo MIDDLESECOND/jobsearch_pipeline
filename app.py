@@ -33,6 +33,7 @@ from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    set_channel)
 from core import connect_db, get_db, load_config
 from dupe_candidates import confirm_candidate, set_candidate_dismissed
+from second_judge import opinion_summaries
 from exports import roles_csv
 from funnel import DEFAULT_FUNNEL_DAYS, funnel_snapshot, parse_funnel_days
 from health import MAX_HEALTH_DAYS, MAX_RUN_HISTORY, health_snapshot
@@ -84,7 +85,8 @@ def _pin_host():
 
 
 def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
-                task_count=0, scheduled_interviews=None, star=None):
+                task_count=0, scheduled_interviews=None, star=None,
+                second_opinion=None):
     """Flatten a jobs row + its eval_json into the fields the UI renders. `cap` is the
     configured max_description_chars — a stored description at that length was truncated.
     `dec` is chain.effective_decision(conn, row) — the chain-wide decision, computed by the
@@ -184,6 +186,10 @@ def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
         "starred": bool(star and star["starred"]),
         "starred_at": star["starred_at"] if star else None,
         "star_version": star["star_version"] if star else 0,
+        # Present only when the second judge DISAGREES (direction/verdict/fit/note);
+        # agreement and pending are None — rows_to_dicts filters the chain-scoped
+        # second_judge.opinion_summaries down to direction-carrying entries.
+        "second_opinion": second_opinion,
     }
 
 
@@ -196,6 +202,12 @@ def rows_to_dicts(conn, rows, cap, decisions=None):
     role_task_counts = task_counts(conn, rows)
     scheduled = interview_summaries(conn, rows)
     stars = star_summaries(conn, rows)
+    # The card renders only DISAGREEING done opinions (direction set): agreement and
+    # pending spend zero pixels — the razor that keeps the layer an attention saver.
+    # The full summaries (statuses, tallies) are the report section's job; both read
+    # the same chain-scoped second_judge.opinion_summaries, so they can't drift.
+    opinions = {url: (o if o and o["direction"] else None)
+                for url, o in opinion_summaries(conn, rows).items()}
     return [row_to_dict(
         row, cap, decisions[row["job_url"]],
         packet=packets[row["repost_of"] or row["job_url"]],
@@ -204,6 +216,7 @@ def rows_to_dicts(conn, rows, cap, decisions=None):
         task_count=role_task_counts[row["repost_of"] or row["job_url"]],
         scheduled_interviews=scheduled[row["job_url"]],
         star=stars[row["job_url"]],
+        second_opinion=opinions[row["job_url"]],
     ) for row in rows]
 
 

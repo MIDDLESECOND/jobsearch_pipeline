@@ -13,7 +13,7 @@ for one-click triage. You open one screen, not fifty tabs.
 files (profile, evaluation rules, database, reports) are gitignored; the repo ships
 `*.example.*` templates.
 
-![Triage UI — one card from the local web UI: verdict, score breakdown, bucket, repost badge, and one-click decisions](docs/triage_ui.png)
+![Triage UI — one card from the local web UI: verdict, score breakdown, bucket, a dissenting second-judge line, warning flags, and one-click decisions](docs/triage_ui.png)
 
 ## Why it exists
 
@@ -39,9 +39,12 @@ flowchart LR
     C["ATS boards<br/>Greenhouse / Lever / Ashby"] --> D
     J["Dice search pages"] --> D
     D --> E["Deterministic pre-filters<br/>salary floor, filters.yaml rules"]
-    E --> F["LLM evaluation gate<br/>DeepSeek or Claude<br/>6 hard gates → fit score → bucket"]
+    E --> F["LLM evaluation gate<br/>DeepSeek or Claude<br/>6 hard gates → fit score → bucket<br/>boundary-band arbitration"]
     F --> G["Daily markdown report"]
     F --> H["Local Flask triage UI<br/>action queues / filter / decide"]
+    F -.-> K["Second-opinion review<br/>Claude Opus 5 · Batch API<br/>review-only, never re-routes"]
+    K -.-> G
+    K -.-> H
     H --> I[("SQLite jobs.db<br/>decisions follow reposts")]
     G --> I
 ```
@@ -76,6 +79,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `materials.py` | submitted packet storage, text extraction, ATS checks, prep context |
 | `prep_library.py` | confirmed reusable interview stories/Q&A and role-relevance links |
 | `jd_diff.py` | bounded stored-posting/application-snapshot text comparisons |
+| `backup.py` | verified, non-restoring evidence-unit ZIP archives (DB + materials) |
 | `outreach.py` | chain-scoped role contacts and no-send outreach drafting briefs |
 | `tasks.py` | chain-scoped next actions, due dates, completion, and rescheduling |
 | `interviews.py` | chain-scoped interview schedules and local `.ics` export |
@@ -87,7 +91,8 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `outlook_shadow.py` | exact-sender Outlook job-alert scan and report-only DB comparison |
 | `filters.py` | deterministic pre-eval filters (salary, hard rules) |
 | `fetch.py` | the four sources: LinkedIn, Adzuna, ATS boards, Dice |
-| `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps |
+| `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps, arbitration |
+| `second_judge.py` | second-opinion review over the actionable zone (Batch API, never re-routes) |
 | `report.py` | the daily markdown report |
 | `workflow.py` | bounded/filterable UI queries and Action Center queues |
 | `timeline.py` | bounded read-only activity across a role's current duplicate chain |
@@ -103,15 +108,22 @@ write their result JSONs locally — neither is ever committed).
 ## By the numbers
 
 Running since June 19, 2026 (2 scheduled runs/day through early July, every 3 hours across
-waking hours since — see §5): 13,268 postings fetched and deduped as of early July,
-13,205 evaluated, 1,907 reposts caught by fingerprint dedup. The default evaluator
-(`deepseek-v4-flash`) costs ~$0.07/run at typical volume; a Claude Sonnet option trades
-~50× cost for better judgment on edge cases.
+waking hours since — see §5): 84,723 postings fetched and deduped as of August 12
+(Adzuna 54,685, LinkedIn 29,244, Dice 403, ATS boards 389, manual 2), 72,367 evaluated,
+16,308 relistings/duplicates linked into chains. The default evaluator
+(`deepseek-v4-flash`) measured $0.23–0.91 per run at 180–560 new postings per run over
+August 9–11 — roughly $2.60/day, arbitration draws included; a Claude option trades
+~20–50× per-token cost for better judgment on edge cases (see Cost).
 
 ## Honest limits
 
 - The cheap default evaluator deliberately under-filters; §8's reject/pattern flow
   exists because it misses hard fails a human catches in seconds.
+- The temp-0 judge is not deterministic: measured across reruns, ~25% of postings flip
+  verdict and ~8% flip the resulting *action*. That noise is managed at the action
+  boundary — extra draws and a majority vote in the 11–17 fit band, a weekly frozen-set
+  canary for silent provider drift, and an optional second-opinion layer — always as
+  review for you to read, never as automatic re-routing.
 - LinkedIn's guest endpoint breaks occasionally; the pipeline is a convenience layer
   over a moving target (see Troubleshooting).
 - PASS means "worth your read," not "apply." The tool compresses triage; it doesn't
@@ -195,6 +207,19 @@ bundled.
    silently. The permission can read mail for the signed-in account, but the scanner queries
    only those exact configured senders and requests only message time/body. It never marks,
    moves, or deletes mail.
+10. *(Optional)* Enable the second-opinion review layer: an independent second judge
+    (Claude Opus 5) re-reads each day's actionable zone — the undecided cold-apply and
+    recruiter-route candidates — through the Anthropic Message Batches API at 50% batch
+    rates (measured ~$0.05 per opinion), using the same prompt and evidence as the primary
+    evaluator. Agreements collapse to a tally; disagreements render loud in the report and
+    UI. It never changes a stored verdict — review evidence, not re-routing. Set the key
+    (needed for this layer even when the primary evaluator is DeepSeek), then test once:
+    ```
+    setx ANTHROPIC_API_KEY "sk-ant-..."
+    python pipeline.py second-judge
+    ```
+    Without the key the command skips visibly and costs nothing. To run it on a schedule,
+    see §5.
 
 ## 2. Test run
 
@@ -202,7 +227,8 @@ bundled.
 python pipeline.py run
 ```
 
-First run will take a few minutes (9 searches × 20s delay + evaluations). Then open
+First run will take a few minutes (a polite 20s delay between LinkedIn searches — the
+shipped template has 6 — plus evaluations). Then open
 `reports\report_YYYY-MM-DD.md`. If fetches fail, see Troubleshooting.
 
 ## 3. Commands (CLI)
@@ -214,6 +240,7 @@ Command Prompt) opened in the project folder. The commands:
 |---------|--------------|
 | `run` | Full daily cycle: fetch → salary filter → evaluate → write today's report. This is the command that can incur evaluator cost. |
 | `report` | Rebuild a report from the database — **free**, no fetching, no API calls. Defaults to today; `--date YYYY-MM-DD` for a past day. |
+| `second-judge` | Submit the day's actionable zone to the second judge and ingest finished opinions (Batch API; needs `ANTHROPIC_API_KEY`), then rebuild only the reports that gained opinions. `--wait M` / `--collect-only` / `--backfill-days N`. |
 | `email-shadow` | Read configured Outlook alerts and write `reports/outlook-shadow-YYYY-MM-DD.md`. Networked but no LLM cost, mailbox/DB writes, or live job-page requests; first use adds `--login`. |
 | `stats` | Quick database counts: by status/verdict, plus an application-status breakdown (applied / passed / backlog). |
 | `backup` | Create and independently verify a ZIP containing the SQLite snapshot plus its catalogued application materials. `--verify PATH` rechecks one without restoring it. |
@@ -221,10 +248,15 @@ Command Prompt) opened in the project folder. The commands:
 | `applied --url X` | Mark a posting as **applied-to**. |
 | `passed --url X` | Mark a posting as **reviewed & decided no**. |
 | `reject --url X` | Override the model: mark a posting as a **hard-fail it let through**; `--pattern` also writes a reusable rule (see §8). |
+| `expired --url X` | Mark a posting **dead/delisted** (stale-ad cleanup): records a fixed note and a chain-wide passed, so relistings auto-skip. Refused on applied chains — record an outcome event instead. |
+| `event --url X --type T` | Record what happened **after** applying — `recruiter_screen`, `interview`, `offer`, `rejected_by_employer`, `ghosted`, `withdrew`, `followup_sent` — or a `note` on any posting. |
+| `dupe --url A --of B` | Manually link two postings as **one role** when the fingerprint missed it (cross-source cross-posts, drifted titles); earliest-seen becomes canonical and decisions propagate chain-wide. |
 
 **`--url` takes a unique substring**, not the whole URL — the LinkedIn job id is easiest. If
 the substring matches more than one posting, the command refuses and lists them so you can be
-more specific. Add **`--undo`** to `applied`/`passed`/`reject` to clear what you set by mistake.
+more specific. Add **`--undo`** to any decision command to reverse it (`event --undo` removes
+the chain's latest event; `dupe --undo` splits the manual link back apart). Run
+`python pipeline.py --help` for every flag.
 
 ```
 python pipeline.py run                         # morning fetch + report
@@ -233,6 +265,8 @@ python pipeline.py passed  --url 4431386393    # you looked and skipped this one
 python pipeline.py passed  --url 4431386393 --undo   # oops, undo it
 python pipeline.py report                      # refresh the report after marking
 python pipeline.py report --date 2026-06-10    # rebuild a past day's report
+python pipeline.py event --url 4431386393 --type interview   # record a post-application outcome
+python pipeline.py second-judge                 # batch second opinions on today's zone (needs ANTHROPIC_API_KEY)
 python pipeline.py stats                        # counts
 python pipeline.py email-shadow                 # silent report-only Outlook alert scan
 python pipeline.py email-shadow --login         # first-time interactive Microsoft consent
@@ -269,6 +303,12 @@ score 15+ from the last 14 days whose duplicate chain has no recorded contact ye
 in your own browser, record them with the card's **Add contact** button, and the card clears —
 the role itself stays undecided in the Backlog, where **Draft outreach** is the natural next step.
 Both knobs are optional config keys (`recruiter_route_days` / `recruiter_route_min_score`).
+With the second-opinion layer enabled (setup step 10), a card whose role drew a
+*disagreeing* second opinion shows a ⬇/⬆ **second judge** line beside the verdict — red ⬇
+demotions loudest, because a wasted application is the expensive direction; green ⬆
+promotions include a crossing of the cold-apply bar inside the same verdict. Agreement and
+still-pending opinions deliberately render nothing, so the line only costs attention when
+the two judges actually differ — and it never changes the verdict or the buttons.
 Use **Add role** for a posting found outside the configured sources. Choose the configured search
 track whose salary floor should apply, then paste its http(s) URL, title, company, and any available
 location, posted date, salary, and JD text. The app stores it locally as
@@ -471,6 +511,20 @@ schedule leaves a small overnight LinkedIn gap (postings made ~23:00–04:00); A
 overnight regardless, and
 raising `hours_old` on its own closes the gap if you ever notice morning misses.
 
+For the optional second-opinion layer (setup step 10), add a second task running
+`run_second_judge.bat` about 15 minutes after each pipeline slot (e.g. 8:15, repeat every
+3h for 16h). It spends only on rows the main run already evaluated and writes its own
+`logs\second-judge-*.log`; a failure there never blocks fetching, evaluation, or the
+report — the day's report simply carries no second opinions until the next slot collects
+them.
+
+The judge itself is watched by a weekly task running `run_canary.bat` (the .bat's comment
+holds a ready `schtasks` line): it re-evaluates a frozen sentinel set against a stored
+baseline and logs to `logs\canary.log`. Exit code 2 — Task Scheduler shows it as Last Run
+Result `0x2` — means drift tripped a threshold; that's a signal to investigate, never an
+automatic verdict change. After you deliberately accept a judge change (new model, new
+guide), re-baseline with `python tests\validation\canary.py --rebaseline`.
+
 For the optional Outlook shadow report, create a separate once-daily task using
 `run_outlook_shadow.bat` after the interactive `--login` succeeds. Run it under the same Windows
 user that performed the login; the batch file intentionally has no `--login`, so an expired or
@@ -519,6 +573,13 @@ Changes to *how postings are judged* (scoring, verdicts, routing) are logged in
   and eyeball it; takes seconds.
 - **Gate fails** = one-liners for audit. Skim occasionally to confirm the evaluator
   isn't killing things you'd want — especially the first week, while you calibrate trust.
+
+With the second-opinion layer enabled, a **🧑‍⚖️ Second opinion** section follows the scored
+sections: a tally line (reviewed / agree / demoted / promoted / pending / errors), then one
+⬇/⬆ line per disagreement with the second judge's verdict, fit, and reason. It appears only
+once at least one judgment or error has landed — the report never waits on the batch — and
+the sections above always keep the primary verdicts: a demotion is a reason to look again
+before applying, not a re-route.
 
 **Status markers** (your decisions + repost history, shown on a posting regardless of verdict):
 
@@ -588,21 +649,30 @@ over-aggressive rule can't silently bury good jobs.
   GATE_FAIL while its own gate table shows every gate passing. Those rows are flagged and
   join **Needs attention** in the Action Center, because a rejected posting otherwise appears
   in no queue at all. The stored verdict is left alone — you decide whether the role was
-  really a miss, and deciding it clears the card.
+  really a miss, and deciding it clears the card. `arbitration-split` rows land in the same
+  queue with the same treatment: a boundary-band posting whose extra draws produced no
+  majority verdict is surfaced for your judgment, never auto-re-routed.
 
 ## Cost
 
-The default evaluator is **`deepseek-v4-flash`** (`provider: deepseek` in config.yaml), which
-runs at roughly **$0.07 per run** — about **50× cheaper** than Claude Sonnet — at typical
-volume (30–80 new postings/day, ~1,500 words each). It's a reasoning model that under-filters
-slightly (errs toward showing you more), which is fine since PASS means "worth your read," not
-"apply."
+The default evaluator is **`deepseek-v4-flash`** (`provider: deepseek` in config.yaml).
+Measured over August 9–11, 2026 at this setup's current volume (~1,300–1,600 new postings/day
+across the scheduled runs, most of it Adzuna/Dice flow): **$0.23–0.91 per run, ~$2.60/day**.
+Boundary-band arbitration — extra draws plus a majority vote when a first draw scores inside
+the 11–17 fit band, firing on roughly 20% of scored evaluations — is already inside those
+numbers. It's a reasoning model that under-filters slightly (errs toward showing you more),
+which is fine since PASS means "worth your read," not "apply."
 
 To trade cost for evaluation quality, switch `provider`/`model` in config.yaml:
-- **`anthropic` / `claude-sonnet-4-6`** — highest quality, ~**$0.50–$1.50/day**. Best on the
-  judgment-call ⚠️ flags and research-coding edge cases.
+- **`anthropic` / `claude-sonnet-4-6`** — best on the judgment-call ⚠️ flags and
+  research-coding edge cases, at ~20–50× the per-token list price. Re-price the arbitration
+  overhead before switching: extra draws that round to noise on DeepSeek don't at these rates.
 - **`anthropic` / `claude-haiku-4-5-20251001`** — a middle option, ~5× cheaper than Sonnet;
   handles the mostly pattern-matching gate checks acceptably, weaker on the judgment calls.
+
+The optional second-opinion layer (setup step 10) bills separately: Claude Opus 5 at Message
+Batches rates (50% of list), measured **~$0.05 per opinion** on its first production day,
+spent only on the bounded actionable zone — not the whole day's intake.
 
 Remember to set the matching API key (`DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`) when you
 switch providers.

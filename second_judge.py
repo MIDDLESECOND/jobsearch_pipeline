@@ -100,9 +100,11 @@ def opinion_summaries(conn, rows):
     the repost_of root. Each summary carries status/model/verdict/fit_score/note plus
     `direction` (states.classify_disagreement vs THIS row's verdict; None while
     pending/errored or in agreement). The report section and the UI card both read THIS
-    function so the two surfaces can't drift; the UI additionally drops direction-less
-    summaries — agreement spends zero pixels, the razor that keeps this layer an
-    attention saver instead of an attention cost. The note is whitespace-collapsed and
+    function so the two surfaces can't drift; the UI additionally narrows through
+    app._visible_opinion — disagreement always renders, a done agreement only on an
+    undecided row still inside the fresh-apply window, everything else spends zero
+    pixels — the razor that keeps this layer an attention saver instead of an
+    attention cost. The note is whitespace-collapsed and
     bounded HERE, once, so no consumer re-invents its own cut — at 400 to match the
     storage cap in _collect_one (stored notes arrive intact; the bound only fires on
     the failed_gate fallback or a legacy over-long value), with _clip's visible

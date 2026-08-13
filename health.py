@@ -242,8 +242,12 @@ def record_fetch_attempt(conn, *, run_id, source_family, target_kind, target_lab
 
 
 def finish_pipeline_run(conn, run_id, *, status, ended_at=None,
-                        error_stage=None, error_type=None):
-    """Finish exactly one still-running record without retaining exception messages."""
+                        error_stage=None, error_type=None, eval_deferred=False):
+    """Finish exactly one still-running record without retaining exception messages.
+
+    `eval_deferred` marks a cycle that completed WITHOUT running the paid eval stage
+    (the DeepSeek peak-rate window). It is a separate fact from `status`, which keeps
+    describing fetch health only."""
     if status not in _RUN_STATUSES - {"running"}:
         raise ValueError("invalid terminal pipeline run status")
     if status in {"failed", "interrupted"}:
@@ -257,9 +261,9 @@ def finish_pipeline_run(conn, run_id, *, status, ended_at=None,
         raise ValueError("ended_at must be an ISO timestamp") from exc
     updated = conn.execute(
         """UPDATE pipeline_runs
-              SET ended_at=?,status=?,error_stage=?,error_type=?
+              SET ended_at=?,status=?,error_stage=?,error_type=?,eval_deferred=?
             WHERE id=? AND status='running' AND ended_at IS NULL""",
-        (ended_at, status, error_stage, error_type, run_id),
+        (ended_at, status, error_stage, error_type, 1 if eval_deferred else 0, run_id),
     )
     if updated.rowcount != 1:
         conn.rollback()
@@ -489,6 +493,9 @@ def _run_history(conn, limit):
         "ended_at": row["ended_at"], "trigger": row["trigger"],
         "run_date": row["run_date"], "status": row["status"],
         "error_stage": row["error_stage"], "error_type": row["error_type"],
+        # A completed cycle that skipped the paid eval stage on purpose — the run is
+        # 'succeeded', so without this flag it reads as a fully evaluated slot.
+        "eval_deferred": bool(row["eval_deferred"]),
         "completion_recorded": row["ended_at"] is not None,
         "duration_seconds": _duration_seconds(row["started_at"], row["ended_at"]),
         "sources": sources_by_run[row["id"]],

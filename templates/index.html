@@ -2705,8 +2705,11 @@ function renderHealth() {
     ).join(" · ");
     const failure = run.error_stage
       ? ` · failed at ${esc(run.error_stage)} (${esc(run.error_type || "error")})` : "";
+    // A completed slot that skipped the paid eval on purpose reads as an ordinary
+    // 'succeeded' run without this — the reason a role surfaced a slot late.
+    const deferred = run.eval_deferred ? ` · <b>eval deferred (peak rate)</b>` : "";
     return `<div class="health-run"><div><span class="health-status">${esc(runStatus)}</span>`
-      + ` · ${esc(run.trigger)} · ${esc(run.started_at)} · ${esc(healthDuration(run.duration_seconds))}${failure}</div>`
+      + ` · ${esc(run.trigger)} · ${esc(run.started_at)} · ${esc(healthDuration(run.duration_seconds))}${deferred}${failure}</div>`
       + `<div class="meta">${sourceBits || "No fetch attempts recorded."}</div></div>`;
   }).join("") : `<div class="meta">No structured runs recorded yet; the next pipeline run will appear here.</div>`);
   grid.appendChild(runPanel);

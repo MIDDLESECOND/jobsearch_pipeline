@@ -9,10 +9,12 @@ tests pin that the deferred cycle still reports and still stamps the cooldown.""
 
 import contextlib
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
+from conftest import make_job
 from core import meta_get
 import pipeline
+import report
 from evaluation import deepseek_peak_end, in_deepseek_peak
 from pipeline import _defer_eval_for_peak, _peak_price_note
 
@@ -129,7 +131,10 @@ def _drive_run(conn, monkeypatch, argv, peak):
     for name in ("skip_decided_reposts", "skip_evaluated_reposts"):
         monkeypatch.setattr(pipeline, name,
                             lambda cn, forward=True, restore=True, _n=name: calls.append(_n))
-    monkeypatch.setattr(pipeline, "generate_report", lambda c, cn, d: calls.append("report"))
+    # Record the DAY: this run stage no longer rebuilds only run_date (see the report_days
+    # set in main) — which day it rebuilds is now the load-bearing part.
+    monkeypatch.setattr(pipeline, "generate_report",
+                        lambda c, cn, d: calls.append(f"report:{d}"))
     monkeypatch.setattr(pipeline, "in_deepseek_peak", lambda now=None: peak)
     # The note path reads the clock through deepseek_peak_end; keep both patched
     # clocks telling the same story, with a plausible remaining-window span.
@@ -142,11 +147,15 @@ def _drive_run(conn, monkeypatch, argv, peak):
     return calls
 
 
+TODAY = date.today().isoformat()
+YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
+
+
 def test_wiring_scheduled_peak_defers_eval_but_cycle_completes(conn, monkeypatch, capsys):
     calls = _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=True)
     out = capsys.readouterr().out
     assert "evaluate_new_jobs" not in calls
-    assert "report" in calls                             # deferral skips ONLY the paid stage
+    assert f"report:{TODAY}" in calls                     # deferral skips ONLY the paid stage
     assert "[eval] deferred" in out                      # visible in the day's log
     assert "[price]" not in out                          # the human warning is manual-only
     assert meta_get(conn, "last_run_ok_ended")           # still a full cycle: stamp advances
@@ -168,3 +177,70 @@ def test_wiring_manual_off_peak_is_quiet(conn, monkeypatch, capsys):
     calls = _drive_run(conn, monkeypatch, ["run"], peak=False)
     assert "evaluate_new_jobs" in calls
     assert "[price]" not in capsys.readouterr().out
+
+
+# ------------------------------------------------- what a waiting row does to reports
+#
+# Deferral means a row can be fetched on one calendar day and evaluated by a run whose
+# run_date is the next one. generate_report rebuilds ONE day, so the report stage has to
+# follow the ROWS (their first_seen), not the run's start date — otherwise the older day
+# keeps its pre-eval snapshot forever and those rows are in no report at all.
+
+
+def _waiting_row(conn, day):
+    make_job(conn, first_seen=f"{day}T22:00:00", status="new",
+             verdict=None, fit_score=None, bucket=None)
+
+
+def test_wiring_rebuilds_the_report_of_a_day_whose_rows_waited(conn, monkeypatch):
+    _waiting_row(conn, YESTERDAY)
+    calls = _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=False)
+    assert f"report:{TODAY}" in calls          # the run's own day, as always
+    assert f"report:{YESTERDAY}" in calls      # and the day the waiting row belongs to
+
+
+def test_wiring_deferred_run_rebuilds_only_its_own_day(conn, monkeypatch):
+    # Nothing was evaluated, so no OTHER day's report can have changed — collecting days
+    # here would rewrite old reports on every peak slot for no reason.
+    _waiting_row(conn, YESTERDAY)
+    calls = _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=True)
+    assert [c for c in calls if c.startswith("report:")] == [f"report:{TODAY}"]
+
+
+def test_report_names_the_rows_it_has_not_evaluated(conn, tmp_path):
+    # The buckets can't hold a 'new' row, so without this line the headline count exceeds
+    # their sum with nothing saying why — twice a day, by design, since the deferral.
+    day = "2026-06-01"
+    _waiting_row(conn, day)
+    make_job(conn, first_seen=f"{day}T09:00:00")          # an evaluated PASS alongside it
+    out = tmp_path / "reports"                            # absolute: never the real repo dir
+    report.generate_report({"settings": {"reports_dir": str(out)}}, conn, for_date=day)
+    text = (out / f"report_{day}.md").read_text(encoding="utf-8")
+    assert "2 new postings" in text
+    assert "1 awaiting evaluation" in text
+
+
+def test_report_is_silent_when_everything_was_evaluated(conn, tmp_path):
+    day = "2026-06-01"
+    make_job(conn, first_seen=f"{day}T09:00:00")
+    out = tmp_path / "reports"
+    report.generate_report({"settings": {"reports_dir": str(out)}}, conn, for_date=day)
+    assert "awaiting evaluation" not in (out / f"report_{day}.md").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------- the deferral as a durable run fact
+
+
+def test_deferred_run_is_marked_on_its_health_record(conn, monkeypatch):
+    _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=True)
+    row = conn.execute("SELECT status, eval_deferred FROM pipeline_runs "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    # The cycle really did complete — the flag is a separate fact from fetch health.
+    assert row["status"] == "succeeded" and row["eval_deferred"] == 1
+
+
+def test_evaluated_run_is_not_marked_deferred(conn, monkeypatch):
+    _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=False)
+    row = conn.execute("SELECT eval_deferred FROM pipeline_runs "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["eval_deferred"] == 0

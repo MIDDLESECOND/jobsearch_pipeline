@@ -736,7 +736,19 @@ def main():
                 stage = "skip_evaluated_reposts"
                 skip_evaluated_reposts(conn, restore=False)
                 stage = "evaluation"
-                if _defer_eval_for_peak(args.scheduled, cfg):
+                # Which days' reports this cycle can change. run_date always — but ALSO the
+                # first_seen day of every row this run is about to evaluate, read BEFORE the
+                # eval (afterwards they aren't 'new' any more). A row that waited — peak
+                # deferral, error requeue, a fetch that outran the eval — is evaluated by a
+                # run whose run_date may be the NEXT calendar day, and generate_report only
+                # ever rebuilds ONE day, so its own day would keep the pre-eval snapshot
+                # forever: the "rows appear in NO report at all" hazard the run_date comment
+                # above exists to prevent, re-entered through the back door. Same shape as
+                # second_judge._ingested_days — the stage that changed the rows names the
+                # days, the report stage rebuilds exactly those.
+                report_days = {run_date}
+                eval_deferred = _defer_eval_for_peak(args.scheduled, cfg)
+                if eval_deferred:
                     waiting = conn.execute(
                         "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
                     ).fetchone()[0]
@@ -748,9 +760,21 @@ def main():
                         note = _peak_price_note(cfg)
                         if note:
                             print(note)
+                    # GLOB, not a bare substr: a malformed first_seen would otherwise reach
+                    # generate_report's date parser and abort the run at the report stage.
+                    report_days |= {d for (d,) in conn.execute(
+                        "SELECT DISTINCT substr(first_seen,1,10) FROM jobs WHERE status=? "
+                        "AND first_seen GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'",
+                        (STATUS_NEW,))}
                     evaluate_new_jobs(cfg, conn)
                 stage = "report"
-                generate_report(cfg, conn, run_date)
+                # Oldest first so today's report is written last, exactly as before.
+                for day in sorted(report_days):
+                    generate_report(cfg, conn, day)
+                if len(report_days) > 1:
+                    older = ", ".join(sorted(report_days - {run_date}))
+                    print(f"[report] also rebuilt {older} — rows first seen then were "
+                          f"evaluated in this run")
                 stage = "cooldown_stamp"
                 if run_has_successful_target(conn, run_id):
                     meta_set(conn, "last_run_ok_ended",
@@ -763,7 +787,8 @@ def main():
                         print("[cooldown] no fetch target was configured — not stamping "
                               "last_run_ok_ended, so the next scheduled slot runs in full")
                 finish_pipeline_run(
-                    conn, run_id, status=completed_run_status(conn, run_id)
+                    conn, run_id, status=completed_run_status(conn, run_id),
+                    eval_deferred=eval_deferred,
                 )
             except BaseException as exc:
                 # Ctrl-C/SystemExit remain fatal, but the durable row records that the run

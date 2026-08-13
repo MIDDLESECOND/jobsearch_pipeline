@@ -260,6 +260,36 @@ def test_job_task_version_is_added_to_intermediate_schema(tmp_path):
         conn.close()
 
 
+def test_pipeline_run_eval_deferred_is_added_additively(tmp_path):
+    """A DB created before peak-rate deferral gains the marker without losing run history,
+    and pre-existing rows read as 'not deferred' rather than NULL."""
+    path = str(tmp_path / "preruns.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE pipeline_runs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+               ended_at TEXT, trigger TEXT NOT NULL, run_date TEXT NOT NULL,
+               status TEXT NOT NULL, error_stage TEXT, error_type TEXT
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO pipeline_runs (started_at,ended_at,trigger,run_date,status)
+           VALUES ('2026-08-10T08:00:00','2026-08-10T08:04:00','scheduled',
+                   '2026-08-10','succeeded')"""
+    )
+    conn.commit()
+    conn.close()
+
+    conn = core.get_db({"settings": {"db_path": path}})
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(pipeline_runs)")}
+        row = conn.execute("SELECT status,eval_deferred FROM pipeline_runs").fetchone()
+        assert "eval_deferred" in columns
+        assert row["status"] == "succeeded" and row["eval_deferred"] == 0
+    finally:
+        conn.close()
+
+
 def test_connections_run_in_wal_mode(tmp_path):
     # connect_db switches the DB to WAL so a slow concurrent reader (the UI's full-table
     # view scan) can never block an eval write past the busy timeout — the failure mode

@@ -17,7 +17,7 @@ from core import BASE_DIR, PARSE_MIN, PARSE_MAX, recency_dt
 from chain import effective_decisions
 from second_judge import opinion_summaries
 from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
-                    STATUS_NEEDS_MANUAL, STATUS_ERROR, STATUS_SALARY_FILTERED,
+                    STATUS_NEEDS_MANUAL, STATUS_NEW, STATUS_ERROR, STATUS_SALARY_FILTERED,
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED)
 
 
@@ -77,12 +77,20 @@ def generate_report(cfg, conn, for_date=None):
     applied_reposts = sum(s == "applied" for s in repost_status)
     passed_reposts = sum(s == "passed" for s in repost_status)
 
+    # Rows still awaiting the paid eval when this rendered. NO bucket above can hold them
+    # (each selects on a verdict or a terminal status), so the headline count would exceed
+    # the sections' sum with nothing saying why. Used to mean "the eval crashed"; since the
+    # peak-rate deferral (pipeline._defer_eval_for_peak) it is a normal twice-a-day state.
+    # Transient by design: `run` rebuilds this day's report once these rows are evaluated,
+    # and the line disappears — an unexplained gap must never be the resting state.
+    awaiting = [r for r in rows if r["status"] == STATUS_NEW]
     lines = [f"# Job Pipeline Report — {d}", ""]
     lines.append(
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
         f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | "
         f"{len(hard_filtered)} hard-filtered | {len(repost_skipped) + len(repost_evaluated)} repost-skipped | {len(errors)} errors"
+        + (f" | **{len(awaiting)} awaiting evaluation**" if awaiting else "")
     )
     if reposts:
         n = len(reposts)

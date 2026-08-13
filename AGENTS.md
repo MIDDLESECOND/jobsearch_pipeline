@@ -230,6 +230,16 @@ Windows Task Scheduler.
   Manual runs and non-DeepSeek providers always evaluate; a manual run inside the window
   gets a `[price]` warning (at run start and again at eval start) naming when off-peak
   resumes on the local clock, but is never blocked.
+  Because a row can now be fetched on one calendar day and evaluated by a run whose
+  `run_date` is the next one, **the report stage rebuilds the days the run's rows belong to,
+  not just `run_date`**: the eval stage collects the `first_seen` day of every row it is
+  about to evaluate (deferred, error-requeued, or simply late) and the report stage renders
+  exactly those plus `run_date` — the same "the stage that changed the rows names the days"
+  shape as `second_judge._ingested_days`. Without it those rows would sit in NO report at
+  all, the hazard the `run_date`-not-finish-date comment in `main` exists to prevent. A
+  report rendered while rows are still `new` says so out loud (`N awaiting evaluation` in
+  the summary line): no bucket can hold an unevaluated row, so the headline count would
+  otherwise silently exceed the sections' sum.
   Each stage gates on the `status` column, and only
   `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost passes run *before*
   the LLM and short-circuit obvious rejects: the two repost-skip reconciles' RESTORE direction
@@ -447,6 +457,12 @@ Windows Task Scheduler.
   uncaught downstream failure stores its stage and exception class but not its message. The
   cooldown success stamp advances only when at least one real fetch target succeeded, including a
   successful zero-result response—not when every target failed or nothing was configured.
+  `pipeline_runs.eval_deferred` records that a completed cycle deliberately skipped the paid
+  eval stage (the peak-rate window). It is a SEPARATE fact from `status`, which keeps
+  describing fetch health only — a deferred slot really did complete, and overloading the
+  status vocabulary would make `completed_run_status` lie. Without the column a deferred
+  slot is indistinguishable from a fully evaluated one and the only evidence is a log line
+  with 30-day retention.
   Health/yield reads are descriptive: posting counts use each row's stored source/search, while
   role/outcome counts assign each current duplicate chain exactly once to its earliest stored
   posting and cohort only chains first seen inside the selected window. Merge/unlink can therefore

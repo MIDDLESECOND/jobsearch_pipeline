@@ -676,19 +676,36 @@ def _dupe_candidate_dismissals_table_sql():
 
 
 def _pipeline_runs_table_sql():
-    """Durable run boundaries; unfinished rows are evidence of missing completion, not success."""
+    """Durable run boundaries; unfinished rows are evidence of missing completion, not success.
+
+    `eval_deferred` records that a completed cycle deliberately skipped the paid eval stage
+    (pipeline._defer_eval_for_peak). Without it a deferred slot is indistinguishable from a
+    fully evaluated one — both 'succeeded' — and the only evidence would be a line in a log
+    file with 30-day retention. It is NOT a status value: the run really did complete, and
+    overloading `status` would make completed_run_status lie about fetch health."""
     return """
         CREATE TABLE IF NOT EXISTS pipeline_runs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            started_at  TEXT NOT NULL,
-            ended_at    TEXT,
-            trigger     TEXT NOT NULL,
-            run_date    TEXT NOT NULL,
-            status      TEXT NOT NULL,
-            error_stage TEXT,
-            error_type  TEXT
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at    TEXT NOT NULL,
+            ended_at      TEXT,
+            trigger       TEXT NOT NULL,
+            run_date      TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            error_stage   TEXT,
+            error_type    TEXT,
+            eval_deferred INTEGER NOT NULL DEFAULT 0
         )
     """
+
+
+def _migrate_pipeline_runs(conn):
+    """Add the deferred-eval marker to databases created before peak-rate deferral."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pipeline_runs)")}
+    if "eval_deferred" not in cols:
+        conn.execute("ALTER TABLE pipeline_runs "
+                     "ADD COLUMN eval_deferred INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        print("[migrate] added pipeline_runs.eval_deferred")
 
 
 def _pipeline_fetch_attempts_table_sql():
@@ -849,6 +866,7 @@ def get_db(cfg):
     conn.execute(_pipeline_fetch_attempts_table_sql())
     conn.execute(_second_opinions_table_sql())
     _migrate_second_opinions(conn)
+    _migrate_pipeline_runs(conn)
     _migrate_job_tasks(conn)
     _migrate_application_materials(conn)
     _migrate_dupe_candidate_dismissals(conn)

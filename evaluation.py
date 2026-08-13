@@ -15,6 +15,7 @@ import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
 from states import (GATE_NAMES, GATE_OTHER, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
@@ -313,6 +314,34 @@ MODEL_PRICES = {
     "deepseek-v4-flash":          (0.14 / 1e6, 0.28 / 1e6),
     "deepseek-v4-pro":            (0.435 / 1e6, 0.87 / 1e6),
 }
+
+# DeepSeek bills clock-dependent rates from 2026-08-17 (same pricing page): peak =
+# 01:00-04:00 and 06:00-10:00 UTC (Beijing 9-12 / 14-18) at 2x the off-peak rate.
+# The windows are fixed in UTC, so the predicate reads UTC directly — immune to the
+# DST shifts that would silently move a local-clock schedule back into peak twice a
+# year. Checked once at eval-stage start, not per request: a batch that starts
+# off-peak and drags across a boundary pays peak for its tail, so keep scheduled
+# slots clear of the window edges rather than teaching this to re-check mid-run.
+DEEPSEEK_PEAK_HOURS_UTC = ((1, 4), (6, 10))  # [start, end) hour windows
+
+
+def in_deepseek_peak(now=None):
+    """True inside DeepSeek's 2x peak-rate windows. `now`: aware datetime, any tz —
+    a NAIVE value is read as machine-local (astimezone's rule), so never hand this
+    a naive UTC clock. Defined through deepseek_peak_end so the window table is read
+    in exactly ONE place: "am I in a window" and "when does it end" cannot disagree."""
+    return deepseek_peak_end(now) is not None
+
+
+def deepseek_peak_end(now=None):
+    """Aware-UTC end of the peak window containing `now`, or None while off-peak —
+    the ONE reading of DEEPSEEK_PEAK_HOURS_UTC (in_deepseek_peak delegates here).
+    Both windows close before midnight UTC, so the end is always on `now`'s date."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    for lo, hi in DEEPSEEK_PEAK_HOURS_UTC:
+        if lo <= now.hour < hi:
+            return now.replace(hour=hi, minute=0, second=0, microsecond=0)
+    return None
 
 # Claude 5-era models reject any non-default `temperature` outright. This is an
 # ALLOWLIST of the older ids that still accept it, not a denylist of the ones that

@@ -37,7 +37,7 @@ import argparse
 import re
 import sys
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 # This module is the CLI/orchestrator ONLY: it imports exactly what `run` and the cmd_*
 # wrappers call. Consumers (app.py, the tests, backtest_v2 / compare_models) import the real
@@ -45,7 +45,7 @@ from datetime import date, datetime, timedelta
 from core import BASE_DIR, load_config, get_db, run_log, meta_get, meta_set
 from backup import BackupError, create_backup, verify_backup
 from states import (GATE_NAMES_WITH_OTHER, ALL_EVENTS, ALL_CHANNELS, VERDICT_GATE_FAIL,
-                    STATUS_SALARY_FILTERED)
+                    STATUS_NEW, STATUS_SALARY_FILTERED)
 from chain import (
     skip_decided_reposts, skip_evaluated_reposts, resolve_posting, _fmt_decision,
     mark_posting, mark_expired, reject_posting, dupe_resolve, dupe_commit, dupe_unlink,
@@ -62,7 +62,8 @@ from filters import (
     apply_salary_filter, apply_hard_filters,
     load_filters, save_filters, _pattern_matches, validate_pattern, FILTERS_PATH,
 )
-from evaluation import evaluate_new_jobs, requeue_error_rows
+from evaluation import (evaluate_new_jobs, deepseek_peak_end, in_deepseek_peak,
+                        requeue_error_rows)
 from report import generate_report
 import second_judge
 from materials import snapshot_jd
@@ -444,6 +445,44 @@ def _cooldown_active(last_ok_iso, now, minutes=COOLDOWN_MINUTES):
         return False
 
 
+def _defer_eval_for_peak(scheduled, cfg, now=None):
+    """Scheduled DeepSeek evals sit out the 2x peak-rate windows (evaluation.
+    in_deepseek_peak): rows stay 'new' and the next off-peak slot evaluates them.
+    Only the paid stage waits — fetch/filters/report run normally, so discovery
+    freshness is untouched. Manual runs always evaluate (same human-override
+    philosophy as the cooldown guard). The provider read mirrors
+    evaluate_new_jobs' default: a non-DeepSeek provider has no peak clock, and a
+    True here would silently stop its evaluation entirely.
+
+    That default ("anthropic") is spelled in three places — here, _peak_price_note,
+    and evaluation.evaluate_new_jobs, which is the one that actually picks the
+    caller and therefore owns it. Change it there, change it here: a gate reading a
+    different default than the biller would defer runs Anthropic is billing, or bill
+    DeepSeek peak rates this was built to dodge."""
+    return (scheduled
+            and cfg["settings"].get("provider", "anthropic") == "deepseek"
+            and in_deepseek_peak(now))
+
+
+def _peak_price_note(cfg, now=None):
+    """The MANUAL-run counterpart of _defer_eval_for_peak: a human who typed `run`
+    gets their eval (never second-guess an explicit command — same contract as the
+    cooldown), but a human can simply forget what the clock means for the bill, so
+    peak hours get a warning naming the way out. Returns the message, or None while
+    off-peak / on providers without a peak clock."""
+    if cfg["settings"].get("provider", "anthropic") != "deepseek":
+        return None
+    now = now or datetime.now(timezone.utc)
+    end = deepseek_peak_end(now)
+    if end is None:
+        return None
+    local_end = end.astimezone().strftime("%H:%M")
+    mins = max(0, round((end - now).total_seconds() / 60))
+    return (f"[price] DeepSeek peak-rate window: 2x price for ~{mins} more min. "
+            f"This manual run evaluates anyway — to pay half, Ctrl-C and rerun "
+            f"after {local_end} local (fetched rows wait as 'new'; nothing is lost)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="LinkedIn job search pipeline")
     ap.add_argument("command", choices=["run", "report", "stats", "applied", "passed",
@@ -624,6 +663,8 @@ def main():
         #                                  (after the decided pass — a user decision is the more
         #                                  informative skip reason when both apply)
         #   evaluate_new_jobs              remaining 'new'        -> 'evaluated' | 'needs_manual' | 'error'
+        #                                  (--scheduled + DeepSeek sits out the 2x peak-rate
+        #                                  window: rows stay 'new' for the next off-peak slot)
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
         # run_log tees this whole cycle into the day's logs/pipeline-YYYY-MM-DD.log so a manual
         # terminal run is captured like a scheduled one (the .bat no longer redirects — that
@@ -636,6 +677,13 @@ def main():
         with run_log("run"):
             run_date = args.date or date.today().isoformat()
             trigger = "scheduled" if args.scheduled else "manual"
+            # Manual run in DeepSeek's peak window: say so at the very top, while
+            # Ctrl-C still costs nothing. The eval stage re-checks — a slow fetch
+            # can carry an off-peak start INTO the window (and vice versa).
+            if trigger == "manual":
+                note = _peak_price_note(cfg)
+                if note:
+                    print(note)
             # Cooldown guard, scheduled runs only — INSIDE run_log so a skipped slot is
             # visible in the day's log (a silent non-run reads as a crash). A skip does
             # NOT re-stamp last_run_ok_ended, so consecutive slots can't cascade-skip.
@@ -688,7 +736,19 @@ def main():
                 stage = "skip_evaluated_reposts"
                 skip_evaluated_reposts(conn, restore=False)
                 stage = "evaluation"
-                evaluate_new_jobs(cfg, conn)
+                if _defer_eval_for_peak(args.scheduled, cfg):
+                    waiting = conn.execute(
+                        "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
+                    ).fetchone()[0]
+                    print(f"[eval] deferred: DeepSeek peak-rate window "
+                          f"(UTC 01-04/06-10, 2x price) — {waiting} 'new' row(s) wait "
+                          f"for the next off-peak slot; a manual `run` evaluates now")
+                else:
+                    if not args.scheduled:
+                        note = _peak_price_note(cfg)
+                        if note:
+                            print(note)
+                    evaluate_new_jobs(cfg, conn)
                 stage = "report"
                 generate_report(cfg, conn, run_date)
                 stage = "cooldown_stamp"

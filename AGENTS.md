@@ -158,7 +158,7 @@ current salary/hard filters, repost skips, and evaluator in the next normal run.
 pip install -r requirements.txt          # python-jobspy, anthropic, pyyaml (.venv present)
 
 python pipeline.py run                    # full cycle: fetch → error requeue → repost-skip restores → salary filter → hard filters → repost-skip forward → eval → report
-#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; bare `run` always executes
+#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; also defers the paid eval inside DeepSeek's 2x peak-rate window (UTC 01-04/06-10); bare `run` always executes and always evaluates
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
 python pipeline.py backup [--output PATH]          # create + verify an evidence ZIP
@@ -221,6 +221,15 @@ Windows Task Scheduler.
   visibly, inside the day's run-log markers; the predicate fails open on missing/garbage
   stamps and manual runs never skip. A skip is a full no-op (error-row requeue, reconciles,
   and report rebuild all wait for the next executed run).
+  Separately, a `--scheduled` run whose provider is DeepSeek defers ONLY the paid eval
+  stage inside DeepSeek's 2x peak-rate windows (01:00–04:00 / 06:00–10:00 UTC = Beijing
+  9–12 / 14–18, billed since 2026-08-17; `evaluation.in_deepseek_peak`, gated by
+  `pipeline._defer_eval_for_peak`): fetch/filters/report still run, rows stay `new` for
+  the next off-peak slot, and the cooldown stamp still advances. The windows are pinned
+  in UTC on purpose — a local-clock schedule would drift into peak at every DST change.
+  Manual runs and non-DeepSeek providers always evaluate; a manual run inside the window
+  gets a `[price]` warning (at run start and again at eval start) naming when off-peak
+  resumes on the local clock, but is never blocked.
   Each stage gates on the `status` column, and only
   `status='new'` rows reach the *paid* eval. So the deterministic, zero-cost passes run *before*
   the LLM and short-circuit obvious rejects: the two repost-skip reconciles' RESTORE direction

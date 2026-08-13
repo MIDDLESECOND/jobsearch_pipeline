@@ -1422,11 +1422,12 @@ def test_visible_opinion_agreement_window_is_calendar_days():
     assert webapp._visible_opinion(_op(), UNDECIDED, dateless, today=today) is None
 
 
-def _seed_opinion(seed, url, verdict, fit, cid):
+def _seed_opinion(seed, url, verdict, fit, cid, collected_at=None, status="done"):
     seed.execute(
         "INSERT INTO second_opinions (job_url, custom_id, model, status, submitted_at,"
-        " verdict, fit_score, gate_notes) VALUES (?, ?, 'test-model', 'done', 'now', ?, ?, '')",
-        (url, cid, verdict, fit))
+        " collected_at, verdict, fit_score, gate_notes)"
+        " VALUES (?, ?, 'test-model', ?, 'now', ?, ?, ?, '')",
+        (url, cid, status, collected_at, verdict, fit))
     seed.commit()
 
 
@@ -1446,3 +1447,59 @@ def test_jobs_api_serializes_agreement_only_inside_the_window(client, seed):
     # stale agreement spends zero pixels; a stale DISAGREEMENT still warns
     assert got["stale_agree"]["second_opinion"] is None
     assert got["stale_flag"]["second_opinion"]["direction"] == "demote"
+
+
+# ------------------------------------------------- the freshness poll (/api/freshness)
+#
+# The UI never refetches on its own, so opinions collected behind an open tab stay
+# invisible. The poll counts what the tab is MISSING — through the same razor, so an
+# all-agreement batch on decided rows raises no banner — and is bounded on both axes.
+
+
+def test_freshness_counts_only_opinions_the_card_would_render(client, seed):
+    now = datetime.now()
+    since = (now - timedelta(hours=2)).isoformat(timespec="seconds")
+    after = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+    before = (now - timedelta(hours=3)).isoformat(timespec="seconds")
+    today = date.today().isoformat()
+    make_job(seed, job_url="fresh_agree", fit_score=16, first_seen=f"{today}T09:00:00")
+    for url in ("stale_agree", "stale_flag", "old_flag", "pending_flag"):
+        make_job(seed, job_url=url, fit_score=16)  # first_seen 2026-06-01, long past
+    _seed_opinion(seed, "fresh_agree", "PASS", 17, cid="c1", collected_at=after)
+    _seed_opinion(seed, "stale_agree", "PASS", 17, cid="c2", collected_at=after)
+    _seed_opinion(seed, "stale_flag", "GATE_FAIL", None, cid="c3", collected_at=after)
+    _seed_opinion(seed, "old_flag", "GATE_FAIL", None, cid="c4", collected_at=before)
+    _seed_opinion(seed, "pending_flag", None, None, cid="c5", collected_at=after,
+                  status="pending")
+    got = client.get("/api/freshness?since=" + since).get_json()
+    # The fresh agreement and the stale DISAGREEMENT would change pixels. The stale
+    # agreement, the pre-`since` arrival, and the pending row would not — a banner that
+    # fires on those trains the user to ignore it.
+    assert got["opinions"] == 2
+    assert got["truncated"] is False and got["now"]
+
+
+def test_freshness_bounds_the_scan_and_ignores_a_garbage_since(client, seed):
+    ancient = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
+    make_job(seed, job_url="ancient_flag", fit_score=16)
+    _seed_opinion(seed, "ancient_flag", "GATE_FAIL", None, cid="c9", collected_at=ancient)
+    # A `since` older than the lookback is clamped to it: a tab open for a month asks
+    # about the last week, not the whole table (the row cap bounds the rest).
+    assert client.get("/api/freshness?since=1970-01-01T00:00:00").get_json()["opinions"] == 0
+    # No/garbage baseline is a pure baseline read — the caller gets `now`, counts nothing.
+    baseline = client.get("/api/freshness").get_json()
+    assert baseline["opinions"] == 0 and baseline["now"]
+    assert client.get("/api/freshness?since=not-a-time").get_json()["opinions"] == 0
+
+
+def test_freshness_accepts_an_offset_carrying_since(client, seed):
+    """collected_at is machine-local and naive; an aware `since` must be converted to that
+    clock, not compared against it (that comparison is a TypeError -> 500)."""
+    now = datetime.now()
+    make_job(seed, job_url="tz_flag", fit_score=16)
+    _seed_opinion(seed, "tz_flag", "GATE_FAIL", None, cid="c8",
+                  collected_at=(now - timedelta(hours=1)).isoformat(timespec="seconds"))
+    aware = (now - timedelta(hours=2)).astimezone().isoformat(timespec="seconds")
+    got = client.get("/api/freshness?since=" + aware)
+    assert got.status_code == 200
+    assert got.get_json()["opinions"] == 1

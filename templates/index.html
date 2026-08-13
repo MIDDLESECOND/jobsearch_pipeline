@@ -94,6 +94,11 @@
   #linkbar { display: none; width: 100%; margin: .6rem -1rem -.75rem; padding: .5rem 1rem;
              background: #fff7ed; border-top: 1px solid #fed7aa; color: #9a3412; font-size: .85rem; }
   #linkbar button { margin-left: .5rem; }
+  /* Same header slot as #linkbar, in the informational blue: this one says the DATABASE
+     moved under an open tab (a second-judge batch landed), not that a workflow is armed. */
+  #freshbar { display: none; width: 100%; margin: .6rem -1rem -.75rem; padding: .5rem 1rem;
+              background: #eff6ff; border-top: 1px solid #bfdbfe; color: #1e40af; font-size: .85rem; }
+  #freshbar button { margin-left: .5rem; }
   button.dupe { background: #fff; color: #6b21a8; border-color: #d8b4fe; font-size: .78rem;
                 padding: .25rem .6rem; }
   button.dupe-target { background: #7c3aed; color: #fff; border-color: #7c3aed; }
@@ -361,6 +366,7 @@
     </select>
   </div>
   <div id="linkbar"></div>
+  <div id="freshbar"></div>
 </header>
 <main id="list"></main>
 <dialog id="intakeDialog" aria-labelledby="intakeDialogTitle">
@@ -3029,6 +3035,84 @@ document.addEventListener("keydown", e => {
     : Math.max(keyIndex < 0 ? 0 : keyIndex - 1, 0);
   cards[keyIndex].classList.add("key-selected");
   cards[keyIndex].scrollIntoView({block: "center", behavior: "smooth"});
+});
+
+// ------------------------------------------------------------------ freshness banner
+//
+// This page never refetches on its own: load() runs on open, on a filter change, and after
+// a mutation. The second judge runs on its OWN schedule (batches land up to an hour after
+// the pipeline slot), so opinions keep arriving behind an open tab — including the
+// disagreements that are load-bearing on the very cards being decided here. The poll asks
+// /api/freshness how many opinions that WOULD render have landed since this page's data
+// (the razor runs server-side, so an all-agreement batch on decided rows raises nothing).
+//
+// It is a BUTTON, never an auto-reload: a list that repaints itself under the cursor is how
+// you click Applied on the wrong role. Dismiss re-arms it for the NEXT batch.
+const FRESH_POLL_MS = 180000;   // 3 min, visible tabs only — jobs.db may sit on a USB HDD
+const freshbar = document.getElementById("freshbar");
+// Server clock only (its own `now`, echoed back as `since`) — never a browser timestamp:
+// second_judge stamps collected_at with the machine's local clock, and the two must be the
+// same reading. baseline advances only on Refresh/Dismiss, so a banner ignored through
+// three polls still reports the whole backlog rather than just the last tick's arrivals.
+let freshBaseline = null;
+let freshNow = null;            // latest response's `now` — the next baseline, read BEFORE
+                                // its query ran, so acking can only re-count, never skip
+
+function ackFresh() {
+  freshBaseline = freshNow || freshBaseline;
+  renderFreshbar(0);
+}
+
+// What the bar currently paints, so an unchanged poll leaves it alone: rebuilding the
+// buttons every 3 minutes swallows any click whose mousedown landed on the old node.
+let shownFresh = "";
+
+function renderFreshbar(n, truncated) {
+  const key = n ? `${n}|${truncated}` : "";
+  if (key === shownFresh) return;
+  shownFresh = key;
+  if (!n) { freshbar.style.display = "none"; freshbar.innerHTML = ""; return; }
+  freshbar.style.display = "block";  // explicit — "" falls back to the stylesheet's none
+  // "pipeline-wide" is not padding: the count spans the whole DB, so some of it lands
+  // outside the current view/filters. A banner that promises a visible change and then
+  // delivers an identical list is how a warning surface gets tuned out.
+  freshbar.innerHTML = `🔎 <b>${n}${truncated ? "+" : ""}</b> new second `
+    + `${n === 1 && !truncated ? "opinion" : "opinions"} since this page loaded `
+    + `— pipeline-wide, not only this view.`;
+  freshbar.appendChild(btn("Refresh", "", () => { ackFresh(); load(); }));
+  freshbar.appendChild(btn("Dismiss", "undo", ackFresh));
+}
+
+async function pollFreshness() {
+  // The BASELINE call is deliberately NOT gated on visibility: a page opened in a
+  // background tab must still stamp what its data reflects, or everything that lands
+  // before the user switches to it gets absorbed into a late baseline and never reported.
+  // Repeat polls are visible-only — an ignored tab should not touch the disk every 3 min.
+  if (freshBaseline && document.visibilityState !== "visible") return;
+  try {
+    const res = await fetch("/api/freshness"
+      + (freshBaseline ? "?since=" + encodeURIComponent(freshBaseline) : ""), {
+      signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+        ? AbortSignal.timeout(10000) : undefined,
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    freshNow = data.now || freshNow;
+    // First response is the baseline itself (no `since` was sent, so its count is 0).
+    if (!freshBaseline) { freshBaseline = data.now; return; }
+    renderFreshbar(data.opinions || 0, !!data.truncated);
+  } catch (e) {
+    // A wedged server, a sleeping laptop, a spun-down drive: a background poll must never
+    // interrupt triage. The next tick retries; the banner keeps whatever it was showing.
+  }
+}
+
+// Baseline first, so anything landing during the initial load is re-counted (a redundant
+// banner) rather than missed. Returning to a tab left open for hours checks immediately.
+pollFreshness();
+setInterval(pollFreshness, FRESH_POLL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") pollFreshness();
 });
 
 load();

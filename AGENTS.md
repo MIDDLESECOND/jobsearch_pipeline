@@ -108,7 +108,11 @@ re-export hub):
 - `pipeline.py` — the CLI/orchestrator: the `run` stage order, thin `cmd_*` wrappers over the
   chain service cores, and `main`.
 - `app.py` (Flask) + `templates/index.html` — the local triage UI (a thin HTTP/presentation
-  layer over `workflow`/`funnel` reads and the `chain` service cores).
+  layer over `workflow`/`funnel` reads and the `chain` service cores). It refetches only on
+  open, filter change, and mutation, so `/api/freshness` is the one poll that tells an open
+  tab the DB moved under it: it counts second opinions collected since a server-issued
+  timestamp the client echoes back, filtered through the SAME `_visible_opinion` razor the
+  card uses, and feeds a banner that is a button — the UI never reloads itself.
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach

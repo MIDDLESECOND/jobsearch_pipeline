@@ -24,7 +24,7 @@ import json
 import sys
 import time
 import webbrowser
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
@@ -430,6 +430,72 @@ def api_jobs():
             "page_size": result["page_size"],
             "pages": result["pages"],
         })
+    finally:
+        conn.close()
+
+
+# Bounds on the freshness poll (below). The lookback clamps `since`, so a tab left open
+# over a weekend — or a hand-typed query — can never turn the poll into a full-history
+# join; the row cap bounds the batched chain reads behind the razor. Both are generous
+# against the real flow (second_judge.MAX_PER_SUBMIT is 50 per slot).
+FRESHNESS_MAX_LOOKBACK_DAYS = 7
+FRESHNESS_MAX_ROWS = 500
+
+
+@app.route("/api/freshness")
+def api_freshness():
+    """"Have second opinions landed since this tab loaded?" — the poll behind the UI's
+    refresh banner.
+
+    The UI is pull-only: load() runs on open, on a filter change, and after a mutation,
+    and nothing else. `second-judge` runs on its own schedule (15 min behind the pipeline
+    slot, with batches landing up to an hour later), so an open tab keeps missing exactly
+    what this layer exists for — a DISAGREEMENT is a warning at the point where the
+    decision gets clicked. This endpoint gives the client a counter to notice that with.
+    It mutates nothing and refreshes nothing on its own: the banner it feeds is a button,
+    because repainting the list under a cursor mid-triage is how you click Applied on the
+    wrong role.
+
+    Returns {"now", "opinions", "truncated"}. `now` comes off the same local clock
+    second_judge stamps `collected_at` with, and is read BEFORE the query — the client
+    stores it and sends it back as `since`, so no client/server clock comparison is ever
+    made, and an opinion landing mid-query is counted again next poll rather than lost.
+    A missing/garbage `since` makes the call a pure baseline read (count 0).
+
+    `opinions` counts only opinions that WOULD render, through the same
+    opinion_summaries + _visible_opinion razor the card uses — a batch of agreements on
+    already-decided or stale rows changes no pixel, and must not raise a banner.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        since_dt = datetime.fromisoformat(request.args.get("since") or "")
+        if since_dt.tzinfo is not None:
+            # `collected_at` is written by datetime.now() — machine-local and naive — so an
+            # offset-carrying `since` is converted to that same wall clock rather than
+            # compared against it (max() of an aware and a naive datetime is a TypeError).
+            since_dt = since_dt.astimezone().replace(tzinfo=None)
+    except ValueError:
+        return jsonify({"now": now, "opinions": 0, "truncated": False})
+    since = max(since_dt, datetime.now() - timedelta(days=FRESHNESS_MAX_LOOKBACK_DAYS))
+    cfg = load_config()
+    conn = connect_db(cfg)
+    try:
+        # Only the columns the razor's three readers need — never description: this runs
+        # every few minutes, and the payload is a single integer.
+        rows = conn.execute(
+            """SELECT j.job_url, j.repost_of, j.verdict, j.fit_score,
+                      j.date_posted, j.first_seen
+               FROM second_opinions s JOIN jobs j ON j.job_url = s.job_url
+               WHERE s.status='done' AND s.collected_at >= ?
+               ORDER BY s.collected_at LIMIT ?""",
+            (since.isoformat(timespec="seconds"), FRESHNESS_MAX_ROWS)).fetchall()
+        opinions = opinion_summaries(conn, rows)
+        decisions = effective_decisions(conn, rows)
+        visible = sum(1 for r in rows if _visible_opinion(
+            opinions[r["job_url"]], decisions[r["job_url"]], r))
+        # A capped scan reports a FLOOR, never a complete count — the client renders "N+".
+        return jsonify({"now": now, "opinions": visible,
+                        "truncated": len(rows) == FRESHNESS_MAX_ROWS})
     finally:
         conn.close()
 

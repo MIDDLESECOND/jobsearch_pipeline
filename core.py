@@ -400,6 +400,28 @@ def connect_db(cfg):
     return conn
 
 
+def prewarm_db(cfg):
+    """Sequentially read jobs.db and its WAL/SHM sidecars into the OS file cache; returns
+    bytes read. For launch paths that are about to query a COLD database — this deployment
+    keeps jobs.db on an external USB HDD, where the first query storm after a spin-down is
+    random reads at disk latency and has run past the UI's 30s fetch timeout, while one
+    sequential pass over the same file takes seconds and lets that first query hit RAM.
+    Purely an OS-cache side effect: no SQLite handle, no locks, safe alongside any reader."""
+    total = 0
+    base = BASE_DIR / cfg["settings"]["db_path"]
+    for path in (base, base.with_name(base.name + "-wal"), base.with_name(base.name + "-shm")):
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 23)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+        except OSError:  # sidecar absent (clean close), or db missing — get_db creates it
+            continue
+    return total
+
+
 def _jobs_table_sql(name, if_not_exists=False):
     """The ONE authoritative jobs DDL — used by get_db's CREATE IF NOT EXISTS and by
     _rebuild_for_stale_checks' table swap, so the two can never drift. The status/verdict

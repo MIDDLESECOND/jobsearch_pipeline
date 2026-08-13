@@ -22,6 +22,7 @@ is unsupported: routes open plain connect_db connections and would fail on a fre
 
 import json
 import sys
+import time
 import webbrowser
 from datetime import date
 
@@ -31,7 +32,7 @@ from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    effective_decisions, effective_decision, dupe_resolve, dupe_commit,
                    dupe_unlink, record_event, undo_event, chain_events, set_resume,
                    set_channel)
-from core import connect_db, get_db, load_config
+from core import connect_db, get_db, load_config, prewarm_db
 from dupe_candidates import confirm_candidate, set_candidate_dismissed
 from second_judge import opinion_summaries
 from exports import roles_csv
@@ -1328,7 +1329,8 @@ def serve(host="127.0.0.1", port=5000):
     # guarded like the CLI path in pipeline.main(): validate_config raises on a broken
     # config.yaml, and the UI must die with the collected problem list, not a traceback.
     try:
-        get_db(load_config()).close()
+        cfg = load_config()
+        get_db(cfg).close()
     except FileNotFoundError:
         print("[config] config.yaml not found — copy config.example.yaml to config.yaml "
               "and edit it for your search", file=sys.stderr)
@@ -1341,6 +1343,14 @@ def serve(host="127.0.0.1", port=5000):
         # same clean-exit treatment as a config problem.
         print(f"[db] {e}", file=sys.stderr)
         sys.exit(2)
+    # Warm the OS cache BEFORE the browser opens: jobs.db lives on a USB HDD, and the first
+    # Action Center query against a spun-down disk has blown the front-end's 30s fetch
+    # timeout ("Failed to load: TimeoutError"). A sequential pre-read costs a few seconds of
+    # startup, spends them before the first fetch exists, and makes that fetch hit RAM.
+    start = time.monotonic()
+    warmed = prewarm_db(cfg)
+    print(f"[ui] warmed {warmed / 1048576:.0f} MB of jobs.db into the OS cache "
+          f"in {time.monotonic() - start:.1f}s")
     url = f"http://{host}:{port}"
     print(f"[ui] triage UI at {url}  (Ctrl-C to stop)")
     try:

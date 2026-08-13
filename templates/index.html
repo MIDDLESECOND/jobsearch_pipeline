@@ -2931,25 +2931,37 @@ async function load() {
     list.innerHTML = `<div class="empty">Loading…</div>`;
   }
   let payload;
-  try {  // narrow: a render() bug must not masquerade as a network failure
-    const res = await fetch(url, {
-      // Same wedged-server insurance as postJSON: a hung /api/jobs must fail into the catch
-      // below, not pin loadState at "loading" (eternal spinner, disarmed toggle) forever.
-      signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
-        ? AbortSignal.timeout(30000) : undefined,
-    });
-    payload = await res.json();
-    if (!res.ok) throw new Error(payload.message || `HTTP ${res.status}`);
-  } catch (e) {
-    if (seq === loadSeq) {  // a superseded load's failure isn't this view's state
-      // A failed SOFT refresh falls back to this same error surface: the visible rows
-      // pre-date a mutation the server may have committed, so keeping them quietly would
-      // present stale state as current.
-      loadState = "failed";
-      renderedUrl = null;
-      list.innerHTML = `<div class="empty">Failed to load: ${esc(String(e))}</div>`;
+  for (let attempt = 0; ; attempt++) {
+    try {  // narrow: a render() bug must not masquerade as a network failure
+      const res = await fetch(url, {
+        // Same wedged-server insurance as postJSON: a hung /api/jobs must fail into the catch
+        // below, not pin loadState at "loading" (eternal spinner, disarmed toggle) forever.
+        signal: (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+          ? AbortSignal.timeout(30000) : undefined,
+      });
+      payload = await res.json();
+      if (!res.ok) throw new Error(payload.message || `HTTP ${res.status}`);
+      break;
+    } catch (e) {
+      // One automatic retry, timeout only: a query against a cold jobs.db (USB HDD after a
+      // spin-down) can outlive the 30s abort — but the abandoned request keeps running
+      // server-side and warms the OS cache, so the second try lands in milliseconds. This
+      // is the manual "refresh fixes it" F5, automated. GETs only — never mirror this in
+      // postJSON, where a replay could double-apply a mutation.
+      if (e && e.name === "TimeoutError" && attempt === 0 && seq === loadSeq) {
+        if (!soft) list.innerHTML = `<div class="empty">Slow response — retrying…</div>`;
+        continue;
+      }
+      if (seq === loadSeq) {  // a superseded load's failure isn't this view's state
+        // A failed SOFT refresh falls back to this same error surface: the visible rows
+        // pre-date a mutation the server may have committed, so keeping them quietly would
+        // present stale state as current.
+        loadState = "failed";
+        renderedUrl = null;
+        list.innerHTML = `<div class="empty">Failed to load: ${esc(String(e))}</div>`;
+      }
+      return false;
     }
-    return false;
   }
   if (seq !== loadSeq) return false;  // a newer load() superseded this response — drop it
   if (!["action", "funnel", "health", "prep"].includes(view) && payload.pages && page > payload.pages) {

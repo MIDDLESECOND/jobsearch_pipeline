@@ -190,6 +190,26 @@ def test_opinion_summaries_collapse_note_whitespace(conn):
     assert ops[r["job_url"]]["note"] == "line one line two tabbed"
 
 
+def test_opinion_summaries_note_matches_storage_cap_and_marks_a_cut(conn):
+    # A stored note at the 400-char storage cap must reach the card whole (the old
+    # 200 display cut silently ate a work-auth flag), and anything longer must end
+    # in a visible ellipsis instead of a mid-word stop that reads as complete.
+    r = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    _done_opinion(conn, r["job_url"], "PASS", 10, notes="x" * 400)
+    assert second_judge.opinion_summaries(conn, [r])[r["job_url"]]["note"] == "x" * 400
+
+    over = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    _done_opinion(conn, over["job_url"], "PASS", 10, cid="done2", notes="y" * 450)
+    note = second_judge.opinion_summaries(conn, [over])[over["job_url"]]["note"]
+    assert len(note) == 400 and note == "y" * 399 + "…"
+
+
+def test_clip_marks_write_side_truncation():
+    assert second_judge._clip("z" * 400, 400) == "z" * 400
+    clipped = second_judge._clip("z" * 401, 400)
+    assert len(clipped) == 400 and clipped.endswith("…")
+
+
 def test_requeue_errors_is_bounded_and_preserves_recorded_spend(conn):
     old = (datetime.now() - timedelta(hours=12)).isoformat(timespec="seconds")
     exhausted, retryable, fresh_err = [make_job(conn, verdict="PASS", fit_score=16,

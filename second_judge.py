@@ -86,6 +86,13 @@ BATCH_CACHE_READ = _LIST_IN * 0.1 * 0.5
 BATCH_CACHE_WRITE = _LIST_IN * 1.25 * 0.5
 
 
+def _clip(text, limit):
+    """Bound `text` to `limit` chars with a VISIBLE cut: a truncated note ending
+    mid-word with no marker reads as complete text (the Chevron work-auth flag
+    vanished exactly this way), so any cut must show itself."""
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def opinion_summaries(conn, rows):
     """job_url -> second-judge summary for a bounded row set, or None when the row's
     chain has no opinion. Chain-scoped exactly like packet/event reads: the opinion may
@@ -96,7 +103,10 @@ def opinion_summaries(conn, rows):
     function so the two surfaces can't drift; the UI additionally drops direction-less
     summaries — agreement spends zero pixels, the razor that keeps this layer an
     attention saver instead of an attention cost. The note is whitespace-collapsed and
-    truncated HERE, once, so no consumer re-invents its own cut."""
+    bounded HERE, once, so no consumer re-invents its own cut — at 400 to match the
+    storage cap in _collect_one (stored notes arrive intact; the bound only fires on
+    the failed_gate fallback or a legacy over-long value), with _clip's visible
+    ellipsis when it does fire."""
     out = {r["job_url"]: None for r in rows}
     if not out:
         return out
@@ -129,8 +139,8 @@ def opinion_summaries(conn, rows):
             "model": o["model"],
             "verdict": o["verdict"],
             "fit_score": o["fit_score"],
-            "note": " ".join(
-                (o["gate_notes"] or o["failed_gate"] or "").split())[:200] or None,
+            "note": _clip(" ".join(
+                (o["gate_notes"] or o["failed_gate"] or "").split()), 400) or None,
             "direction": (classify_disagreement(
                 r["verdict"], r["fit_score"], o["verdict"], o["fit_score"])
                 if o["status"] == "done" else None),
@@ -335,7 +345,7 @@ def _record_success(conn, custom_id, text, usage, stop_reason=None):
                cost_usd=COALESCE(cost_usd,0)+?
            WHERE custom_id=? AND status='pending'""",
         (result.get("verdict"), result.get("fit_score"), result.get("bucket"),
-         result.get("failed_gate"), (result.get("gate_notes") or "")[:400] or None,
+         result.get("failed_gate"), _clip(result.get("gate_notes") or "", 400) or None,
          issues, now, in_tok, out_tok, cr, cw, cost, custom_id),
     )
 

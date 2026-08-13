@@ -24,7 +24,7 @@ import json
 import sys
 import time
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
@@ -32,7 +32,7 @@ from chain import (resolve_posting, mark_posting, mark_expired, reject_posting,
                    effective_decisions, effective_decision, dupe_resolve, dupe_commit,
                    dupe_unlink, record_event, undo_event, chain_events, set_resume,
                    set_channel)
-from core import connect_db, get_db, load_config, prewarm_db
+from core import connect_db, get_db, load_config, prewarm_db, recency_dt
 from dupe_candidates import confirm_candidate, set_candidate_dismissed
 from second_judge import opinion_summaries
 from exports import roles_csv
@@ -83,6 +83,38 @@ ALLOWED_HOSTS = {"127.0.0.1:5000", "localhost:5000"}
 def _pin_host():
     if request.host not in ALLOWED_HOSTS:
         return jsonify({"ok": False, "message": "unrecognized Host header"}), 403
+
+
+# How long a concurring second opinion stays on the card, in calendar days over the
+# effective posted-at (same day-granular semantics as the fresh_strong queue's
+# fresh_days): agreement is only worth pixels while applying would still land in the
+# reviewer's first batch. NOT a sort input — freshness stays the only ordering signal,
+# because batch latency makes "has an opinion" correlate with "older", and ranking
+# confirmed rows above unconfirmed ones would systematically bury the freshest postings.
+AGREEMENT_FRESH_DAYS = 3
+
+
+def _visible_opinion(op, dec, row, today=None):
+    """The UI's second-opinion razor over a second_judge.opinion_summaries entry:
+    a disagreement (direction set) always renders — it is a warning at the decision
+    point, load-bearing at any age. A done AGREEMENT renders only where it can still
+    change an action: an undecided chain whose effective posted-at (core.recency_dt,
+    the ONE reading) is within the last AGREEMENT_FRESH_DAYS calendar days. Pending,
+    errored, decided, and stale-agreement rows all stay None — zero pixels, so the
+    layer remains an attention saver. The client tells the two apart by `direction`."""
+    if not op:
+        return None
+    if op["direction"]:
+        return op
+    if op["status"] != "done" or dec["app_status"] or dec["reject"]:
+        return None
+    dt, mode = recency_dt(row["date_posted"], row["first_seen"])
+    if mode is None:
+        return None
+    today = today or date.today()
+    if dt.date() < today - timedelta(days=AGREEMENT_FRESH_DAYS - 1):
+        return None
+    return op
 
 
 def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
@@ -187,9 +219,10 @@ def row_to_dict(row, cap, dec, packet=None, contacts=None, role_tasks=None,
         "starred": bool(star and star["starred"]),
         "starred_at": star["starred_at"] if star else None,
         "star_version": star["star_version"] if star else 0,
-        # Present only when the second judge DISAGREES (direction/verdict/fit/note);
-        # agreement and pending are None — rows_to_dicts filters the chain-scoped
-        # second_judge.opinion_summaries down to direction-carrying entries.
+        # Present when the second judge DISAGREES (direction set), or when a done
+        # agreement (direction None) can still change an action — undecided + inside
+        # the fresh-apply window. Pending and everything else are None: rows_to_dicts
+        # filters the chain-scoped summaries through _visible_opinion (the razor).
         "second_opinion": second_opinion,
     }
 
@@ -203,12 +236,12 @@ def rows_to_dicts(conn, rows, cap, decisions=None):
     role_task_counts = task_counts(conn, rows)
     scheduled = interview_summaries(conn, rows)
     stars = star_summaries(conn, rows)
-    # The card renders only DISAGREEING done opinions (direction set): agreement and
-    # pending spend zero pixels — the razor that keeps the layer an attention saver.
-    # The full summaries (statuses, tallies) are the report section's job; both read
-    # the same chain-scoped second_judge.opinion_summaries, so they can't drift.
-    opinions = {url: (o if o and o["direction"] else None)
-                for url, o in opinion_summaries(conn, rows).items()}
+    # The card renders DISAGREEING done opinions (direction set) plus concurring ones
+    # on undecided rows still inside the fresh-apply window; pending and stale
+    # agreement spend zero pixels — _visible_opinion is the razor that keeps the layer
+    # an attention saver. The full summaries (statuses, tallies) are the report
+    # section's job; both read the same chain-scoped second_judge.opinion_summaries.
+    opinions = opinion_summaries(conn, rows)
     return [row_to_dict(
         row, cap, decisions[row["job_url"]],
         packet=packets[row["repost_of"] or row["job_url"]],
@@ -217,7 +250,8 @@ def rows_to_dicts(conn, rows, cap, decisions=None):
         task_count=role_task_counts[row["repost_of"] or row["job_url"]],
         scheduled_interviews=scheduled[row["job_url"]],
         star=stars[row["job_url"]],
-        second_opinion=opinions[row["job_url"]],
+        second_opinion=_visible_opinion(
+            opinions[row["job_url"]], decisions[row["job_url"]], row),
     ) for row in rows]
 
 

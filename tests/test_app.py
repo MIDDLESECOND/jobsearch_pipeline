@@ -1372,3 +1372,77 @@ def test_clip_missing_or_empty(client, seed):
     make_job(seed, job_url="empty", description="")
     assert client.get("/api/clip?job_url=empty").status_code == 404
     assert client.get("/api/clip?job_url=ghost").status_code == 404
+
+
+# ------------------------------------------- second-opinion visibility (the UI razor)
+#
+# app._visible_opinion decides which second_judge.opinion_summaries entries reach the
+# card: disagreement always (a warning is load-bearing at any age), a done agreement
+# only while it can still change an action — undecided chain, effective posted-at
+# (core.recency_dt) within AGREEMENT_FRESH_DAYS calendar days. Everything else is None.
+
+UNDECIDED = {"app_status": None, "reject": False}
+
+
+def _op(direction=None, status="done"):
+    return {"direction": direction, "status": status, "verdict": "PASS", "fit_score": 16}
+
+
+def test_visible_opinion_disagreement_survives_age_and_decisions():
+    stale = {"date_posted": "", "first_seen": "2026-01-05T09:00:00"}
+    applied = {"app_status": "applied", "reject": False}
+    op = _op(direction="demote")
+    assert webapp._visible_opinion(op, applied, stale, today=date(2026, 6, 10)) is op
+
+
+def test_visible_opinion_agreement_needs_fresh_and_undecided():
+    today = date(2026, 6, 10)
+    fresh = {"date_posted": "2026-06-09T09:00:00", "first_seen": "2026-06-09T10:00:00"}
+    op = _op()
+    assert webapp._visible_opinion(op, UNDECIDED, fresh, today=today) is op
+    # any chain decision hides it — the chip's job (confidence at apply time) is over
+    assert webapp._visible_opinion(
+        op, {"app_status": "applied", "reject": False}, fresh, today=today) is None
+    assert webapp._visible_opinion(
+        op, {"app_status": None, "reject": True}, fresh, today=today) is None
+    # pending/errored never render, whatever the row looks like
+    assert webapp._visible_opinion(_op(status="pending"), UNDECIDED, fresh, today=today) is None
+    assert webapp._visible_opinion(_op(status="error"), UNDECIDED, fresh, today=today) is None
+    assert webapp._visible_opinion(None, UNDECIDED, fresh, today=today) is None
+
+
+def test_visible_opinion_agreement_window_is_calendar_days():
+    today = date(2026, 6, 10)
+    # AGREEMENT_FRESH_DAYS=3 mirrors fresh_strong: today plus the two preceding dates
+    edge = {"date_posted": "2026-06-08T09:00:00", "first_seen": "2026-06-01T00:00:00"}
+    out = {"date_posted": "2026-06-07T23:00:00", "first_seen": "2026-06-01T00:00:00"}
+    dateless = {"date_posted": "", "first_seen": ""}
+    assert webapp._visible_opinion(_op(), UNDECIDED, edge, today=today) is not None
+    assert webapp._visible_opinion(_op(), UNDECIDED, out, today=today) is None
+    assert webapp._visible_opinion(_op(), UNDECIDED, dateless, today=today) is None
+
+
+def _seed_opinion(seed, url, verdict, fit, cid):
+    seed.execute(
+        "INSERT INTO second_opinions (job_url, custom_id, model, status, submitted_at,"
+        " verdict, fit_score, gate_notes) VALUES (?, ?, 'test-model', 'done', 'now', ?, ?, '')",
+        (url, cid, verdict, fit))
+    seed.commit()
+
+
+def test_jobs_api_serializes_agreement_only_inside_the_window(client, seed):
+    today = date.today().isoformat()
+    make_job(seed, job_url="fresh_agree", fit_score=16,
+             first_seen=f"{today}T09:00:00")
+    make_job(seed, job_url="stale_agree", fit_score=16)  # first_seen 2026-06-01, long past
+    make_job(seed, job_url="stale_flag", fit_score=16)
+    _seed_opinion(seed, "fresh_agree", "PASS", 17, cid="c1")
+    _seed_opinion(seed, "stale_agree", "PASS", 17, cid="c2")
+    _seed_opinion(seed, "stale_flag", "GATE_FAIL", None, cid="c3")
+    got = {j["job_url"]: j for j in client.get("/api/jobs?view=backlog").get_json()}
+    agree = got["fresh_agree"]["second_opinion"]
+    assert agree is not None and agree["direction"] is None
+    assert agree["verdict"] == "PASS" and agree["fit_score"] == 17
+    # stale agreement spends zero pixels; a stale DISAGREEMENT still warns
+    assert got["stale_agree"]["second_opinion"] is None
+    assert got["stale_flag"]["second_opinion"]["direction"] == "demote"

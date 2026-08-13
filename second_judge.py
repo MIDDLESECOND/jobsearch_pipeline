@@ -62,7 +62,16 @@ FRESH_DAYS = 14
 # first_seen is written by the local clock, so the cutoff is computed in Python from
 # the same clock — never SQLite's UTC date('now').
 DELTA_DAYS = 2
-MAX_PER_SUBMIT = 150
+# Batch size is a COST lever, not just a pacing one: the system prompt is ~17k tokens and
+# batch prompt caching is best-effort, so a request that starts before the first cache write
+# lands pays to write its OWN copy at 1.25x input. Measured 2026-08-12 on two real batches:
+# 51 requests shared it (17.2k read / 4.7k written per row, $0.046/row) while 150 fanned out
+# and duplicated it (5.0k read / 16.9k WRITTEN per row, $0.082/row -- cache writes alone were
+# 65% of that batch's $12.22). Sized to the steady-state daily flow (~50 zone rows) so one
+# slot normally drains it in a single well-cached batch. Two data points, not a curve: if a
+# batch this size still thrashes, dropping cache_control entirely is the bounded fallback
+# (a plain uncached system prompt is $0.043/row, cheaper than a write that nobody reads).
+MAX_PER_SUBMIT = 50
 MAX_TOKENS = 8000   # thinking is on by default on this model and counts against the cap
 MAX_RETRIES = 2     # bounded: a persistently failing row must not become a paid loop
 RETRY_AFTER_HOURS = 6
@@ -423,11 +432,25 @@ def collect(conn):
                     _record_failure(conn, cid, result.type)
                 ingested_cids.append(cid)
         ingested = len(landed)
-        done = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM second_opinions "
+        n, spend, cr, cw = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), COALESCE(SUM(cache_read_tokens),0),"
+            " COALESCE(SUM(cache_write_tokens),0) FROM second_opinions "
             "WHERE batch_id=? AND status='done'", (bid,)).fetchone()
+        # Prompt-cache sharing is the layer's dominant cost variable, so it gets printed
+        # where the money is spent instead of being reconstructed from the table later.
+        # "shared" = cache reads as a share of all cacheable prompt traffic: the ~17k
+        # system prompt is either READ from one shared entry (0.1x input) or RE-WRITTEN
+        # per request (1.25x). Measured 2026-08-12: 78% shared at 51 requests
+        # ($0.046/row) vs 23% at 150 ($0.082/row, cache writes alone 65% of the bill).
+        # A low number here means the batch fanned out faster than the first write landed
+        # -- lower MAX_PER_SUBMIT, or drop cache_control for a flat $0.043/row.
+        detail = ""
+        if n:
+            share = 100 * cr / max(cr + cw, 1)
+            detail = (f" = ${spend / n:.3f}/row; prompt cache {share:.0f}% shared, "
+                      f"{cw / n / 1000:.1f}k tok/row re-written")
         print(f"[second-judge] batch {bid}: ingested {ingested} result(s) "
-              f"({done[0]} opinions, ${done[1]:.2f})")
+              f"({n} opinions, ${spend:.2f}{detail})")
     remaining = conn.execute(
         "SELECT COUNT(*) FROM second_opinions WHERE status='pending'").fetchone()[0]
     if still_processing:

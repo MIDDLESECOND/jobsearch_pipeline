@@ -69,6 +69,16 @@ Same-day post-review hardening (code review, 10 findings — no judgment changes
 - `pipeline.py second-judge` rebuilds exactly the reports whose rows gained opinions (was a
   fixed today+yesterday pair, and it now follows duplicate chains — an opinion on a relisting
   also changes its canonical's day); an all-pending day renders no report section at all.
+- **Prompt-cache sharing, not model price, is this layer's dominant cost variable.** Two real
+  batches the same day: 51 requests shared the ~17k system prompt (78% of cacheable traffic
+  read from one entry) at $0.046/row, while 150 requests fanned out faster than the first
+  cache write landed and each wrote its own copy (23% shared, 16.9k tok/row re-written) at
+  $0.082/row — cache writes alone were 65% of that batch's $12.22. `MAX_PER_SUBMIT` is
+  therefore 50, sized to the steady-state daily flow, and `collect` now prints $/row and the
+  shared-cache percentage where the money is spent. For contrast the primary evaluator, which
+  ramps at concurrency 6 against a warm prefix, held 96.8% cache hit across the same day's
+  five runs: the trigger is fan-out shape, not the provider. Bounded fallback if a small batch
+  still thrashes: drop `cache_control` for a flat $0.043/row.
 - `collect` must never hold SQLite's writer lock while it polls or streams. Observed live on
   2026-08-12: an unconditional (0-row, uncommitted) UPDATE at the top of the poll loop starved
   the concurrently scheduled `run` — six eval results were dropped with "database is locked"

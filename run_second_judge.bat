@@ -8,4 +8,10 @@ rem rows the main run already evaluated, and a crash here never blocks the pipel
 rem The app tees stdout/stderr into logs\second-judge-*.log via core.run_log.
 cd /d %~dp0
 ".venv\Scripts\python.exe" pipeline.py second-judge
-exit /b %errorlevel%
+set JUDGE_RC=%errorlevel%
+rem Doorbell: now that opinions are in, pop the deepdive batch proposal (zone count +
+rem time/quota estimate). Read-only helper; its outcome never masks the judge exit code.
+rem PYTHONUTF8 guards the doorbell's Chinese popup text against the GBK console codepage.
+set PYTHONUTF8=1
+".venv\Scripts\python.exe" notify_deepdive_batch.py
+exit /b %JUDGE_RC%

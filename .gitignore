@@ -14,6 +14,11 @@ Thumbs.db
 # ---- Local Claude Code config (machine-specific) ----
 .claude/settings.local.json
 .claude/launch.json
+# Personal workflow skills (reference private local paths; not part of the public tool)
+.claude/skills/
+
+# Deepdive batch state (last-batch stamp + local calibration; maintained by the skill)
+.deepdive_state.json
 
 # ---- Secrets ----
 .env

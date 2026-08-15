@@ -109,7 +109,7 @@ def opinion_summaries(conn, rows):
     storage cap in _collect_one (stored notes arrive intact; the bound only fires on
     the failed_gate fallback or a legacy over-long value), with _clip's visible
     ellipsis when it does fire."""
-    out = {r["job_url"]: None for r in rows}
+    out: dict[str, dict | None] = {r["job_url"]: None for r in rows}
     if not out:
         return out
     roots = {r["repost_of"] or r["job_url"] for r in rows}
@@ -238,14 +238,16 @@ def submit(conn, rows):
         print("[second-judge] ANTHROPIC_API_KEY not set — skipping", file=sys.stderr)
         return None
     import anthropic
+    from anthropic.types import TextBlockParam
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
     from anthropic.types.messages.batch_create_params import Request
 
     client = anthropic.Anthropic()
     # Same brain as the primary judge: profile + guide, cache-marked (batch
     # caching is best-effort; the marker costs nothing when it misses).
-    system_blocks = [{"type": "text", "text": build_system_prompt(),
-                     "cache_control": {"type": "ephemeral"}}]
+    system_blocks: list[TextBlockParam] = [
+        {"type": "text", "text": build_system_prompt(),
+         "cache_control": {"type": "ephemeral"}}]
     requests, url_by_cid = [], {}
     for r in rows:
         cid = hashlib.sha256(r["job_url"].encode("utf-8")).hexdigest()  # 64 hex = the API's custom_id cap

@@ -186,8 +186,8 @@ def test_opinion_summaries_map_through_chain_root(conn):
 def test_opinion_summaries_collapse_note_whitespace(conn):
     r = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
     _done_opinion(conn, r["job_url"], "PASS", 10, notes="line one\n\nline two\t tabbed")
-    ops = second_judge.opinion_summaries(conn, [r])
-    assert ops[r["job_url"]]["note"] == "line one line two tabbed"
+    o = second_judge.opinion_summaries(conn, [r])[r["job_url"]]
+    assert o is not None and o["note"] == "line one line two tabbed"
 
 
 def test_opinion_summaries_note_matches_storage_cap_and_marks_a_cut(conn):
@@ -196,11 +196,14 @@ def test_opinion_summaries_note_matches_storage_cap_and_marks_a_cut(conn):
     # in a visible ellipsis instead of a mid-word stop that reads as complete.
     r = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
     _done_opinion(conn, r["job_url"], "PASS", 10, notes="x" * 400)
-    assert second_judge.opinion_summaries(conn, [r])[r["job_url"]]["note"] == "x" * 400
+    at_cap = second_judge.opinion_summaries(conn, [r])[r["job_url"]]
+    assert at_cap is not None and at_cap["note"] == "x" * 400
 
     over = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
     _done_opinion(conn, over["job_url"], "PASS", 10, cid="done2", notes="y" * 450)
-    note = second_judge.opinion_summaries(conn, [over])[over["job_url"]]["note"]
+    cut = second_judge.opinion_summaries(conn, [over])[over["job_url"]]
+    assert cut is not None
+    note = cut["note"]
     assert len(note) == 400 and note == "y" * 399 + "…"
 
 
@@ -272,13 +275,15 @@ def test_opinion_summaries_pick_is_deterministic_on_a_multi_opinion_chain(conn):
     rows = conn.execute("SELECT * FROM jobs WHERE job_url IN (?,?)",
                         (a["job_url"], b["job_url"])).fetchall()
     ops = second_judge.opinion_summaries(conn, rows)
-    assert ops[a["job_url"]]["verdict"] == "GATE_FAIL"   # a's own
-    assert ops[b["job_url"]]["verdict"] == "PASS"        # b's own
+    own_a, own_b = ops[a["job_url"]], ops[b["job_url"]]
+    assert own_a is not None and own_a["verdict"] == "GATE_FAIL"   # a's own
+    assert own_b is not None and own_b["verdict"] == "PASS"        # b's own
     # a third member with no opinion of its own falls back to the newest in the chain
     c = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(),
                  repost_of=a["job_url"])
     row_c = conn.execute("SELECT * FROM jobs WHERE job_url=?", (c["job_url"],)).fetchone()
-    assert second_judge.opinion_summaries(conn, [row_c])[c["job_url"]]["verdict"] == "PASS"
+    inherited = second_judge.opinion_summaries(conn, [row_c])[c["job_url"]]
+    assert inherited is not None and inherited["verdict"] == "PASS"
 
 
 def test_ingested_days_cover_every_chain_members_day(conn):

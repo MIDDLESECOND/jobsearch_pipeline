@@ -90,6 +90,7 @@ def test_gate_missing_provider_defaults_anthropic():
 
 def test_note_in_peak_names_price_and_exit():
     note = _peak_price_note(_cfg(), _utc(2, 30))
+    assert note is not None
     assert "2x" in note and "~90 more min" in note
     # The rerun time is spelled in the machine's LOCAL clock — that's the clock the
     # human will look at — so assert via the same conversion, not a hardcoded hour.

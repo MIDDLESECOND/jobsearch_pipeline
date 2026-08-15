@@ -1500,6 +1500,10 @@ def test_freshness_accepts_an_offset_carrying_since(client, seed):
     _seed_opinion(seed, "tz_flag", "GATE_FAIL", None, cid="c8",
                   collected_at=(now - timedelta(hours=1)).isoformat(timespec="seconds"))
     aware = (now - timedelta(hours=2)).astimezone().isoformat(timespec="seconds")
-    got = client.get("/api/freshness?since=" + aware)
+    # query_string=, not string concatenation: a UTC machine spells the offset "+00:00",
+    # and an unencoded "+" in a query string decodes to a space — which would make this
+    # exercise the garbage-`since` path (count 0) instead of the aware one. The real
+    # client encodeURIComponent()s it; so does this.
+    got = client.get("/api/freshness", query_string={"since": aware})
     assert got.status_code == 200
     assert got.get_json()["opinions"] == 1

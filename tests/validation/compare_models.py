@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -68,6 +69,7 @@ PRICES = {
 
 core._ensure_api_key()
 import anthropic
+from anthropic.types import TextBlockParam
 aclient = anthropic.Anthropic()
 DS_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 OAI_KEY = core._ensure_api_key("OPENAI_API_KEY") or ""
@@ -84,12 +86,15 @@ def call_anthropic(model, user_msg, extra=None):
     # the content list may lead with thinking blocks (evaluation.first_text). The
     # cache_control block mirrors production (_call_anthropic) so 25 sequential
     # calls don't each pay the full ~15k-token system prompt.
-    kwargs = evaluation.anthropic_extras(model)
+    # Annotated: anthropic_extras returns a per-generation kwarg bag, and without a
+    # widened value type pyright resolves `**kwargs` against every keyword of create().
+    kwargs: dict[str, Any] = dict(evaluation.anthropic_extras(model))
     kwargs.update(extra or {})
+    system: list[TextBlockParam] = [
+        {"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
     r = aclient.messages.create(
         model=model, max_tokens=8000,
-        system=[{"type": "text", "text": SYSTEM,
-                 "cache_control": {"type": "ephemeral"}}],
+        system=system,
         messages=[{"role": "user", "content": user_msg}],
         **kwargs,
     )

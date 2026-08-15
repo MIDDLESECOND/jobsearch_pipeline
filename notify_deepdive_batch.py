@@ -229,11 +229,19 @@ def main():
                        "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"):
             env.pop(marker, None)
         env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
+        # --permission-mode auto: a default-mode console stops at a confirm prompt on
+        # the very first brain-file read (they live outside the repo), which defeats a
+        # one-click launch. Auto mode matches the main session; the skill's own
+        # confirm-before-CLI discipline still gates every DB write at the conversation
+        # level. --add-dir grants the brain/resume workspace (derived from the user
+        # home, not hardcoded).
+        brain_dir = str(Path.home() / "Downloads" / "resume_variant")
         subprocess.Popen(
             ["cmd", "/c", "start", "Deepdive Batch", "cmd", "/k",
-             "claude", "run today's deepdive batch"], cwd=str(ROOT), env=env,
+             "claude", "--permission-mode", "auto", "--add-dir", brain_dir,
+             "run today's deepdive batch"], cwd=str(ROOT), env=env,
         )
-        print("launched: Claude Code console with the batch trigger")
+        print("launched: Claude Code console with the batch trigger (auto mode)")
 
 
 if __name__ == "__main__":

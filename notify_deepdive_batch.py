@@ -57,7 +57,7 @@ def zone_rows(conn):
         SELECT job_url, first_seen, date_posted,
                (source='adzuna' AND length(COALESCE(description,'')) <= ?) AS snippet
         FROM jobs
-        WHERE status='evaluated' AND app_status IS NULL
+        WHERE status='evaluated' AND filter_source IS NULL AND app_status IS NULL
           AND ((verdict='PASS' AND fit_score >= ?)
                OR (verdict='RECRUITER_ONLY' AND fit_score >= ?))
         """,
@@ -236,9 +236,13 @@ def main():
         # level. --add-dir grants the brain/resume workspace (derived from the user
         # home, not hardcoded).
         brain_dir = str(Path.home() / "Downloads" / "resume_variant")
+        claude_exe = shutil.which("claude")
+        if not claude_exe:
+            print("cannot launch the batch: `claude` is not on this environment's PATH")
+            return
         subprocess.Popen(
             ["cmd", "/c", "start", "Deepdive Batch", "cmd", "/k",
-             "claude", "--permission-mode", "auto", "--add-dir", brain_dir,
+             claude_exe, "--permission-mode", "auto", "--add-dir", brain_dir,
              "run today's deepdive batch"], cwd=str(ROOT), env=env,
         )
         print("launched: Claude Code console with the batch trigger (auto mode)")

@@ -63,6 +63,19 @@ def test_zone_excludes_stale_posted_but_keeps_unparseable_dates(conn):
     assert no_date["job_url"] in urls
 
 
+def test_zone_excludes_adzuna_snippet_rows_but_not_short_jds(conn):
+    snip = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent(),
+                    source="adzuna", description="x" * 500)
+    full_adzuna = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent(),
+                           source="adzuna", description="x" * 2000)
+    short_linkedin = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent(),
+                              source="linkedin", description="thin but complete JD")
+    urls = _urls(second_judge.pending_rows(conn))
+    assert snip["job_url"] not in urls           # snippet: no paid re-read of 500 chars
+    assert full_adzuna["job_url"] in urls        # full-text Adzuna row stays eligible
+    assert short_linkedin["job_url"] in urls     # shortness alone is not snippet-ness
+
+
 def test_zone_skips_already_submitted(conn):
     r = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
     conn.execute(

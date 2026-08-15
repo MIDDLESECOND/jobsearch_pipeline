@@ -5,7 +5,11 @@ The zone is PASS at/above the cold-apply bar plus RECRUITER_ONLY at/above the
 recruiter-route bar (states.COLD_APPLY_MIN_FIT / RECRUITER_ROUTE_MIN_FIT) —
 undecided, unfiltered, posted within 14 days: every row the user might act on
 plus the border band where the primary judge's ~22% draw noise buries or
-under-scores real candidates. Opinions live in the `second_opinions` table and
+under-scores real candidates. Adzuna snippet rows (500-char stored text —
+core.ADZUNA_SNIPPET_MAX_CHARS) are OUT of the zone since 2026-08-15: both
+judges read the same stored description, so a snippet opinion pays to re-read
+known-insufficient evidence; those rows go through browser JD completion
+(the deepdive skill) instead. Opinions live in the `second_opinions` table and
 NEVER touch `jobs.verdict`/`eval_json` — review, never re-route, same philosophy
 as `eval_issues` surfacing. The model choice (claude-opus-5) and the zone come
 from the 2026-08-11/12 judge measurement: see CHANGELOG 2026-08-12.
@@ -34,7 +38,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta
 
-from core import _ensure_api_key, recency_dt
+from core import ADZUNA_SNIPPET_MAX_CHARS, _ensure_api_key, recency_dt
 from evaluation import (MODEL_PRICES, build_system_prompt, build_user_msg,
                         first_text, normalize_result, parse_eval_json)
 from states import (COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT, VERDICT_PASS,
@@ -160,16 +164,24 @@ def pending_rows(conn, backfill_days=None):
     seen_floor = (date.today() - timedelta(days=delta)).isoformat()
     # outcome_status needs no clause: chain._recompute_outcome clears it whenever a
     # chain is not applied, so app_status IS NULL already implies it.
+    # Adzuna snippet rows are excluded (2026-08-15): both judges read the same stored
+    # description, so an opinion on a 500-char snippet re-reads evidence already known
+    # to be insufficient — spend without information. Those rows' path to a trustworthy
+    # verdict is JD completion (the deepdive skill fetches the posting in a browser),
+    # not a second read of the same truncation. See core.ADZUNA_SNIPPET_MAX_CHARS.
     rows = conn.execute(
         """SELECT * FROM jobs
            WHERE status='evaluated' AND filter_source IS NULL
              AND app_status IS NULL
              AND ((verdict=? AND fit_score>=?) OR (verdict=? AND fit_score>=?))
              AND substr(first_seen,1,10) >= ?
+             AND NOT (source='adzuna'
+                      AND length(COALESCE(description,'')) <= ?)
              AND job_url NOT IN (SELECT job_url FROM second_opinions
                                  WHERE status != 'retry')
            ORDER BY first_seen DESC""",
-        (VERDICT_PASS, PASS_MIN_FIT, VERDICT_RECRUITER_ONLY, RO_MIN_FIT, seen_floor),
+        (VERDICT_PASS, PASS_MIN_FIT, VERDICT_RECRUITER_ONLY, RO_MIN_FIT, seen_floor,
+         ADZUNA_SNIPPET_MAX_CHARS),
     ).fetchall()
     # Chains, not rows: dupe-linked siblings both keep status='evaluated', but one
     # opinion covers the whole chain (opinion_summaries maps it back to every member).

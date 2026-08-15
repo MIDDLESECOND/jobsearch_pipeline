@@ -7,6 +7,40 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-15 — Snippet-evidence rule: Adzuna snippet verdicts are provisional
+
+**Problem (measured).** Adzuna stores only the API's 500-char snippet, and the evaluator
+scores it on the same scale as a full JD. Gates cannot fail on text that isn't there
+(employment type "unstated → default PASS"; tool walls and leadership requirements
+invisible), so snippet scores are systematically inflated rather than noisy: 60%
+(324/541) of the cold-apply-eligible zone (undecided PASS fit ≥ 15, ≤ 14 days) was
+snippet-scored, and the confirmed case scored 18/18 with every dimension at 3 on the
+snippet while the full text carried a required agentic/SDK stack (`ai_artifact_depth` 0 →
+RECRUITER_ONLY cap) plus a staffing-agency hybrid-contract engagement. The second judge
+had independently demoted that row — but from the same snippet, which is the deeper
+problem: both judges read the same stored text, so a second opinion on a snippet pays to
+re-read evidence already known to be insufficient.
+
+**Changes.**
+- `evaluation_guide.md` Part 1 gains the snippet-evidence rule: snippet verdicts are
+  PROVISIONAL, emitted as a header line; no cold apply may be decided on a snippet at any
+  fit score — complete the JD first (the deepdive flow fetches the posting in a browser),
+  then evaluate the full text. The primary eval deliberately still scores snippets: that
+  score's job is discovery ranking (which Adzuna posts are worth opening), never apply
+  eligibility.
+- `second_judge.pending_rows` excludes snippet rows from the paid opinion zone
+  (deterministic predicate: `source='adzuna' AND length(description) <=`
+  `core.ADZUNA_SNIPPET_MAX_CHARS`, new constant). At the measured mix this removes
+  roughly half the zone's spend and loses nothing a browser JD completion doesn't
+  replace with strictly better evidence.
+- `notify_deepdive_batch.py` (the post-second-judge doorbell) splits its zone counts
+  into full-text vs snippet-pending so the popup can't present snippet-scored rows as
+  ready-to-act volume.
+- No verdict, score, or historical row is rewritten (review, never re-route); the UI/report
+  snippet badges already existed and are unchanged.
+
+---
+
 ## 2026-08-12 — Second-opinion layer (Batch API) + Copilot facts in profile.md
 
 **New review layer; no verdict changes anywhere.** `second_judge.py` re-reads the day's

@@ -45,6 +45,19 @@ GUIDE_PATH = BASE_DIR / "evaluation_guide.md"
 # The status/verdict/gate vocabulary lives in states.py (the leaf module) so chain.py can
 # use it too without a cycle; import enums from there, not from here.
 
+# Adzuna's API hard-caps descriptions at 500 chars (fetch.py's adzuna path) — a SNIPPET,
+# not the full JD. A snippet-scored eval is systematically inflated: gates cannot fail on
+# text that isn't there (employment type "unstated → default PASS", tool walls and
+# leadership requirements invisible). Measured 2026-08-15: 60% of the cold-apply-eligible
+# zone was snippet-scored; the confirmed case scored 18/18 on the snippet and
+# RECRUITER_ONLY on the full text. The predicate is deliberately SOURCE-SCOPED
+# (source='adzuna' AND len(description) <= this): a short LinkedIn/ATS description is a
+# genuinely thin posting — complete evidence — not a truncation artifact. Consumers:
+# second_judge.pending_rows (excludes snippet rows from the paid opinion zone) and
+# notify_deepdive_batch (splits the doorbell counts); the deepdive skill completes the
+# JD in a browser before judging such rows. Margin over 500 tolerates whitespace joins.
+ADZUNA_SNIPPET_MAX_CHARS = 520
+
 
 # ------------------------------------------------------------ posting-date parsing
 

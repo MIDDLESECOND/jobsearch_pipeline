@@ -105,6 +105,105 @@ def test_null_source_row_is_not_treated_as_a_snippet(conn):
     assert _rows(conn)[row["job_url"]] == (False, True)
 
 
+# ------------------------------------------------------------------ launch argv
+
+def test_launch_puts_the_trigger_before_the_variadic_add_dir():
+    """The one thing a silent launch failure looks like: a console that opens and sits
+    there. `--add-dir <directories...>` is variadic, so a trailing trigger becomes just
+    another directory and the session starts with an empty prompt (observed 2026-08-15).
+    Pin the order: positional first, and nothing after the variadic but its own values.
+    """
+    argv = nb._launch_argv(r"C:\bin\claude.exe", r"C:\brain")
+    assert argv[argv.index(r"C:\bin\claude.exe") + 1] == nb.BATCH_TRIGGER
+    assert argv.index(nb.BATCH_TRIGGER) < argv.index("--add-dir")
+    assert argv[-1] == r"C:\brain"       # the variadic list ends the command line
+
+
+def test_launch_keeps_cmd_from_eating_quotes_around_a_spaced_path():
+    """Measured: with the exe path quoted (it has a space) and sitting directly after
+    /k, cmd strips the outer quote pair and splits at the space — 'C:\\Program' is not
+    recognized. A plain word in front of it stops the heuristic from ever firing."""
+    argv = nb._launch_argv(r"C:\Program Files\claude.exe", r"C:\Users\A B\brain")
+    assert argv[argv.index("/k") + 1] == "call"
+    assert argv[argv.index("call") + 1] == r"C:\Program Files\claude.exe"
+
+
+# ------------------------------------------------------------------- launch env
+
+def test_launch_env_strips_session_markers_and_forces_persistence():
+    """A doorbell fired from inside a Claude Code session must still hand the batch a
+    clean top-level session, or the transcript is never written."""
+    env = nb._launch_env({"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "x",
+                          "CLAUDE_CODE_ENTRYPOINT": "cli", "PATH": "p"}, file_login=None)
+    assert not {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"} & set(env)
+    assert env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] == "1"
+    assert env["PATH"] == "p"           # everything else passes through
+
+
+def test_oauth_token_is_stripped_only_when_a_file_login_can_take_over():
+    """The strip exists so the console runs the plan's judge, not the API-side default.
+    With no file login there is nothing to fall back TO, and stripping would park the
+    console on a login prompt — the same dead window the launcher just stopped making."""
+    base = {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in nb._launch_env(base, file_login="live")
+    assert nb._launch_env(base, file_login=None)["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+
+
+def test_launch_env_keeps_the_pipeline_api_key():
+    """Measured: a console carrying only ANTHROPIC_API_KEY still comes up on the plan,
+    so stripping it changes no auth — it only forces every pipeline.py command the batch
+    runs to re-read the key from HKCU."""
+    for login in ("live", None):
+        assert nb._launch_env({"ANTHROPIC_API_KEY": "k"}, login)["ANTHROPIC_API_KEY"] == "k"
+
+
+def test_launch_env_does_not_mutate_the_caller_environment():
+    """main() passes os.environ itself; a pop against that would unset the doorbell's
+    own key for the rest of the process."""
+    base = {"CLAUDECODE": "1", "CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+    nb._launch_env(base, file_login="live")
+    assert base == {"CLAUDECODE": "1", "CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+
+
+# ----------------------------------------------------------------- launch wiring
+
+def _spawns(monkeypatch, which="C:\\bin\\claude.exe", token="live-token"):
+    """Capture what _launch_batch hands subprocess.Popen, spawning nothing."""
+    calls = []
+    monkeypatch.setattr(nb.shutil, "which", lambda name: which)
+    monkeypatch.setattr(nb, "_file_token", lambda: token)
+    monkeypatch.setattr(nb.subprocess, "Popen",
+                        lambda argv, **kw: calls.append((argv, kw)))
+    return calls
+
+
+def test_launch_batch_hands_popen_the_argv_and_the_stripped_env(monkeypatch):
+    """The two halves have their own tests; this covers the line that JOINS them, which
+    is where both real failures lived. Swap the arguments or forget the call parens and
+    every other test in this file still passes."""
+    calls = _spawns(monkeypatch)
+    argv = nb._launch_batch()
+    assert len(calls) == 1 and calls[0][0] == argv
+    assert argv[argv.index(r"C:\bin\claude.exe") + 1] == nb.BATCH_TRIGGER
+    env = calls[0][1]["env"]
+    assert env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] == "1"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env      # a live file login took over
+
+
+def test_launch_batch_keeps_the_env_token_when_no_file_login_is_available(monkeypatch):
+    """Degrade, never park the console on a login prompt."""
+    calls = _spawns(monkeypatch, token=None)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-tok")
+    nb._launch_batch()
+    assert calls[0][1]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "env-tok"
+
+
+def test_launch_batch_spawns_nothing_when_claude_is_off_the_path(monkeypatch):
+    calls = _spawns(monkeypatch, which=None)
+    assert nb._launch_batch() is None
+    assert calls == []
+
+
 # --------------------------------------------------------------- popup arithmetic
 
 def _counts(conn, state):

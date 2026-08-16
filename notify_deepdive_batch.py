@@ -10,7 +10,9 @@ Boundaries:
 - It decides nothing about postings; the popup is information, the human is the trigger.
 - Auth: the Claude Code credentials file's interactive-login access token (the only one
   carrying the `user:profile` scope the usage endpoint requires). Used for exactly one
-  GET to api.anthropic.com; never printed, logged, or stored. Quota display is
+  GET to api.anthropic.com; never printed, logged, or stored. Its PRESENCE is read once
+  more at launch — never its value — to decide whether the batch console can be handed
+  the plan login instead of an inherited env token (see `_launch_env`). Quota display is
   best-effort: any failure degrades to the row/time estimate alone.
 - Calibration + last-batch stamp live in the gitignored .deepdive_state.json, written
   by the deepdive skill at the end of each confirmed batch.
@@ -50,6 +52,12 @@ BATCH_FRESH_DAYS = 5       # the apply-window evidence: first 1-2 days / first r
 DEFAULT_MIN_PER_ROW = 4.0
 DEFAULT_KTOK_PER_ROW = 35.0
 POPUP_TIMEOUT_MS = 2 * 60 * 60 * 1000   # self-dismiss so a missed slot can't stack
+# MIRRORED in .claude/skills/deepdive/SKILL.md's trigger section, which names this exact
+# phrase as the pre-confirmed batch trigger ("start the batch immediately, no re-ask").
+# Change one, change both: a phrase the skill does not recognize turns the launch into a
+# console that opens and ASKS — indistinguishable, from the user's chair, from the
+# swallowed-prompt dead window this launcher was just fixed for.
+BATCH_TRIGGER = "run today's deepdive batch"
 
 
 def load_state():
@@ -259,6 +267,116 @@ def _local(iso):
         return ""
 
 
+def _launch_argv(claude_exe, brain_dir):
+    """The console command line that starts a batch session.
+
+    THE TRIGGER GOES FIRST, before any flag. `--add-dir <directories...>` is VARIADIC:
+    a trigger sitting after it is folded into the directory list, so the console comes
+    up with an EMPTY input box and the batch never starts. That is exactly what the
+    first real doorbell launch did (2026-08-15 22:47: window up, session idle, nothing
+    ran, no transcript written). The proof costs no API call — with the trigger trailing,
+    `claude --add-dir <dir> "<trigger>" -p` answers "Input must be provided either
+    through stdin or as a prompt argument when using --print", i.e. the parser never
+    saw a prompt at all.
+
+    So: positional first, flags after, and nothing may ever trail a variadic flag.
+
+    THE `call` IS LOAD-BEARING TOO, for a second re-parse one layer down. Python quotes
+    any argument containing a space, and when the string after `/k` STARTS with a quote
+    cmd applies its outer-quote-stripping heuristic and splits the path at the space.
+    Measured 2026-08-15 with a deliberately spaced path:
+
+        cmd /c "C:\\...\\a b\\show.bat" "<trigger>" --add-dir "C:\\Users\\A B\\brain"
+            -> rc=1, 'C:\\...\\a' is not recognized as an internal or external command
+        cmd /c call "C:\\...\\a b\\show.bat" "<trigger>" --add-dir "C:\\Users\\A B\\brain"
+            -> rc=0, ARGS=["<trigger>" --permission-mode auto --add-dir "C:\\Users\\A B\\brain"]
+
+    `call` makes the first token after `/k` an ordinary word, so the heuristic never
+    fires and every quote survives. It costs nothing today (this machine's claude lives
+    in a space-free path) and covers the day `shutil.which` returns a Program Files
+    install, or a user home like C:\\Users\\First Last reaches `brain_dir`.
+
+    Those two runs isolate the quoting rule under `/c`; the line that SHIPS is `/k`
+    nested inside `start`, so it was then run whole (2026-08-15): `cmd /c start
+    "Deepdive Batch" cmd /k call <claude.exe> "<trigger>" --permission-mode auto
+    --add-dir <brain>` brought the console up on "Opus 5 · Claude Max" with the trigger
+    already submitted and answered. Both halves of the evidence are here so nobody has
+    to re-derive whether `call` is safe under `/k` before touching this line.
+
+    `--permission-mode auto`: a default-mode console stops at a confirm prompt on the
+    very first brain-file read (they live outside the repo), which defeats a one-click
+    launch. Auto mode matches the main session; the skill's own confirm-before-CLI
+    discipline still gates every DB write at the conversation level. `--add-dir` grants
+    the brain/resume workspace (derived from the user home, not hardcoded).
+    """
+    return ["cmd", "/c", "start", "Deepdive Batch", "cmd", "/k", "call",
+            claude_exe, BATCH_TRIGGER,
+            "--permission-mode", "auto", "--add-dir", brain_dir]
+
+
+def _launch_env(base, file_login):
+    """The environment a batch console inherits. `file_login` = is a credentials-file
+    token usable right now (`_file_token()`), read at click time.
+
+    Three decisions, each measured:
+
+    - The CLAUDE_CODE_* markers go because a doorbell fired from INSIDE a Claude Code
+      session (testing) would otherwise hand the child markers that switch transcript
+      persistence off. Task Scheduler runs carry none of them to begin with.
+    - CLAUDE_CODE_OAUTH_TOKEN goes ONLY when a file login can take over. It is the
+      shadowing `_token()` documents, one level up: the env token satisfies the CLI's
+      auth outright, so the console comes up on the API-side default model instead of
+      the interactive-login Max session — the 2026-08-15 22:47 doorbell console read
+      "Sonnet 5 · Claude API" where a hand-launched one read "Opus 5 · Claude Max".
+      Task Scheduler builds its env from the user registry, so only a scheduled firing
+      inherits it. But stripping it with no file login to fall back on parks the console
+      on a login prompt — the same dead window, different door — so a stale-model
+      session is deliberately preferred over no session at all.
+    - ANTHROPIC_API_KEY deliberately STAYS. Measured the same day: a console carrying
+      only that key still came up "Opus 5 · Claude Max", so removing it buys no auth
+      change, while the `pipeline.py` commands the batch runs would have to re-read it
+      from HKCU through `core._ensure_api_key`'s fallback.
+    """
+    env = dict(base)
+    for marker in ("CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID",
+                   "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"):
+        env.pop(marker, None)
+    if file_login:
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
+    return env
+
+
+def _launch_batch():
+    """Resolve the CLI, build both halves of the launch, spawn the console. Returns the
+    argv it launched, or None when `claude` cannot be found.
+
+    Split out of main()'s Yes branch because the WIRING is what actually keeps breaking
+    here — first a trigger folded into a variadic flag, then an env that silently handed
+    the batch a different judge — and inside main() it sat behind a MessageBox and a
+    read-only open of the real jobs.db, so no test could reach it. Both halves had unit
+    tests while the line joining them had none.
+    """
+    brain_dir = str(Path.home() / "Downloads" / "resume_variant")
+    claude_exe = shutil.which("claude")
+    if not claude_exe:
+        print("cannot launch the batch: `claude` is not on this environment's PATH")
+        return None
+    argv = _launch_argv(claude_exe, brain_dir)
+    # _file_token() is read HERE rather than reused from the quota block: the box can sit
+    # for two hours, and what decides the env is whether a file login can take over at
+    # the moment of Yes.
+    subprocess.Popen(argv, cwd=str(ROOT), env=_launch_env(os.environ, _file_token()))
+    # Log the RESOLVED command line, not a bare success claim. Popen does not wait, so
+    # "launched" only ever meant a process was spawned: the 22:47 stall printed exactly
+    # that word while the console sat at an empty prompt, and the window itself was the
+    # only surviving evidence (a log line with 30-day retention is what this module's
+    # run_log wrapper exists for). The command line is what tells the next investigation
+    # whether the trigger reached the CLI at all.
+    print(f"launched (auto mode): {subprocess.list2cmdline(argv)}")
+    return argv
+
+
 def main():
     print_only = "--print" in sys.argv
     conn = sqlite3.connect(f"file:{ROOT / 'jobs.db'}?mode=ro", uri=True)
@@ -348,32 +466,7 @@ def main():
         MB_YESNO | MB_TOPMOST | MB_SETFOREGROUND | MB_ICONQUESTION, 0, POPUP_TIMEOUT_MS,
     )
     if rc == IDYES:
-        # Launch as a clean TOP-LEVEL session. When the doorbell itself is fired from
-        # inside a Claude Code session (testing), the child inherits markers that switch
-        # transcript persistence off -- strip them so the batch session is recorded
-        # normally. Task Scheduler runs carry none of these to begin with.
-        env = os.environ.copy()
-        for marker in ("CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID",
-                       "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"):
-            env.pop(marker, None)
-        env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
-        # --permission-mode auto: a default-mode console stops at a confirm prompt on
-        # the very first brain-file read (they live outside the repo), which defeats a
-        # one-click launch. Auto mode matches the main session; the skill's own
-        # confirm-before-CLI discipline still gates every DB write at the conversation
-        # level. --add-dir grants the brain/resume workspace (derived from the user
-        # home, not hardcoded).
-        brain_dir = str(Path.home() / "Downloads" / "resume_variant")
-        claude_exe = shutil.which("claude")
-        if not claude_exe:
-            print("cannot launch the batch: `claude` is not on this environment's PATH")
-            return
-        subprocess.Popen(
-            ["cmd", "/c", "start", "Deepdive Batch", "cmd", "/k",
-             claude_exe, "--permission-mode", "auto", "--add-dir", brain_dir,
-             "run today's deepdive batch"], cwd=str(ROOT), env=env,
-        )
-        print("launched: Claude Code console with the batch trigger (auto mode)")
+        _launch_batch()
     else:
         print(f"popup dismissed (MessageBox rc={rc}) - no batch launched")
 

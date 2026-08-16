@@ -206,17 +206,80 @@ def test_launch_batch_spawns_nothing_when_claude_is_off_the_path(monkeypatch):
 
 # --------------------------------------------------------------- popup arithmetic
 
+def test_batch_is_uncapped_full_text_plus_snippet_quota():
+    """2026-08-16 widening: the flat top-10 cap is gone. Full text scales with what is
+    pending; snippets clamp to the quota (each costs a browser completion, and 10 of
+    the first 12 completed pairs lost their action on full text)."""
+    assert nb.batch_counts(21, 0) == (21, 0)
+    assert nb.batch_counts(21, 31) == (21, nb.SNIPPET_QUOTA)
+    assert nb.batch_counts(0, 2) == (0, 2)      # under-quota: take what exists, no padding
+    assert nb.batch_counts(0, 0) == (0, 0)
+
+
+def test_session_guard_truncates_the_batch_to_what_fits():
+    """The guard is the ONLY bound left on a batch's session cost. Full text is spent
+    first: snippets are the measured low-yield class, so they are what a squeezed batch
+    drops."""
+    # 10% of window left, 1%/full row -> 10 full rows fit, nothing left for snippets
+    assert nb.batch_counts(21, 31, budget_pct=10, full_pct=1.0, snippet_pct=2.0) == (10, 0)
+    # 14% left: 10 full (10%) then 2 snippets (4%)
+    assert nb.batch_counts(10, 31, budget_pct=14, full_pct=1.0, snippet_pct=2.0) == (10, 2)
+    # over the ceiling: nothing fits, and no negative counts from a negative budget
+    assert nb.batch_counts(21, 31, budget_pct=-8, full_pct=1.0, snippet_pct=2.0) == (0, 0)
+
+
+def test_guard_budget_sign_survives_a_healthy_window():
+    """The one line bridging the live quota read to the guard. Inverted, it goes negative
+    whenever the window is HEALTHY, so batch_counts returns nothing and the doorbell falls
+    permanently silent — a failure invisible to every test that computes its own budget,
+    which is why the composition (not just the arithmetic) is asserted here."""
+    assert nb.guard_budget(44) == nb.SESSION_GUARD_PCT - 44
+    assert nb.guard_budget(None) is None
+    # healthy window -> real work proposed; exhausted window -> nothing
+    assert nb.batch_counts(21, 31, nb.guard_budget(10), 0.27, 0.27)[0] > 0
+    assert nb.batch_counts(21, 31, nb.guard_budget(90), 0.27, 0.27) == (0, 0)
+
+
+def test_quota_tail_and_guard_holds_are_counted_separately():
+    """Two different exclusions the popup must not merge: over-quota snippets are never
+    batched and age out, while guard-dropped rows come back next time. Merging them
+    overstated permanent loss (77 claimed vs 74 real at a 44% window)."""
+    pending_snip, full = 77, 30
+    in_quota = min(pending_snip, nb.SNIPPET_QUOTA)
+    for now, want_held in ((10, 0), (44, None)):
+        n_full, n_snip = nb.batch_counts(full, pending_snip, nb.guard_budget(now),
+                                         0.27, 0.27)
+        quota_tail = pending_snip - in_quota
+        held = (full - n_full) + (in_quota - n_snip)
+        assert quota_tail == 74          # never depends on the guard
+        if want_held == 0:
+            assert held == 0             # roomy window defers nothing
+        else:
+            assert held > 0              # squeezed window defers, and says so separately
+
+
+def test_batch_fails_open_when_the_window_or_calibration_is_unknown():
+    """plan_usage never lets a quota hiccup suppress the doorbell; the guard inherits
+    that rule. An unreadable window or an uncalibrated cost must not read as zero."""
+    assert nb.batch_counts(21, 31, budget_pct=None, full_pct=1.0) == (21, nb.SNIPPET_QUOTA)
+    assert nb.batch_counts(21, 31, budget_pct=5, full_pct=0, snippet_pct=0) == (
+        21, nb.SNIPPET_QUOTA)
+
+
+def test_session_pct_reads_the_window_row_and_survives_a_shapeless_payload():
+    """The usage endpoint is undocumented: percent may be missing or non-numeric, and
+    None must mean 'unknown' (fail open), never 0 (which would read as a full window)."""
+    assert nb.session_pct([("周 全模型", 19, "x"), (nb.SESSION_LABEL, 16, "y")]) == 16.0
+    assert nb.session_pct([(nb.SESSION_LABEL, None, "y")]) is None
+    assert nb.session_pct([(nb.SESSION_LABEL, "n/a", "y")]) is None
+    assert nb.session_pct([]) is None
+
+
 def _counts(conn, state):
-    """Reproduce main()'s pending/new_rows derivation from a given state dict."""
-    fresh = nb.zone_rows(conn)
-    processed = set(state.get("processed_urls") or [])
-    last_batch = state.get("last_batch_iso", "")
-    pending = [u for u, _, _, b in fresh if b and u not in processed]
-    if last_batch:
-        new_rows = [u for u, seen, _, b in fresh
-                    if b and seen > last_batch and u not in processed]
-    else:
-        new_rows = pending
+    """main()'s own derivation — the function, not a copy of it."""
+    pending, _, new_rows = nb.pending_split(
+        nb.zone_rows(conn), set(state.get("processed_urls") or []),
+        state.get("last_batch_iso", ""))
     return pending, new_rows
 
 
@@ -230,6 +293,25 @@ def test_arrivals_are_always_a_subset_of_pending(conn):
         pending, new_rows = _counts(conn, state)
         assert set(new_rows) <= set(pending)
         assert len(new_rows) <= len(pending)
+
+
+def test_pending_snippet_count_stays_inside_pending(conn):
+    """main() derives the full-text count by SUBTRACTING the snippet tally from pending,
+    so the tally must be gathered over the same batchable/unprocessed subset. Counting
+    snippets over the wider zone instead — the easy slip, since sub-bar Adzuna rows are
+    the zone's bulk — makes that subtraction negative and the popup quote negative rows
+    and negative minutes. The pure batch_counts test cannot see this; only the real
+    derivation over a real zone can."""
+    make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())            # full, batchable
+    make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(),
+             source="adzuna", description="x" * 500)                              # snippet, batchable
+    for _ in range(10):     # sub-bar snippets: in the zone, never batch material
+        make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent(),
+                 source="adzuna", description="x" * 500)
+    pending, n_snippet, _ = nb.pending_split(nb.zone_rows(conn), set())
+    assert n_snippet <= len(pending)
+    assert (len(pending) - n_snippet, n_snippet) == (1, 1)
+    assert nb.batch_counts(len(pending) - n_snippet, n_snippet) == (1, 1)
 
 
 def test_processed_rows_leave_pending_and_can_empty_it(conn):

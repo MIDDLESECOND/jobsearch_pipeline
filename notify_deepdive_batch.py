@@ -38,7 +38,26 @@ ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / ".deepdive_state.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 FRESH_DAYS = 14            # mirror the standing allocation / second-judge window
-BATCH_CAP = 10
+# 2026-08-16: the flat top-10 cap is gone. A batch now takes EVERY full-text batchable
+# row in the window plus a fixed snippet-completion quota (snippets pay a browser fetch
+# each and 10 of the first 12 completed pairs lost their action on full text, so
+# uncapping them buys wall-clock mostly to confirm skips). The size estimate below has
+# to mirror that shape or the popup misprices exactly the batches the widening created.
+# MIRRORED in .claude/skills/deepdive/SKILL.md's snippet-quota leg, which reserves this
+# many completion slots per batch. Change one, change both — the same coupling
+# BATCH_TRIGGER carries below, and for the same reason: that pair has drifted twice, and
+# SKILL.md is gitignored, so the committed tree shows no sign the other half exists. A
+# quota raised here but not there makes every popup overstate the batch, and the
+# calibration the skill writes back is then measured against a row count that never ran.
+SNIPPET_QUOTA = 3
+# The session guard: the ceiling on ABSOLUTE 5h-window utilization, not on the share a
+# single batch adds. Stated absolutely because that is the only reading a doorbell can
+# check before launching and the skill can check between rows — "50% of the window" as a
+# per-batch allowance would let a batch started at 60% push the window past 100%, which
+# is the failure the guard exists to prevent. Uncapping full text removed the natural
+# ~10-row ceiling, so this is now the ONLY bound on a batch's session cost.
+SESSION_GUARD_PCT = 50.0
+SESSION_LABEL = "5h 窗口"   # plan_usage's label for the window the guard watches
 # BATCHABLE = the row a batch can actually consume, mirroring ALL of the skill's batch
 # scope, not just its fit leg: PASS at/above the standing allocation's cold-apply bar,
 # no second-judge downgrade, and inside the apply window. Rows failing any leg stay in
@@ -152,6 +171,95 @@ def zone_rows(conn):
     return out
 
 
+def guard_budget(now_pct):
+    """Percent of the 5h window a batch may still spend before SESSION_GUARD_PCT.
+
+    Its own function because it is the entire bridge from the live quota read to the
+    guard, and its SIGN is the failure nobody would see: written the other way round it
+    goes negative on a HEALTHY window, batch_counts returns nothing, and the doorbell
+    falls permanently silent — while every test that computes its own budget still
+    passes. None (window unreadable) propagates as fail-open.
+    """
+    return None if now_pct is None else SESSION_GUARD_PCT - float(now_pct)
+
+
+def batch_counts(n_full_pending, n_snippet_pending, budget_pct=None,
+                 full_pct=0.0, snippet_pct=0.0):
+    """(n_full, n_snippet) the NEXT batch will actually read.
+
+    Full text is uncapped; snippets clamp to SNIPPET_QUOTA. When a session budget is
+    known (SESSION_GUARD_PCT minus current utilization) the batch is additionally
+    truncated to what fits, spending it on full text FIRST: snippets are the measured
+    low-yield class (10 of the first 12 completed pairs lost their action on full text),
+    so they are what a squeezed batch should drop.
+
+    The two classes are priced separately on purpose. A snippet row pays a browser
+    completion a full-text row does not, and the widening moved the mix from ~23%
+    snippets (the batch session_pct_per_row was measured on) to ~9%, so one blended
+    constant now misprices every batch — high, which would trip this very guard early
+    and truncate batches that had headroom.
+
+    Pure so the popup arithmetic is testable; `budget_pct=None` (quota unreadable or
+    uncalibrated) fails OPEN to the unguarded counts, matching plan_usage's rule that a
+    quota hiccup must never suppress the doorbell.
+    """
+    n_full = max(0, n_full_pending)
+    n_snip = min(max(0, n_snippet_pending), SNIPPET_QUOTA)
+    if budget_pct is None or (full_pct <= 0 and snippet_pct <= 0):
+        return n_full, n_snip
+    budget = max(0.0, float(budget_pct))
+    if full_pct > 0:
+        n_full = min(n_full, int(budget // full_pct))
+    if snippet_pct > 0:
+        left = max(0.0, budget - n_full * full_pct)
+        n_snip = min(n_snip, int(left // snippet_pct))
+    return n_full, n_snip
+
+
+def pending_split(fresh, processed, last_batch=""):
+    """(pending_urls, n_pending_snippet, new_urls) over the BATCHABLE subset only.
+
+    All three counts come from ONE pass so the popup's arithmetic cannot drift between
+    them. Two relations are load-bearing and are what this function exists to hold:
+
+    * n_pending_snippet <= len(pending). main() derives the full-text count by
+      SUBTRACTING one from the other, so a snippet tally gathered over a wider set than
+      `pending` (dropping the batchable leg is the easy slip) yields a negative row
+      count and a popup quoting negative minutes.
+    * new_urls is a SUBSET of pending. The popup nests them ("待看 N（其中新进 M）"), and
+      counting arrivals over the whole zone once printed 待看 494（其中新进 1256）.
+
+    Pending counts only BATCHABLE rows: the sub-bar rows a batch may never take would
+    otherwise keep it permanently non-empty and make "no popup" unreachable.
+    """
+    pending, n_snippet, new_rows = [], 0, []
+    for url, first_seen, snippet, batchable in fresh:
+        if not batchable or url in processed:
+            continue
+        pending.append(url)
+        if snippet:
+            n_snippet += 1
+        # No stamp yet = no batch has run, so everything waiting is an arrival.
+        if not last_batch or first_seen > last_batch:
+            new_rows.append(url)
+    return pending, n_snippet, new_rows
+
+
+def session_pct(quota):
+    """Current 5h-window utilization from plan_usage's rows, or None if unreadable.
+
+    The endpoint is undocumented, so `percent` may be absent or non-numeric; None means
+    "unknown", which every caller must treat as fail-open rather than as zero.
+    """
+    for label, pct, _ in quota:
+        if label == SESSION_LABEL:
+            try:
+                return float(pct)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _file_expiry():
     """The credentials file's stored expiresAt (ms epoch), or 0 if unreadable."""
     try:
@@ -242,7 +350,7 @@ def plan_usage():
         for lim in data.get("limits") or []:
             kind = lim.get("kind")
             if kind == "session":
-                label = "5h 窗口"
+                label = SESSION_LABEL
             elif kind == "weekly_all":
                 label = "周 全模型"
             elif kind == "weekly_scoped":
@@ -398,23 +506,14 @@ def main():
     if not isinstance(state, dict):     # a state file that is valid JSON but not an object
         state = {}
     last_batch = state.get("last_batch_iso", "")
-    # PENDING drives the popup, not "newer than the last batch": a batch takes the TOP
-    # ~10 rows by freshness+fit, so the last-batch stamp is normally the newest row in
-    # the zone, and a watermark test would mark every row the batch DIDN'T reach as
-    # "not new" forever. `processed_urls` is what a batch actually consumed (the skill
-    # prunes it to current-zone membership when writing). Pending counts only BATCHABLE
-    # rows — the sub-bar rows a batch may never take would otherwise keep it permanently
-    # non-empty, pinning the estimate at BATCH_CAP and making "no popup" unreachable.
+    # PENDING drives the popup, not "newer than the last batch": the snippet tail beyond
+    # the quota and any session-guard remainder are rows a batch legitimately skipped,
+    # so a last-batch watermark would mark them "not new" forever. `processed_urls` is
+    # what a batch actually consumed (the skill prunes it to current-zone membership
+    # when writing). pending_split owns the derivation and the relations between these
+    # three counts; the tests exercise that function rather than a copy of it.
     processed = set(state.get("processed_urls") or [])
-    pending = [u for u, _, _, batchable in fresh if batchable and u not in processed]
-    # Arrivals are counted over the SAME batchable subset the popup nests them inside.
-    # Scanning the whole zone made "其中新进 M" not a subset of "待看 N" — observed:
-    # 待看 494（其中新进 1256）— and reported work no batch could take.
-    if last_batch:
-        new_rows = [u for u, seen, _, batchable in fresh
-                    if batchable and seen > last_batch and u not in processed]
-    else:
-        new_rows = pending    # no batch has run yet: everything waiting is new
+    pending, pending_snippet, new_rows = pending_split(fresh, processed, last_batch)
     if not pending:
         print("deepdive doorbell: no batchable row is waiting - no popup")
         return
@@ -432,11 +531,16 @@ def main():
         except (TypeError, ValueError):
             return float(default)
 
-    n = min(len(pending), BATCH_CAP)
-    est_min = round(n * _cal("minutes_per_row", DEFAULT_MIN_PER_ROW))
-    est_ktok = round(n * _cal("ktokens_per_row", DEFAULT_KTOK_PER_ROW))
-    pct_per_row = _cal("session_pct_per_row", 0)   # measured across past batches
-    est_pct = f" ≈ 5h 窗口的 ~{round(n * pct_per_row)}%" if pct_per_row else ""
+    # Per-class costs: a per-class key wins, else the legacy blended one, else the
+    # default — so a state file written before the 2026-08-16 split still prices exactly
+    # as it used to instead of silently reading 0.
+    def _pair(per_class, blended, default):
+        base = _cal(blended, default)
+        return (_cal(f"{per_class}_full_row", base), _cal(f"{per_class}_snippet_row", base))
+
+    full_min, snip_min = _pair("minutes_per", "minutes_per_row", DEFAULT_MIN_PER_ROW)
+    full_ktok, snip_ktok = _pair("ktokens_per", "ktokens_per_row", DEFAULT_KTOK_PER_ROW)
+    full_pct, snip_pct = _pair("session_pct_per", "session_pct_per_row", 0)
 
     quota = plan_usage()
     if quota:
@@ -445,11 +549,68 @@ def main():
     else:
         quota_block = "\n当前额度：读取失败（token 未设或已过期，见脚本注释）\n"
 
+    # The session guard, enforced here so the doorbell cannot propose work the skill's
+    # between-rows check would abort on row 1. Unknown utilization or an uncalibrated
+    # session cost leaves budget None = fail open.
+    now_pct = session_pct(quota)
+    budget = guard_budget(now_pct)
+    n_full_pending = len(pending) - pending_snippet
+    n_full, n_snip = batch_counts(n_full_pending, pending_snippet, budget,
+                                  full_pct, snip_pct)
+    n = n_full + n_snip
+    if not n:
+        # Worded to stay true in BOTH sub-cases: the window past the ceiling, and a
+        # window still under it whose remainder cannot pay for one row. This log exists
+        # because a 2026-08-15 investigation had nothing to read; naming a cause that
+        # may be false is how it misdirects the next one.
+        print(f"deepdive doorbell: 5h window at {now_pct:g}% leaves no room under the "
+              f"{SESSION_GUARD_PCT:g}% guard - {len(pending)} rows wait, no popup")
+        # Silence here is indistinguishable from "nothing was waiting" unless the skip
+        # outlives this process. The next popup carries it, so a guard-skipped day can
+        # never pass for a day that had no work. NOT under --print: that path is the
+        # interactive check and stays side-effect-free (it is already kept out of the run
+        # log for the same reason), or looking would manufacture a skip that never
+        # suppressed anything.
+        if not print_only:
+            _save_doorbell_state({
+                "guard_skipped_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "guard_skipped_pending": len(pending)})
+        return
+
+    est_min = round(n_full * full_min + n_snip * snip_min)
+    est_ktok = round(n_full * full_ktok + n_snip * snip_ktok)
+    est_pct_val = n_full * full_pct + n_snip * snip_pct
+    est_pct = f" ≈ 5h 窗口的 ~{round(est_pct_val)}%" if est_pct_val else ""
+
+    # Never let the trimmed batch read as the whole backlog (AGENTS.md's rule for the
+    # duplicate queue, and the count-honesty bug this popup has now shipped twice). The
+    # two exclusions are NOT the same and must never be merged: rows beyond the quota are
+    # never batched and age out of the window, while rows the guard dropped are re-offered
+    # next time, exactly like the full-text remainder. Charging the second to the first
+    # overstates permanent loss — measured at a 44% window: 77 claimed vs 74 real.
+    in_quota = min(pending_snippet, SNIPPET_QUOTA)
+    quota_tail = pending_snippet - in_quota
+    held = (n_full_pending - n_full) + (in_quota - n_snip)
+    tail_note = f"；配额外 snippet {quota_tail} 条不进批（将自然过期）" if quota_tail else ""
+    guard_note = (f"\n受窗口守卫（{SESSION_GUARD_PCT:g}%，当前 {now_pct:g}%）限制，"
+                  f"另有 {held} 条顺延下次" if held > 0 else "")
+
+    # A batch the guard withheld produced no popup at all, so the news has to ride the
+    # NEXT one or the user never learns a day was skipped.
+    door = state.get("doorbell")
+    skipped_at = door.get("guard_skipped_at") if isinstance(door, dict) else None
+    skip_note = ""
+    if skipped_at:
+        skip_note = (f"\n（上次 {_local(skipped_at)} 因窗口守卫跳过，"
+                     f"当时 {door.get('guard_skipped_pending') or '?'} 条在等）")
+
     body = (
         f"待看 {len(pending)} 条（其中新进 {len(new_rows)}）；区内共 {len(fresh)}："
         f"全文 {len(fresh) - n_snippet} / snippet 待补全 {n_snippet}；"
         f"{opinions} 条已有二审意见\n"
-        f"一批（上限 {BATCH_CAP} 条）预计：约 {est_min} 分钟 / 约 {est_ktok}k tokens{est_pct}\n"
+        f"本批 {n} 条 = 全文 {n_full} + snippet {n_snip}（配额 {SNIPPET_QUOTA}）"
+        f"{tail_note}{guard_note}\n"
+        f"预计：约 {est_min} 分钟 / 约 {est_ktok}k tokens{est_pct}{skip_note}\n"
         f"{quota_block}\n"
         f"现在跑吗？\n"
         f"【是】开一个 Claude Code 窗口立即开跑（可随时打断）\n"
@@ -460,11 +621,18 @@ def main():
         return
 
     MB_YESNO, MB_TOPMOST, MB_SETFOREGROUND, MB_ICONQUESTION = 0x4, 0x40000, 0x10000, 0x20
-    IDYES = 6
+    IDYES, IDTIMEOUT = 6, 32000
     rc = ctypes.windll.user32.MessageBoxTimeoutW(
         None, body, "Deepdive 批：二审已收好 — 现在跑吗？",
         MB_YESNO | MB_TOPMOST | MB_SETFOREGROUND | MB_ICONQUESTION, 0, POPUP_TIMEOUT_MS,
     )
+    # Retire a carried skip notice only once it has actually been SEEN. The box
+    # self-dismisses after POPUP_TIMEOUT_MS, so clearing when the body was built would
+    # consume the news on exactly the runs nobody was at the machine for — and a
+    # guard-skipped day would go back to being invisible. (--print returns above, so the
+    # interactive check cannot eat it either.)
+    if skipped_at and rc != IDTIMEOUT:
+        _save_doorbell_state({"guard_skipped_at": None, "guard_skipped_pending": None})
     if rc == IDYES:
         _launch_batch()
     else:

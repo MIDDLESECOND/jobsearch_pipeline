@@ -125,6 +125,15 @@ re-export hub):
   (`last_batch_iso`, `processed_urls`, `calibration`) is written by the local `deepdive`
   skill under `.claude/skills/` — gitignored because it names private paths, which is why
   the repo shows a consumer with no visible producer. Imports `core` and `states` only.
+  Since the 2026-08-16 uncapping (batches take all fresh full-text rows plus
+  `SNIPPET_QUOTA` completions, so nothing bounds a batch by row count any more) it also
+  ENFORCES the session guard: it prices the two row classes separately, truncates the
+  proposed batch to what fits under `SESSION_GUARD_PCT` of the 5h window, and stays
+  silent when nothing fits — a console that opens is never one the skill's between-rows
+  check would abort on row 1. Both the quota and the guard threshold are mirrored in
+  SKILL.md; a quota or ceiling changed on one side only silently misprices every popup.
+  An unreadable quota or an uncalibrated cost fails OPEN to the unguarded counts: a
+  cosmetic endpoint hiccup must never suppress the doorbell.
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach

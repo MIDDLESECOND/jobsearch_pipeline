@@ -133,7 +133,11 @@ re-export hub):
   check would abort on row 1. Both the quota and the guard threshold are mirrored in
   SKILL.md; a quota or ceiling changed on one side only silently misprices every popup.
   An unreadable quota or an uncalibrated cost fails OPEN to the unguarded counts: a
-  cosmetic endpoint hiccup must never suppress the doorbell.
+  cosmetic endpoint hiccup must never suppress the doorbell. It also derives the
+  arrivals watermark from `jobs.first_seen` rather than trusting the state file's
+  `last_batch_iso`: that key's "newest processed first_seen" contract lives only as
+  prose in the gitignored skill, and a batch once wrote a UTC wall clock into a column
+  that is local, which pinned the popup's "new since last batch" count at zero.
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach

@@ -216,6 +216,35 @@ def batch_counts(n_full_pending, n_snippet_pending, budget_pct=None,
     return n_full, n_snip
 
 
+def arrivals_watermark(conn, processed, chunk=500):
+    """Newest `first_seen` among rows a batch has already consumed, read from the DB.
+
+    Derived here instead of trusting the state file's `last_batch_iso`, whose contract
+    ("max first_seen processed") lives only as prose in a gitignored skill file. Measured
+    2026-08-16: it arrived as a UTC wall clock taken at batch end (23:12:15) where the
+    newest processed first_seen was 17:09:17 — two errors at once, a wall clock instead
+    of a row value AND a clock the column does not use (every `first_seen` here is local;
+    the table's fetch cadence shows 08/11/14/17/20/23 local). Comparing a UTC stamp
+    against local values makes every row fetched for the next ~5 hours read as "not new",
+    which is why 其中新进 sat at 0 all day. Reading the same column the comparison uses
+    cannot drift from it.
+
+    Decided rows count: they left the zone but a batch really did consume them, so this
+    queries `jobs` rather than filtering the zone snapshot. Chunked because
+    `processed_urls` is unbounded in principle and SQLite caps host parameters.
+    """
+    best = ""
+    urls = list(processed)
+    for i in range(0, len(urls), chunk):
+        part = urls[i:i + chunk]
+        q = ",".join("?" * len(part))
+        got = conn.execute(
+            f"SELECT MAX(first_seen) FROM jobs WHERE job_url IN ({q})", part).fetchone()[0]
+        if got and got > best:
+            best = got
+    return best
+
+
 def pending_split(fresh, processed, last_batch=""):
     """(pending_urls, n_pending_snippet, new_urls) over the BATCHABLE subset only.
 
@@ -487,6 +516,11 @@ def _launch_batch():
 
 def main():
     print_only = "--print" in sys.argv
+    state = load_state()
+    if not isinstance(state, dict):     # a state file that is valid JSON but not an object
+        state = {}
+    processed = set(state.get("processed_urls") or [])
+
     conn = sqlite3.connect(f"file:{ROOT / 'jobs.db'}?mode=ro", uri=True)
     try:
         fresh = zone_rows(conn)
@@ -499,20 +533,16 @@ def main():
                 f"SELECT COUNT(DISTINCT job_url) FROM second_opinions"
                 f" WHERE status='done' AND job_url IN ({q})", urls,
             ).fetchone()[0]
+        last_batch = arrivals_watermark(conn, processed)
     finally:
         conn.close()
 
-    state = load_state()
-    if not isinstance(state, dict):     # a state file that is valid JSON but not an object
-        state = {}
-    last_batch = state.get("last_batch_iso", "")
     # PENDING drives the popup, not "newer than the last batch": the snippet tail beyond
     # the quota and any session-guard remainder are rows a batch legitimately skipped,
     # so a last-batch watermark would mark them "not new" forever. `processed_urls` is
     # what a batch actually consumed (the skill prunes it to current-zone membership
     # when writing). pending_split owns the derivation and the relations between these
     # three counts; the tests exercise that function rather than a copy of it.
-    processed = set(state.get("processed_urls") or [])
     pending, pending_snippet, new_rows = pending_split(fresh, processed, last_batch)
     if not pending:
         print("deepdive doorbell: no batchable row is waiting - no popup")

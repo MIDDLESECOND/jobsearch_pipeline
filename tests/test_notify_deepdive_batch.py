@@ -275,6 +275,28 @@ def test_session_pct_reads_the_window_row_and_survives_a_shapeless_payload():
     assert nb.session_pct([]) is None
 
 
+def test_arrivals_watermark_comes_from_the_column_it_is_compared_against(conn):
+    """The state file's last_batch_iso is written by prose instruction in a gitignored
+    skill file, and on 2026-08-16 it arrived as a UTC wall clock where the contract asks
+    for the newest processed first_seen — 5 hours ahead of every (local) first_seen, so
+    nothing could ever read as new. Deriving it from `jobs` removes the clock entirely."""
+    old = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=3))
+    new = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    assert nb.arrivals_watermark(conn, set()) == ""          # nothing batched yet
+    assert nb.arrivals_watermark(conn, {old["job_url"]}) == old["first_seen"]
+    # a consumed row that has since been DECIDED still sets the mark
+    conn.execute("UPDATE jobs SET app_status='passed' WHERE job_url=?", (new["job_url"],))
+    conn.commit()
+    assert nb.arrivals_watermark(conn, {old["job_url"], new["job_url"]}) == new["first_seen"]
+
+
+def test_arrivals_watermark_chunks_a_long_processed_list(conn):
+    """processed_urls is unbounded in principle; SQLite caps host parameters per query."""
+    row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    processed = {f"https://example.test/{i}" for i in range(2500)} | {row["job_url"]}
+    assert nb.arrivals_watermark(conn, processed, chunk=100) == row["first_seen"]
+
+
 def _counts(conn, state):
     """main()'s own derivation — the function, not a copy of it."""
     pending, _, new_rows = nb.pending_split(

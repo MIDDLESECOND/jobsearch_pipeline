@@ -169,13 +169,17 @@ def pending_rows(conn, backfill_days=None):
     # to be insufficient — spend without information. Those rows' path to a trustworthy
     # verdict is JD completion (the deepdive skill fetches the posting in a browser),
     # not a second read of the same truncation. See core.ADZUNA_SNIPPET_MAX_CHARS.
+    # COALESCE on source is load-bearing, not defensive noise: under SQL three-valued
+    # logic a NULL source makes the inner AND evaluate to NULL, and NOT NULL is NULL —
+    # which WHERE treats as false, silently dropping a short-but-complete JD from the
+    # zone. COALESCE makes the predicate mean what it says.
     rows = conn.execute(
         """SELECT * FROM jobs
            WHERE status='evaluated' AND filter_source IS NULL
              AND app_status IS NULL
              AND ((verdict=? AND fit_score>=?) OR (verdict=? AND fit_score>=?))
              AND substr(first_seen,1,10) >= ?
-             AND NOT (source='adzuna'
+             AND NOT (COALESCE(source,'')='adzuna'
                       AND length(COALESCE(description,'')) <= ?)
              AND job_url NOT IN (SELECT job_url FROM second_opinions
                                  WHERE status != 'retry')

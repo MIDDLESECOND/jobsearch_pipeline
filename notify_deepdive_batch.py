@@ -29,7 +29,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from core import ADZUNA_SNIPPET_MAX_CHARS
+from core import ADZUNA_SNIPPET_MAX_CHARS, recency_dt
 from states import COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT
 
 ROOT = Path(__file__).resolve().parent
@@ -49,13 +49,38 @@ def load_state():
         return {}
 
 
+def _save_doorbell_state(patch):
+    """Merge a patch into the state file's `doorbell` key.
+
+    Ownership split inside one file: the deepdive skill owns `last_batch_iso`,
+    `calibration`, and `processed_urls`; the doorbell owns only `doorbell`. Both
+    read-modify-write, and they run at different moments (skill at batch end, doorbell
+    right after the judge), so a clobber would need a collision inside milliseconds and
+    would cost at most one stale cooldown marker.
+    """
+    try:
+        state = load_state()
+        state.setdefault("doorbell", {}).update(patch)
+        STATE_PATH.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    except OSError:
+        pass    # a cooldown we cannot persist is a nudge we retry — not a failure
+
+
 def zone_rows(conn):
-    """Deepdive-actionable rows: undecided, at the action bars, fresh."""
-    cutoff = (dt.date.today() - dt.timedelta(days=FRESH_DAYS)).isoformat()
+    """Deepdive-actionable rows: undecided, at the action bars, fresh.
+
+    Freshness runs through core.recency_dt — the ONE effective posted-at reading the
+    report label, the triage sort, and second_judge's window all share (AGENTS.md).
+    A textual date_posted slice would diverge from it exactly where the sanity window
+    earns its keep: a placeholder date ("9999-12-31") reads as permanently fresh here
+    while the second judge correctly ages it out through first_seen.
+    """
+    cutoff = dt.date.today() - dt.timedelta(days=FRESH_DAYS)
     rows = conn.execute(
         """
         SELECT job_url, first_seen, date_posted,
-               (source='adzuna' AND length(COALESCE(description,'')) <= ?) AS snippet
+               (COALESCE(source,'')='adzuna'
+                AND length(COALESCE(description,'')) <= ?) AS snippet
         FROM jobs
         WHERE status='evaluated' AND filter_source IS NULL AND app_status IS NULL
           AND ((verdict='PASS' AND fit_score >= ?)
@@ -65,10 +90,22 @@ def zone_rows(conn):
     ).fetchall()
     out = []
     for url, first_seen, date_posted, snippet in rows:
-        eff = (date_posted or "")[:10] or (first_seen or "")[:10]
-        if eff >= cutoff:
-            out.append((url, first_seen or "", bool(snippet)))
+        eff, mode = recency_dt(date_posted, first_seen)
+        # mode None = no usable date; first_seen already put it in view, so keep it
+        # (same call the second judge makes).
+        if mode is not None and eff.date() < cutoff:
+            continue
+        out.append((url, first_seen or "", bool(snippet)))
     return out
+
+
+def _file_expiry():
+    """The credentials file's stored expiresAt (ms epoch), or 0 if unreadable."""
+    try:
+        data = json.loads((Path.home() / ".claude" / ".credentials.json").read_text("utf-8"))
+        return (data.get("claudeAiOauth") or {}).get("expiresAt") or 0
+    except (OSError, ValueError):
+        return 0
 
 
 def _file_token():
@@ -104,6 +141,13 @@ def _token():
     tok = _file_token()
     if tok:
         return tok
+    # One wasted nudge per expiry, not one per firing: the nudge costs a real (tiny)
+    # inference call — spending the very quota the popup reports — and can block to its
+    # timeout. If it already failed for THIS stored expiresAt, skip straight to the
+    # graceful line instead of repeating it at all six of the day's slots.
+    expiry = _file_expiry()
+    if load_state().get("doorbell", {}).get("nudge_failed_for_expiry") == expiry:
+        return None
     claude = shutil.which("claude")
     if claude:
         try:
@@ -114,11 +158,14 @@ def _token():
             # never refreshes — the credentials file. Strip it to force the child
             # onto the file OAuth path, which is the one that rewrites the file.
             env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-            subprocess.run([claude, "-p", "ok"], capture_output=True, timeout=90,
+            subprocess.run([claude, "-p", "ok"], capture_output=True, timeout=60,
                            env=env)
         except (subprocess.SubprocessError, OSError):
             pass
-    return _file_token()
+    refreshed = _file_token()
+    if not refreshed:
+        _save_doorbell_state({"nudge_failed_for_expiry": expiry})
+    return refreshed
 
 
 def plan_usage():
@@ -131,30 +178,33 @@ def plan_usage():
         "anthropic-beta": "oauth-2025-04-20",
         "Content-Type": "application/json",
     })
+    # Fetch AND parse under one guard. The endpoint is undocumented, so its shape is not
+    # a contract we control; a cosmetic quota line must never cost the popup itself.
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read().decode("utf-8"))
+        out = []
+        for lim in data.get("limits") or []:
+            kind = lim.get("kind")
+            if kind == "session":
+                label = "5h 窗口"
+            elif kind == "weekly_all":
+                label = "周 全模型"
+            elif kind == "weekly_scoped":
+                scope = lim.get("scope")
+                model = scope.get("model") if isinstance(scope, dict) else None
+                name = model.get("display_name") if isinstance(model, dict) else None
+                label = f"周 {name or 'scoped'}"
+            else:
+                continue
+            out.append((label, lim.get("percent"), _local(lim.get("resets_at"))))
+        return out
     except Exception:
         return []   # never let a quota hiccup suppress the doorbell
 
-    out = []
-    for lim in data.get("limits") or []:
-        kind = lim.get("kind")
-        if kind == "session":
-            label = "5h 窗口"
-        elif kind == "weekly_all":
-            label = "周 全模型"
-        elif kind == "weekly_scoped":
-            model = ((lim.get("scope") or {}).get("model") or {}).get("display_name") or "scoped"
-            label = f"周 {model}"
-        else:
-            continue
-        out.append((label, lim.get("percent"), _local(lim.get("resets_at"))))
-    return out
-
 
 def _local(iso):
-    if not iso:
+    if not isinstance(iso, str) or not iso:
         return ""
     try:
         return dt.datetime.fromisoformat(iso).astimezone().strftime("%m-%d %H:%M")
@@ -181,13 +231,21 @@ def main():
 
     state = load_state()
     last_batch = state.get("last_batch_iso", "")
+    # PENDING drives the popup, not "newer than the last batch". A batch takes the TOP
+    # ~10 rows by freshness+fit, so the last-batch stamp is normally the newest row in
+    # the whole zone — a watermark test would mark every row the batch DIDN'T reach as
+    # "not new" forever, and the doorbell would go silent on any slot that added nothing
+    # while dozens of actionable rows still waited. `processed_urls` is what the batch
+    # actually consumed (the skill prunes it to current-zone membership when writing).
+    processed = set(state.get("processed_urls") or [])
+    pending = [u for u in urls if u not in processed]
     new_rows = [u for u, seen, _ in fresh if seen > last_batch] if last_batch else urls
-    if not new_rows:
-        print("deepdive doorbell: nothing new in the zone since the last batch - no popup")
+    if not pending:
+        print("deepdive doorbell: every actionable row has been through a batch - no popup")
         return
 
     cal = state.get("calibration", {})
-    n = min(len(new_rows), BATCH_CAP)
+    n = min(len(pending), BATCH_CAP)
     est_min = round(n * float(cal.get("minutes_per_row", DEFAULT_MIN_PER_ROW)))
     est_ktok = round(n * float(cal.get("ktokens_per_row", DEFAULT_KTOK_PER_ROW)))
     pct_per_row = cal.get("session_pct_per_row")   # measured across past batches
@@ -201,8 +259,9 @@ def main():
         quota_block = "\n当前额度：读取失败（token 未设或已过期，见脚本注释）\n"
 
     body = (
-        f"行动区新进 {len(new_rows)} 条（区内共 {len(fresh)}：全文 {len(fresh) - n_snippet}"
-        f" / snippet 待补全 {n_snippet}；{opinions} 条已有二审意见）\n"
+        f"待看 {len(pending)} 条（其中新进 {len(new_rows)}）；区内共 {len(fresh)}："
+        f"全文 {len(fresh) - n_snippet} / snippet 待补全 {n_snippet}；"
+        f"{opinions} 条已有二审意见\n"
         f"一批（上限 {BATCH_CAP} 条）预计：约 {est_min} 分钟 / 约 {est_ktok}k tokens{est_pct}\n"
         f"{quota_block}\n"
         f"现在跑吗？\n"

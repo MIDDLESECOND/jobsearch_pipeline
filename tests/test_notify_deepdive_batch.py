@@ -305,6 +305,16 @@ def test_arrivals_mark_cannot_fall_back_when_processed_urls_is_pruned(conn):
     assert nb.arrivals_mark(conn, pruned, remembered=mark) == mark    # the mark does not
 
 
+def test_arrivals_mark_degrades_on_a_malformed_remembered_value(conn):
+    """It runs before any popup, so an exception here is a doorbell that never rings —
+    the failure every other reader in this module is written to survive (_cal on a null
+    constant, _save_doorbell_state on a non-dict `doorbell`, session_pct on a non-numeric
+    percent). max() over a str and an int raises, and the key is hand-editable."""
+    row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    for junk in (None, 123, 4.5, [], ["x"], {"a": 1}, True):
+        assert nb.arrivals_mark(conn, {row["job_url"]}, junk) == row["first_seen"]
+
+
 def test_arrivals_watermark_chunks_a_long_processed_list(conn):
     """processed_urls is unbounded in principle; SQLite caps host parameters per query."""
     row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())

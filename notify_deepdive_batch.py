@@ -268,8 +268,16 @@ def arrivals_mark(conn, processed, remembered=""):
     The fix is to remember the high-water value in the `doorbell` key, which this module
     owns outright (the skill owns `last_batch_iso`/`processed_urls`/`calibration` and is
     never touched here). Only ever rises, so pruning cannot claw it back.
+
+    `remembered` is whatever the state file holds, so it is typed by nothing: max() over
+    a str and an int raises, and this runs before any popup, so it would take the whole
+    doorbell down under Task Scheduler. Same rule the rest of this module already lives
+    by (_cal on a null constant, _save_doorbell_state on a non-dict `doorbell`,
+    session_pct on a non-numeric percent) — a malformed state file degrades, never kills.
     """
-    return max(arrivals_watermark(conn, processed), remembered or "")
+    if not isinstance(remembered, str):
+        remembered = ""
+    return max(arrivals_watermark(conn, processed), remembered)
 
 
 def pending_split(fresh, processed, last_batch=""):
@@ -566,6 +574,15 @@ def main():
     finally:
         conn.close()
 
+    # Store the mark the moment it is known, not on the popup path: main() returns early
+    # on an empty zone and on guard suppression, and a rise dropped there is a rise lost.
+    # The gap that opens otherwise is a manual batch ("跑今天的批" needs no doorbell)
+    # after a suppressed run — it prunes the decided rows away, the derived value
+    # regresses, and nothing remembers the peak. It is an observation of DB state, not a
+    # decision, so early is strictly safer. --print still writes nothing.
+    if not print_only and last_batch and last_batch != door.get("arrivals_mark"):
+        _save_doorbell_state({"arrivals_mark": last_batch})
+
     # PENDING drives the popup, not "newer than the last batch": the snippet tail beyond
     # the quota and any session-guard remainder are rows a batch legitimately skipped,
     # so a last-batch watermark would mark them "not new" forever. `processed_urls` is
@@ -677,12 +694,6 @@ def main():
     print(body)
     if print_only:
         return
-
-    # Persist the high-water value before the box goes up, not after: it is a cache of a
-    # computed reading, not news awaiting acknowledgement, so a self-dismissed popup must
-    # still leave the mark raised. --print returned above and writes nothing.
-    if last_batch and last_batch != door.get("arrivals_mark"):
-        _save_doorbell_state({"arrivals_mark": last_batch})
 
     MB_YESNO, MB_TOPMOST, MB_SETFOREGROUND, MB_ICONQUESTION = 0x4, 0x40000, 0x10000, 0x20
     IDYES, IDTIMEOUT = 6, 32000

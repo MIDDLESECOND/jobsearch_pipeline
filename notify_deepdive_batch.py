@@ -37,11 +37,16 @@ STATE_PATH = ROOT / ".deepdive_state.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 FRESH_DAYS = 14            # mirror the standing allocation / second-judge window
 BATCH_CAP = 10
-# The bar a row must clear to be BATCHABLE, mirroring the skill's batch scope (the
-# standing allocation's cold-apply bar). Rows below it stay in the zone — the second
-# judge still reviews them and the popup still counts them — but they are policy
-# skip-at-triage, never batch material, so they must not drive the fire/skip decision.
+# BATCHABLE = the row a batch can actually consume, mirroring ALL of the skill's batch
+# scope, not just its fit leg: PASS at/above the standing allocation's cold-apply bar,
+# no second-judge downgrade, and inside the apply window. Rows failing any leg stay in
+# the zone — the second judge still reviews them, the popup still counts them as
+# context — but they are never batch material, so they must not drive the fire/skip
+# decision or the size estimate. Getting this subset wrong in either direction is what
+# the 2026-08-15 reviews kept catching: too wide and "no popup" is unreachable, too
+# narrow and real work goes unannounced.
 BATCH_MIN_FIT = 15
+BATCH_FRESH_DAYS = 5       # the apply-window evidence: first 1-2 days / first review batch
 DEFAULT_MIN_PER_ROW = 4.0
 DEFAULT_KTOK_PER_ROW = 35.0
 POPUP_TIMEOUT_MS = 2 * 60 * 60 * 1000   # self-dismiss so a missed slot can't stack
@@ -83,12 +88,13 @@ def zone_rows(conn):
     """Deepdive-actionable rows: undecided, at the action bars, fresh.
 
     Returns (url, first_seen, is_snippet, is_batchable). `is_batchable` marks the
-    narrower slice a batch can actually consume — the skill's scope, PASS at/above the
-    cold-apply bar. The wider zone (which also holds PASS 13–14 and RECRUITER_ONLY) is
-    still counted, because the popup reports zone context; but only batchable rows may
-    drive the fire/skip decision. Conflating the two is what made `pending` undrainable:
-    measured 2026-08-15, 5,983 of 9,669 zone rows can never enter a batch, so a
-    pending set built from the whole zone never empties and the no-popup branch dies.
+    narrower slice a batch can actually consume — ALL legs of the skill's scope: PASS at
+    the cold-apply bar, no second-judge downgrade, and within BATCH_FRESH_DAYS. The wider
+    zone (which also holds PASS 13–14 and RECRUITER_ONLY) is still returned, because the
+    popup reports zone context; but only batchable rows may drive the fire/skip decision
+    and the size estimate. Conflating the two is what made `pending` undrainable
+    (measured 2026-08-15: 5,983 of 9,669 zone rows can never enter a batch), and testing
+    only the fit leg still overstated it 3x (492 flagged vs 162 truly reachable).
 
     Freshness runs through core.recency_dt — the ONE effective posted-at reading the
     report label, the triage sort, and second_judge's window all share (AGENTS.md).
@@ -97,16 +103,20 @@ def zone_rows(conn):
     while the second judge correctly ages it out through first_seen.
     """
     cutoff = dt.date.today() - dt.timedelta(days=FRESH_DAYS)
+    batch_cutoff = dt.date.today() - dt.timedelta(days=BATCH_FRESH_DAYS)
     rows = conn.execute(
         """
-        SELECT job_url, first_seen, date_posted,
-               (COALESCE(source,'')='adzuna'
-                AND length(COALESCE(description,'')) <= ?) AS snippet,
-               (verdict='PASS' AND fit_score >= ?) AS batchable
-        FROM jobs
-        WHERE status='evaluated' AND filter_source IS NULL AND app_status IS NULL
-          AND ((verdict='PASS' AND fit_score >= ?)
-               OR (verdict='RECRUITER_ONLY' AND fit_score >= ?))
+        SELECT j.job_url, j.first_seen, j.date_posted,
+               (COALESCE(j.source,'')='adzuna'
+                AND length(COALESCE(j.description,'')) <= ?) AS snippet,
+               (j.verdict='PASS' AND j.fit_score >= ?
+                AND NOT EXISTS (SELECT 1 FROM second_opinions s
+                                WHERE s.job_url = j.job_url AND s.status='done'
+                                  AND s.verdict <> 'PASS')) AS batchable
+        FROM jobs j
+        WHERE j.status='evaluated' AND j.filter_source IS NULL AND j.app_status IS NULL
+          AND ((j.verdict='PASS' AND j.fit_score >= ?)
+               OR (j.verdict='RECRUITER_ONLY' AND j.fit_score >= ?))
         """,
         (ADZUNA_SNIPPET_MAX_CHARS, BATCH_MIN_FIT,
          COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT),
@@ -118,7 +128,12 @@ def zone_rows(conn):
         # (same call the second judge makes).
         if mode is not None and eff.date() < cutoff:
             continue
-        out.append((url, first_seen or "", bool(snippet), bool(batchable)))
+        # The apply window is the batch's last leg — evaluated on the same recency
+        # reading, so a row cannot be "fresh enough to batch" by one clock and stale by
+        # another. An undated row stays batchable: first_seen already vouched for it.
+        fresh_enough = mode is None or eff.date() >= batch_cutoff
+        out.append((url, first_seen or "", bool(snippet),
+                    bool(batchable) and fresh_enough))
     return out
 
 
@@ -267,7 +282,14 @@ def main():
     # non-empty, pinning the estimate at BATCH_CAP and making "no popup" unreachable.
     processed = set(state.get("processed_urls") or [])
     pending = [u for u, _, _, batchable in fresh if batchable and u not in processed]
-    new_rows = [u for u, seen, _, _ in fresh if seen > last_batch] if last_batch else urls
+    # Arrivals are counted over the SAME batchable subset the popup nests them inside.
+    # Scanning the whole zone made "其中新进 M" not a subset of "待看 N" — observed:
+    # 待看 494（其中新进 1256）— and reported work no batch could take.
+    if last_batch:
+        new_rows = [u for u, seen, _, batchable in fresh
+                    if batchable and seen > last_batch and u not in processed]
+    else:
+        new_rows = pending    # no batch has run yet: everything waiting is new
     if not pending:
         print("deepdive doorbell: no batchable row is waiting - no popup")
         return

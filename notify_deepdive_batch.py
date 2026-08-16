@@ -37,6 +37,11 @@ STATE_PATH = ROOT / ".deepdive_state.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 FRESH_DAYS = 14            # mirror the standing allocation / second-judge window
 BATCH_CAP = 10
+# The bar a row must clear to be BATCHABLE, mirroring the skill's batch scope (the
+# standing allocation's cold-apply bar). Rows below it stay in the zone — the second
+# judge still reviews them and the popup still counts them — but they are policy
+# skip-at-triage, never batch material, so they must not drive the fire/skip decision.
+BATCH_MIN_FIT = 15
 DEFAULT_MIN_PER_ROW = 4.0
 DEFAULT_KTOK_PER_ROW = 35.0
 POPUP_TIMEOUT_MS = 2 * 60 * 60 * 1000   # self-dismiss so a missed slot can't stack
@@ -60,14 +65,30 @@ def _save_doorbell_state(patch):
     """
     try:
         state = load_state()
-        state.setdefault("doorbell", {}).update(patch)
-        STATE_PATH.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    except OSError:
+        if not isinstance(state, dict):      # valid JSON, wrong shape
+            state = {}
+        # setdefault returns the STORED value when the key exists, so a `doorbell` key
+        # holding null (or anything non-dict) would make .update() raise past an
+        # OSError-only guard — and this runs inside _token(), whose caller invokes it
+        # outside its own try, so that exception would take the whole popup down.
+        current = state.get("doorbell")
+        state["doorbell"] = {**current, **patch} if isinstance(current, dict) else dict(patch)
+        STATE_PATH.write_text(json.dumps(state, indent=1, ensure_ascii=False),
+                              encoding="utf-8")
+    except (OSError, TypeError, ValueError):
         pass    # a cooldown we cannot persist is a nudge we retry — not a failure
 
 
 def zone_rows(conn):
     """Deepdive-actionable rows: undecided, at the action bars, fresh.
+
+    Returns (url, first_seen, is_snippet, is_batchable). `is_batchable` marks the
+    narrower slice a batch can actually consume — the skill's scope, PASS at/above the
+    cold-apply bar. The wider zone (which also holds PASS 13–14 and RECRUITER_ONLY) is
+    still counted, because the popup reports zone context; but only batchable rows may
+    drive the fire/skip decision. Conflating the two is what made `pending` undrainable:
+    measured 2026-08-15, 5,983 of 9,669 zone rows can never enter a batch, so a
+    pending set built from the whole zone never empties and the no-popup branch dies.
 
     Freshness runs through core.recency_dt — the ONE effective posted-at reading the
     report label, the triage sort, and second_judge's window all share (AGENTS.md).
@@ -80,22 +101,24 @@ def zone_rows(conn):
         """
         SELECT job_url, first_seen, date_posted,
                (COALESCE(source,'')='adzuna'
-                AND length(COALESCE(description,'')) <= ?) AS snippet
+                AND length(COALESCE(description,'')) <= ?) AS snippet,
+               (verdict='PASS' AND fit_score >= ?) AS batchable
         FROM jobs
         WHERE status='evaluated' AND filter_source IS NULL AND app_status IS NULL
           AND ((verdict='PASS' AND fit_score >= ?)
                OR (verdict='RECRUITER_ONLY' AND fit_score >= ?))
         """,
-        (ADZUNA_SNIPPET_MAX_CHARS, COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT),
+        (ADZUNA_SNIPPET_MAX_CHARS, BATCH_MIN_FIT,
+         COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT),
     ).fetchall()
     out = []
-    for url, first_seen, date_posted, snippet in rows:
+    for url, first_seen, date_posted, snippet, batchable in rows:
         eff, mode = recency_dt(date_posted, first_seen)
         # mode None = no usable date; first_seen already put it in view, so keep it
         # (same call the second judge makes).
         if mode is not None and eff.date() < cutoff:
             continue
-        out.append((url, first_seen or "", bool(snippet)))
+        out.append((url, first_seen or "", bool(snippet), bool(batchable)))
     return out
 
 
@@ -146,7 +169,9 @@ def _token():
     # timeout. If it already failed for THIS stored expiresAt, skip straight to the
     # graceful line instead of repeating it at all six of the day's slots.
     expiry = _file_expiry()
-    if load_state().get("doorbell", {}).get("nudge_failed_for_expiry") == expiry:
+    state = load_state()
+    doorbell = state.get("doorbell") if isinstance(state, dict) else None
+    if isinstance(doorbell, dict) and doorbell.get("nudge_failed_for_expiry") == expiry:
         return None
     claude = shutil.which("claude")
     if claude:
@@ -217,8 +242,8 @@ def main():
     conn = sqlite3.connect(f"file:{ROOT / 'jobs.db'}?mode=ro", uri=True)
     try:
         fresh = zone_rows(conn)
-        urls = [u for u, _, _ in fresh]
-        n_snippet = sum(1 for _, _, s in fresh if s)
+        urls = [u for u, _, _, _ in fresh]
+        n_snippet = sum(1 for _, _, s, _ in fresh if s)
         opinions = 0
         if urls:
             q = ",".join("?" * len(urls))
@@ -230,26 +255,41 @@ def main():
         conn.close()
 
     state = load_state()
+    if not isinstance(state, dict):     # a state file that is valid JSON but not an object
+        state = {}
     last_batch = state.get("last_batch_iso", "")
-    # PENDING drives the popup, not "newer than the last batch". A batch takes the TOP
+    # PENDING drives the popup, not "newer than the last batch": a batch takes the TOP
     # ~10 rows by freshness+fit, so the last-batch stamp is normally the newest row in
-    # the whole zone — a watermark test would mark every row the batch DIDN'T reach as
-    # "not new" forever, and the doorbell would go silent on any slot that added nothing
-    # while dozens of actionable rows still waited. `processed_urls` is what the batch
-    # actually consumed (the skill prunes it to current-zone membership when writing).
+    # the zone, and a watermark test would mark every row the batch DIDN'T reach as
+    # "not new" forever. `processed_urls` is what a batch actually consumed (the skill
+    # prunes it to current-zone membership when writing). Pending counts only BATCHABLE
+    # rows — the sub-bar rows a batch may never take would otherwise keep it permanently
+    # non-empty, pinning the estimate at BATCH_CAP and making "no popup" unreachable.
     processed = set(state.get("processed_urls") or [])
-    pending = [u for u in urls if u not in processed]
-    new_rows = [u for u, seen, _ in fresh if seen > last_batch] if last_batch else urls
+    pending = [u for u, _, _, batchable in fresh if batchable and u not in processed]
+    new_rows = [u for u, seen, _, _ in fresh if seen > last_batch] if last_batch else urls
     if not pending:
-        print("deepdive doorbell: every actionable row has been through a batch - no popup")
+        print("deepdive doorbell: no batchable row is waiting - no popup")
         return
 
-    cal = state.get("calibration", {})
+    cal = state.get("calibration") or {}
+    if not isinstance(cal, dict):
+        cal = {}
+
+    def _cal(key, default):
+        """Calibration constants are written by the skill, so a key can exist holding
+        JSON null — dict.get's default does NOT cover that, and float(None) raises."""
+        value = cal.get(key)
+        try:
+            return float(default if value is None else value)
+        except (TypeError, ValueError):
+            return float(default)
+
     n = min(len(pending), BATCH_CAP)
-    est_min = round(n * float(cal.get("minutes_per_row", DEFAULT_MIN_PER_ROW)))
-    est_ktok = round(n * float(cal.get("ktokens_per_row", DEFAULT_KTOK_PER_ROW)))
-    pct_per_row = cal.get("session_pct_per_row")   # measured across past batches
-    est_pct = f" ≈ 5h 窗口的 ~{round(n * float(pct_per_row))}%" if pct_per_row else ""
+    est_min = round(n * _cal("minutes_per_row", DEFAULT_MIN_PER_ROW))
+    est_ktok = round(n * _cal("ktokens_per_row", DEFAULT_KTOK_PER_ROW))
+    pct_per_row = _cal("session_pct_per_row", 0)   # measured across past batches
+    est_pct = f" ≈ 5h 窗口的 ~{round(n * pct_per_row)}%" if pct_per_row else ""
 
     quota = plan_usage()
     if quota:

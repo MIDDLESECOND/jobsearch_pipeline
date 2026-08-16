@@ -114,6 +114,18 @@ re-export hub):
   timestamp the client echoes back, filtered through the SAME `_visible_opinion` razor the
   card uses, and feeds a banner that is a button — the UI never reloads itself.
 
+- `notify_deepdive_batch.py` — the post-second-judge doorbell: a read-only helper
+  `run_second_judge.bat` runs once opinions land. It counts the actionable zone (splitting
+  full-text vs Adzuna-snippet rows), estimates a batch's wall time and plan-quota cost,
+  reads live plan utilization, and pops a Yes/No message box whose Yes opens a Claude Code
+  console carrying the batch trigger. It opens `jobs.db` READ-ONLY, decides nothing about
+  postings, and writes exactly one thing: the `doorbell` key of the gitignored
+  `.deepdive_state.json`. Its zone query MIRRORS `second_judge.pending_rows`' predicate
+  (that function owns it) — change one, change both. The rest of that state file
+  (`last_batch_iso`, `processed_urls`, `calibration`) is written by the local `deepdive`
+  skill under `.claude/skills/` — gitignored because it names private paths, which is why
+  the repo shows a consumer with no visible producer. Imports `core` and `states` only.
+
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach
 drafting, a funnel view's aggregation logic) gets its own module in the DAG — `chain.py` only

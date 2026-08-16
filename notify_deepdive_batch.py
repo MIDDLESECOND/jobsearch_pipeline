@@ -29,7 +29,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from core import ADZUNA_SNIPPET_MAX_CHARS, recency_dt
+from core import ADZUNA_SNIPPET_MAX_CHARS, recency_dt, run_log
 from states import COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT
 
 ROOT = Path(__file__).resolve().parent
@@ -95,6 +95,13 @@ def zone_rows(conn):
     and the size estimate. Conflating the two is what made `pending` undrainable
     (measured 2026-08-15: 5,983 of 9,669 zone rows can never enter a batch), and testing
     only the fit leg still overstated it 3x (492 flagged vs 162 truly reachable).
+
+    MIRRORS second_judge.pending_rows' zone predicate — that function owns it; this one
+    reproduces it for counting because the doorbell must not pull the judge's submit
+    window, chain dedup, or per-batch cap. Change one, change both: this pair has already
+    drifted twice (a missing filter_source clause here; a textual date_posted slice that
+    disagreed with recency_dt). The doorbell's own additions are the batchable flag and
+    the wider verdict set it keeps for context.
 
     Freshness runs through core.recency_dt — the ONE effective posted-at reading the
     report label, the triage sort, and second_judge's window all share (AGENTS.md).
@@ -367,7 +374,18 @@ def main():
              "run today's deepdive batch"], cwd=str(ROOT), env=env,
         )
         print("launched: Claude Code console with the batch trigger (auto mode)")
+    else:
+        print(f"popup dismissed (MessageBox rc={rc}) - no batch launched")
 
 
 if __name__ == "__main__":
-    main()
+    # Tee into the day's pipeline log exactly like the judge that precedes us. Under Task
+    # Scheduler this process's console goes nowhere, so without it every diagnostic — which
+    # branch ran, a failed quota read, a traceback — is unrecoverable after the fact (that
+    # gap already cost one 2026-08-15 investigation). --print is the interactive path and
+    # stays unlogged so a manual check does not pad the log.
+    if "--print" in sys.argv:
+        main()
+    else:
+        with run_log("deepdive-doorbell"):
+            main()

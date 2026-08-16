@@ -12,6 +12,9 @@ set JUDGE_RC=%errorlevel%
 rem Doorbell: now that opinions are in, pop the deepdive batch proposal (zone count +
 rem time/quota estimate). Read-only helper; its outcome never masks the judge exit code.
 rem PYTHONUTF8 guards the doorbell's Chinese popup text against the GBK console codepage.
+rem It tees into the same day log as the judge (core.run_log), so which branch it took -
+rem popup, no-batchable-row, quota read failure, traceback - is recoverable afterwards;
+rem under Task Scheduler the console output itself goes nowhere.
 set PYTHONUTF8=1
 ".venv\Scripts\python.exe" notify_deepdive_batch.py
 exit /b %JUDGE_RC%

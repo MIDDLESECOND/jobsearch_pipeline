@@ -173,6 +173,12 @@ def pending_rows(conn, backfill_days=None):
     # logic a NULL source makes the inner AND evaluate to NULL, and NOT NULL is NULL —
     # which WHERE treats as false, silently dropping a short-but-complete JD from the
     # zone. COALESCE makes the predicate mean what it says.
+    # THIS FUNCTION OWNS THE ACTIONABLE-ZONE PREDICATE (status/filter_source/app_status,
+    # the two verdict+fit bars, the snippet exclusion, the recency window).
+    # notify_deepdive_batch.zone_rows mirrors it for the doorbell's counts — change one,
+    # change both. It has already drifted twice (a missing filter_source clause; a
+    # textual date_posted slice instead of recency_dt), so treat any edit here as a
+    # two-file edit.
     rows = conn.execute(
         """SELECT * FROM jobs
            WHERE status='evaluated' AND filter_source IS NULL

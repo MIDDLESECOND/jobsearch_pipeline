@@ -137,7 +137,10 @@ re-export hub):
   arrivals watermark from `jobs.first_seen` rather than trusting the state file's
   `last_batch_iso`: that key's "newest processed first_seen" contract lives only as
   prose in the gitignored skill, and a batch once wrote a UTC wall clock into a column
-  that is local, which pinned the popup's "new since last batch" count at zero.
+  that is local, which pinned the popup's "new since last batch" count at zero. That
+  derived value is held to a high-water mark inside `doorbell`, because `processed_urls`
+  is pruned of decided rows — without the guard, deciding the newest row a batch read
+  re-reports everything fetched behind it as a fresh arrival (measured: 13 rows).
 
 **Growth rule**: `chain.py` is already the biggest module (~29% of production code) and is
 where every decision-adjacent feature has landed. A new *concern-level* feature (e.g. outreach

@@ -284,10 +284,25 @@ def test_arrivals_watermark_comes_from_the_column_it_is_compared_against(conn):
     new = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
     assert nb.arrivals_watermark(conn, set()) == ""          # nothing batched yet
     assert nb.arrivals_watermark(conn, {old["job_url"]}) == old["first_seen"]
-    # a consumed row that has since been DECIDED still sets the mark
-    conn.execute("UPDATE jobs SET app_status='passed' WHERE job_url=?", (new["job_url"],))
-    conn.commit()
-    assert nb.arrivals_watermark(conn, {old["job_url"], new["job_url"]}) == new["first_seen"]
+    assert nb.arrivals_watermark(
+        conn, {old["job_url"], new["job_url"]}) == new["first_seen"]
+
+
+def test_arrivals_mark_cannot_fall_back_when_processed_urls_is_pruned(conn):
+    """A watermark that moves backwards is not one. The skill prunes decided rows out of
+    processed_urls, so marking the newest batched row applied drops it from the set and
+    the raw max falls to an older row — re-reporting rows that batch already read as
+    fresh arrivals. Deciding rows right after a batch IS the workflow, so this is the
+    common path, not an edge case."""
+    old = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=3))
+    new = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    batched = {old["job_url"], new["job_url"]}
+    mark = nb.arrivals_mark(conn, batched)
+    assert mark == new["first_seen"]
+
+    pruned = {old["job_url"]}                    # `new` was decided, so the skill dropped it
+    assert nb.arrivals_watermark(conn, pruned) == old["first_seen"]   # raw value regresses
+    assert nb.arrivals_mark(conn, pruned, remembered=mark) == mark    # the mark does not
 
 
 def test_arrivals_watermark_chunks_a_long_processed_list(conn):

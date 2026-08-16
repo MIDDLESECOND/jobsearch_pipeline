@@ -229,9 +229,20 @@ def arrivals_watermark(conn, processed, chunk=500):
     which is why 其中新进 sat at 0 all day. Reading the same column the comparison uses
     cannot drift from it.
 
-    Decided rows count: they left the zone but a batch really did consume them, so this
-    queries `jobs` rather than filtering the zone snapshot. Chunked because
-    `processed_urls` is unbounded in principle and SQLite caps host parameters.
+    This value alone is NOT a watermark: the skill prunes `processed_urls` down to rows
+    still in the actionable zone, so deciding the newest row a batch read drops it out of
+    the set and this max falls back to an older row (measured: the live file holds 68
+    entries, 0 of them decided — pruning really runs). Deciding rows right after a batch
+    is the normal cycle, so `arrivals_mark` wraps this in the monotonic guard; call that,
+    not this, for anything user-facing.
+
+    Ordering is lexicographic, which is chronological only while `first_seen` keeps one
+    format. It very nearly does — 91,214 of 91,215 live rows are `...T..:..:..` and one
+    is space-separated, which sorts before every same-day `T` row and so can never win
+    this max. One row is noise; a producer that starts emitting them would not be.
+
+    Chunked because `processed_urls` is unbounded in principle and SQLite caps host
+    parameters per statement.
     """
     best = ""
     urls = list(processed)
@@ -243,6 +254,22 @@ def arrivals_watermark(conn, processed, chunk=500):
         if got and got > best:
             best = got
     return best
+
+
+def arrivals_mark(conn, processed, remembered=""):
+    """The popup's arrivals watermark, monotonic by construction.
+
+    A watermark that can move backwards is not one. The DB-derived value alone does move
+    backwards, because `processed_urls` shrinks: the skill prunes decided rows out of it,
+    so marking the newest batched row applied would re-expose every row fetched between
+    the previous newest and it — rows that batch had already read — as fresh arrivals.
+    Deciding rows right after a batch IS the workflow, so that is the common path.
+
+    The fix is to remember the high-water value in the `doorbell` key, which this module
+    owns outright (the skill owns `last_batch_iso`/`processed_urls`/`calibration` and is
+    never touched here). Only ever rises, so pruning cannot claw it back.
+    """
+    return max(arrivals_watermark(conn, processed), remembered or "")
 
 
 def pending_split(fresh, processed, last_batch=""):
@@ -520,6 +547,8 @@ def main():
     if not isinstance(state, dict):     # a state file that is valid JSON but not an object
         state = {}
     processed = set(state.get("processed_urls") or [])
+    door = state.get("doorbell")
+    door = door if isinstance(door, dict) else {}
 
     conn = sqlite3.connect(f"file:{ROOT / 'jobs.db'}?mode=ro", uri=True)
     try:
@@ -533,7 +562,7 @@ def main():
                 f"SELECT COUNT(DISTINCT job_url) FROM second_opinions"
                 f" WHERE status='done' AND job_url IN ({q})", urls,
             ).fetchone()[0]
-        last_batch = arrivals_watermark(conn, processed)
+        last_batch = arrivals_mark(conn, processed, door.get("arrivals_mark"))
     finally:
         conn.close()
 
@@ -627,8 +656,7 @@ def main():
 
     # A batch the guard withheld produced no popup at all, so the news has to ride the
     # NEXT one or the user never learns a day was skipped.
-    door = state.get("doorbell")
-    skipped_at = door.get("guard_skipped_at") if isinstance(door, dict) else None
+    skipped_at = door.get("guard_skipped_at")
     skip_note = ""
     if skipped_at:
         skip_note = (f"\n（上次 {_local(skipped_at)} 因窗口守卫跳过，"
@@ -649,6 +677,12 @@ def main():
     print(body)
     if print_only:
         return
+
+    # Persist the high-water value before the box goes up, not after: it is a cache of a
+    # computed reading, not news awaiting acknowledgement, so a self-dismissed popup must
+    # still leave the mark raised. --print returned above and writes nothing.
+    if last_batch and last_batch != door.get("arrivals_mark"):
+        _save_doorbell_state({"arrivals_mark": last_batch})
 
     MB_YESNO, MB_TOPMOST, MB_SETFOREGROUND, MB_ICONQUESTION = 0x4, 0x40000, 0x10000, 0x20
     IDYES, IDTIMEOUT = 6, 32000

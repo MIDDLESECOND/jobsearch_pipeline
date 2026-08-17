@@ -167,7 +167,8 @@ def test_launch_env_does_not_mutate_the_caller_environment():
 
 # ----------------------------------------------------------------- launch wiring
 
-def _spawns(monkeypatch, which="C:\\bin\\claude.exe", token="live-token"):
+def _spawns(monkeypatch, which: str | None = "C:\\bin\\claude.exe",
+            token: str | None = "live-token"):
     """Capture what _launch_batch hands subprocess.Popen, spawning nothing."""
     calls = []
     monkeypatch.setattr(nb.shutil, "which", lambda name: which)
@@ -183,7 +184,7 @@ def test_launch_batch_hands_popen_the_argv_and_the_stripped_env(monkeypatch):
     every other test in this file still passes."""
     calls = _spawns(monkeypatch)
     argv = nb._launch_batch()
-    assert len(calls) == 1 and calls[0][0] == argv
+    assert argv is not None and len(calls) == 1 and calls[0][0] == argv
     assert argv[argv.index(r"C:\bin\claude.exe") + 1] == nb.BATCH_TRIGGER
     env = calls[0][1]["env"]
     assert env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] == "1"

@@ -1,6 +1,10 @@
 {
   "typeCheckingMode": "basic",
   "pythonVersion": "3.12",
+  // linkedin/ is in-repo but gitignored (post working folders), so CI never checks it
+  // out; scanning it locally would fail the gate on files CI cannot see. An explicit
+  // exclude replaces pyright's defaults, so those are re-listed.
+  "exclude": ["**/node_modules", "**/__pycache__", "**/.*", "linkedin"],
   "reportMissingImports": "warning",
   "reportOptionalSubscript": "error",
   "reportArgumentType": "error",

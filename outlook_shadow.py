@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape, unescape
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -241,7 +242,10 @@ def acquire_access_token(settings, *, interactive=False, app_factory=None):
             raise OutlookShadowError(
                 "no reusable Outlook login is available; run email-shadow once with --login"
             )
-        kwargs = {"parent_window_handle": app.CONSOLE_WINDOW_HANDLE}
+        # dict[str, Any], not the inferred value union: **kwargs resolves against every
+        # keyword of acquire_token_interactive, one spurious error per parameter (the
+        # same widening compare_models' anthropic kwargs needed).
+        kwargs: dict[str, Any] = {"parent_window_handle": app.CONSOLE_WINDOW_HANDLE}
         if login_hint:
             kwargs["login_hint"] = login_hint
         result = app.acquire_token_interactive(SCOPES, **kwargs)

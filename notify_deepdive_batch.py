@@ -256,7 +256,7 @@ def arrivals_watermark(conn, processed, chunk=500):
     return best
 
 
-def arrivals_mark(conn, processed, remembered=""):
+def arrivals_mark(conn, processed, remembered: object = ""):
     """The popup's arrivals watermark, monotonic by construction.
 
     A watermark that can move backwards is not one. The DB-derived value alone does move

@@ -269,15 +269,32 @@ def arrivals_mark(conn, processed, remembered=""):
     owns outright (the skill owns `last_batch_iso`/`processed_urls`/`calibration` and is
     never touched here). Only ever rises, so pruning cannot claw it back.
 
-    `remembered` is whatever the state file holds, so it is typed by nothing: max() over
-    a str and an int raises, and this runs before any popup, so it would take the whole
-    doorbell down under Task Scheduler. Same rule the rest of this module already lives
-    by (_cal on a null constant, _save_doorbell_state on a non-dict `doorbell`,
-    session_pct on a non-numeric percent) — a malformed state file degrades, never kills.
+    `remembered` is whatever the state file holds, so it is typed by nothing and bounded
+    by nothing. Both halves bite, and the monotonic rule makes the second one permanent:
+
+    * Wrong TYPE kills. max() over a str and an int raises, and this runs before any
+      popup, so under Task Scheduler that is a doorbell that never rings. Same rule the
+      rest of this module already lives by (_cal on a null constant, _save_doorbell_state
+      on a non-dict `doorbell`, session_pct on a non-numeric percent): a malformed state
+      file degrades, never kills.
+    * Wrong VALUE silences. A type check passes anything that sorts high — measured
+      against the live table: 'not-a-date', '9999-12-31T00:00:00', and
+      '2026-08-16T23:12:15' (the UTC stamp that started all of this) each pin the
+      arrivals count at 0, because letters and impossible dates outrank every real
+      timestamp. Before this mark existed such a value was transient, replaced by the
+      next batch; max() would absorb it forever.
+
+    So the mark is CLAMPED to the newest `first_seen` in the table. It is by definition
+    the first_seen of a row some batch processed, so it can never legitimately exceed
+    that — and the bound is what makes a bad stored value self-correcting instead of
+    sticky. It also catches the original bug: a UTC stamp lands past the newest local
+    row and gets clamped straight back to it.
     """
+    derived = arrivals_watermark(conn, processed)
     if not isinstance(remembered, str):
         remembered = ""
-    return max(arrivals_watermark(conn, processed), remembered)
+    ceiling = conn.execute("SELECT MAX(first_seen) FROM jobs").fetchone()[0] or ""
+    return min(max(derived, remembered), ceiling) if ceiling else derived
 
 
 def pending_split(fresh, processed, last_batch=""):

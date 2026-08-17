@@ -315,6 +315,20 @@ def test_arrivals_mark_degrades_on_a_malformed_remembered_value(conn):
         assert nb.arrivals_mark(conn, {row["job_url"]}, junk) == row["first_seen"]
 
 
+def test_arrivals_mark_is_clamped_to_the_newest_row_in_the_table(conn):
+    """A type check passes any high-sorting string, and monotonicity would then make it
+    permanent — pinning 新进 at 0 with no way back but hand-editing the state file. The
+    mark is some processed row's first_seen, so the table's newest row bounds it; that
+    bound also retro-catches the UTC stamp this whole thread started from."""
+    row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    newest = conn.execute("SELECT MAX(first_seen) FROM jobs").fetchone()[0]
+    for poison in ("not-a-date", "9999-12-31T00:00:00", "2099-01-01T00:00:00"):
+        assert nb.arrivals_mark(conn, {row["job_url"]}, poison) == newest
+    # a legitimate remembered value below the ceiling still wins over a pruned derivation
+    older = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=3))
+    assert nb.arrivals_mark(conn, {older["job_url"]}, row["first_seen"]) == row["first_seen"]
+
+
 def test_arrivals_watermark_chunks_a_long_processed_list(conn):
     """processed_urls is unbounded in principle; SQLite caps host parameters per query."""
     row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())

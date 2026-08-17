@@ -132,6 +132,9 @@ re-export hub):
   silent when nothing fits — a console that opens is never one the skill's between-rows
   check would abort on row 1. Both the quota and the guard threshold are mirrored in
   SKILL.md; a quota or ceiling changed on one side only silently misprices every popup.
+  A batch the guard truncates MUST say so at the top of its report: uncapping was bought
+  on "zero cold applies" being a statement about the whole day's full-text inflow, and a
+  partial run that reads as full coverage sends the user back to triaging by hand.
   An unreadable quota or an uncalibrated cost fails OPEN to the unguarded counts: a
   cosmetic endpoint hiccup must never suppress the doorbell. It also derives the
   arrivals watermark from `jobs.first_seen` rather than trusting the state file's

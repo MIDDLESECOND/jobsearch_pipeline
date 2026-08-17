@@ -32,6 +32,10 @@ profile.md
 evaluation_guide.md
 filters.yaml
 
+# LinkedIn post materials (final copy, numbers-of-record, charts, comment replies —
+# name real people and private measurements; moved here from Downloads 2026-08-16)
+linkedin/
+
 # ---- Generated / runtime data (third-party scraped content, run output) ----
 jobs.db
 *.db

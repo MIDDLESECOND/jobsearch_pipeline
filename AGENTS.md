@@ -564,7 +564,10 @@ Windows Task Scheduler.
   *evaluated* (gates, scoring, verdicts, bucket routing, or the `jobs` schema) gets a dated entry on
   top. Day-to-day `config.yaml` search-term edits do not.
 - **Personal files are gitignored; `*.example.*` are the committed templates** (`config.yaml`,
-  `profile.md`, `evaluation_guide.md`, `filters.yaml`, `jobs.db`, `reports/`, `logs/`). When changing
+  `profile.md`, `evaluation_guide.md`, `filters.yaml`, `jobs.db`, `reports/`, `logs/`, and
+  `linkedin/` — the LinkedIn post working folders: final copy, numbers-of-record, charts; they
+  live in this repo because the posts are about this pipeline, and stay ignored because they
+  name real people and private measurements). When changing
   the *shape* of config or filters, update the matching `.example` file.
 - **External design inspiration is provenance, not a dependency.** Record the official repository,
   exact reviewed revision, observed license, adopted and rejected ideas, and any copied or adapted

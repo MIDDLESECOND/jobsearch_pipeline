@@ -161,7 +161,10 @@ def pending_rows(conn, backfill_days=None):
     are read everywhere else; a row with no usable date stays eligible (first_seen is
     already inside the delta window)."""
     delta = DELTA_DAYS if backfill_days is None else int(backfill_days)
-    seen_floor = (date.today() - timedelta(days=delta)).isoformat()
+    # One clock read: across a midnight slot a second date.today() at the cutoff below
+    # would let the SQL floor and the Python freshness cut disagree by a day.
+    today = date.today()
+    seen_floor = (today - timedelta(days=delta)).isoformat()
     # outcome_status needs no clause: chain._recompute_outcome clears it whenever a
     # chain is not applied, so app_status IS NULL already implies it.
     # Adzuna snippet rows are excluded (2026-08-15): both judges read the same stored
@@ -199,7 +202,7 @@ def pending_rows(conn, backfill_days=None):
     opinion_roots = {row[0] for row in conn.execute(
         "SELECT COALESCE(j.repost_of, s.job_url) FROM second_opinions s "
         "LEFT JOIN jobs j ON j.job_url = s.job_url WHERE s.status != 'retry'")}
-    cutoff = date.today() - timedelta(days=FRESH_DAYS)
+    cutoff = today - timedelta(days=FRESH_DAYS)
     fresh, taken = [], set()
     for r in rows:
         root = r["repost_of"] or r["job_url"]

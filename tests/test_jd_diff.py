@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -413,3 +414,15 @@ def test_read_joins_caller_snapshot_without_committing_it(conn):
     assert conn.in_transaction
     assert any(item["title"] == "uncommitted title" for item in bundle["versions"])
     conn.rollback()
+
+
+def test_time_key_reads_naive_as_local_when_ordering_against_aware_values():
+    from jd_diff import _time_key
+
+    chicago_winter = timezone(timedelta(hours=-6))
+    # Naive 10:00 on a -06:00 machine is 16:00 UTC — after the aware 15:30Z value
+    # (the Z-suffixed shape fetch-side rows store). Read naive-as-UTC instead, the
+    # order inverts and a diff would anchor to the wrong version.
+    assert _time_key(
+        "2026-01-15T10:00:00", naive_timezone=chicago_winter,
+    ) > _time_key("2026-01-15T15:30:00Z")

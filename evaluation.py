@@ -683,6 +683,38 @@ def _evaluate_one(row, provider, model, system_prompt, client, api_key):
     return row["job_url"], result, tin, tout, cr, cw
 
 
+def _write_result(conn, job_url, result):
+    """Persist one landed eval onto its row and commit: None (a failed call) marks the row
+    'error' for the next run's requeue; a result dict is re-normalized and written whole."""
+    if result is None:
+        conn.execute("UPDATE jobs SET status=? WHERE job_url=?", (STATUS_ERROR, job_url))
+    else:
+        normalize_result(result)
+        verdict = result["verdict"]
+        failed_gate = result.get("failed_gate")
+        if failed_gate and failed_gate not in GATE_NAMES:
+            failed_gate = GATE_OTHER
+        # eval_issues is denormalized onto the row so the review queue can find a
+        # self-contradicting verdict with a column test instead of parsing every
+        # stored blob; this UPDATE is its only writer.
+        issues = ",".join(result.get("eval_issues") or []) or None
+        conn.execute(
+            """UPDATE jobs SET status=?, verdict=?, failed_gate=?,
+               fit_score=?, bucket=?, eval_json=?, eval_issues=? WHERE job_url=?""",
+            (
+                STATUS_EVALUATED,
+                verdict,
+                failed_gate,
+                result.get("fit_score"),
+                result.get("bucket"),
+                json.dumps(result, ensure_ascii=False),
+                issues,
+                job_url,
+            ),
+        )
+    conn.commit()
+
+
 def evaluate_new_jobs(cfg, conn):
     provider = cfg["settings"].get("provider", "anthropic")
     model = cfg["settings"]["model"]
@@ -731,35 +763,6 @@ def evaluate_new_jobs(cfg, conn):
         else:
             todo.append(r)
 
-    def _write_result(job_url, result):
-        if result is None:
-            conn.execute("UPDATE jobs SET status=? WHERE job_url=?", (STATUS_ERROR, job_url))
-        else:
-            normalize_result(result)
-            verdict = result["verdict"]
-            failed_gate = result.get("failed_gate")
-            if failed_gate and failed_gate not in GATE_NAMES:
-                failed_gate = GATE_OTHER
-            # eval_issues is denormalized onto the row so the review queue can find a
-            # self-contradicting verdict with a column test instead of parsing every
-            # stored blob; this UPDATE is its only writer.
-            issues = ",".join(result.get("eval_issues") or []) or None
-            conn.execute(
-                """UPDATE jobs SET status=?, verdict=?, failed_gate=?,
-                   fit_score=?, bucket=?, eval_json=?, eval_issues=? WHERE job_url=?""",
-                (
-                    STATUS_EVALUATED,
-                    verdict,
-                    failed_gate,
-                    result.get("fit_score"),
-                    result.get("bucket"),
-                    json.dumps(result, ensure_ascii=False),
-                    issues,
-                    job_url,
-                ),
-            )
-        conn.commit()
-
     # Each call is blocking network I/O (the GIL is released while waiting on the
     # provider), so a bounded pool overlaps them. Workers are pure — every DB write
     # happens here on the main thread as each future lands (as_completed), so the sqlite
@@ -799,7 +802,7 @@ def evaluate_new_jobs(cfg, conn):
                     arb_split += bool(arb.get("split"))
                 for attempt in (1, 2):
                     try:
-                        _write_result(job_url, result)
+                        _write_result(conn, job_url, result)
                         break
                     except Exception as e:
                         # A write failure (sqlite 'database is locked' from a concurrent

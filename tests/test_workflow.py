@@ -411,6 +411,19 @@ def test_followup_queue_advances_cadence_and_stops_after_two(conn):
     assert row["next_followup_date"] == "2026-07-08"
 
 
+def test_followup_landing_exactly_on_today_is_due(conn):
+    """The cadence date is due ON arrival (`<=` today, not `<` — a mutation round
+    survived because every fixture was weeks overdue): applied 2026-07-29 plus the
+    7-day cadence lands on the query's `today` and must surface now, not tomorrow."""
+    edge = make_job(conn, job_url="edge", app_status="applied", status_date="2026-07-29")
+    make_job(conn, job_url="tomorrow", app_status="applied", status_date="2026-07-30")
+    page = workflow.query_action_page(
+        conn, "followups_due", page=1, page_size=20, today=date(2026, 8, 5)
+    )
+    assert [r["job_url"] for r in page["rows"]] == [edge["job_url"]]
+    assert page["rows"][0]["next_followup_date"] == "2026-08-05"
+
+
 def test_each_action_section_has_a_paged_view(conn):
     make_job(conn, job_url="fresh-a", fit_score=17, first_seen="2026-08-05T09:00:00")
     make_job(conn, job_url="fresh-b", fit_score=16, first_seen="2026-08-05T08:00:00")
@@ -419,6 +432,18 @@ def test_each_action_section_has_a_paged_view(conn):
     )
     assert page["total"] == 2 and page["pages"] == 2
     assert page["title"] == "Fresh strong matches"
+
+
+def test_fresh_strong_bar_sits_at_16(conn):
+    """Pins the queue's one number — the advertised "score 16+" bar (a mutation round
+    dropped it to 15 with no test noticing). This asserts the current value only; the
+    queue's semantics and sort order are settled and stay as they are."""
+    make_job(conn, job_url="at-bar", fit_score=16, first_seen="2026-08-05T09:00:00")
+    make_job(conn, job_url="below-bar", fit_score=15, first_seen="2026-08-05T08:00:00")
+    page = workflow.query_action_page(
+        conn, "fresh_strong", page=1, page_size=10, today=date(2026, 8, 5)
+    )
+    assert [r["job_url"] for r in page["rows"]] == ["at-bar"]
 
 
 def test_interview_prep_queue_is_recent_chain_scoped_and_terminal_outcomes_leave(conn):

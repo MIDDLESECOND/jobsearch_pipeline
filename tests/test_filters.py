@@ -61,6 +61,20 @@ def test_rule_hit_company_scope_does_not_leak():
     assert filters._rule_hit(text_rule, "we integrate shellco", "Acme") == "shellco"
 
 
+def test_salary_floor_is_inclusive_a_posting_at_the_floor_survives(conn):
+    """The rule is 'at/above the floor or not mentioned': a salary EQUAL to the floor
+    is not below it (`<`, not `<=` — a mutation round survived because nothing tested
+    apply_salary_filter directly; only two intake tests reached it in passing)."""
+    from conftest import make_job
+    make_job(conn, job_url="at-floor", status="new", verdict=None, salary_max=80000)
+    make_job(conn, job_url="below-floor", status="new", verdict=None, salary_max=79999)
+    cfg = {"searches": [{"name": "s1", "min_salary": 80000}]}
+    filters.apply_salary_filter(cfg, conn)
+    statuses = {u: s for u, s in conn.execute("SELECT job_url, status FROM jobs")}
+    assert statuses["at-floor"] == "new"
+    assert statuses["below-floor"] == "salary_filtered"
+
+
 def test_apply_hard_filters_company_rule_skips_shell_keeps_employer(conn, monkeypatch):
     """A company_any rule fails the aggregator shell pre-eval (the eval-slot saving it
     exists for) while the real employer's same-title posting stays 'new' for the eval."""

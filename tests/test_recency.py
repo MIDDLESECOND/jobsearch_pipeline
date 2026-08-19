@@ -86,6 +86,17 @@ def test_above_line_fresh_beats_above_line_stronger_but_older():
     assert ordered == [fresh_ok, old_strong]
 
 
+def test_fit_exactly_at_line_is_above_the_line():
+    # The line is inclusive — "at/above" — so fit == APPLY_LINE rides the freshness band,
+    # matching the "(acceptable)" label score_band gives the same score. A `>=`-to-`>`
+    # decay would demote every at-line row to the fit-only band (below ALL scored-above
+    # rows); the neighboring tests straddle the line by a full point and can't see that.
+    fresh_at_line = _row(report.APPLY_LINE, "2026-07-04T08:00:00", "2026-07-04T08:10:00")
+    old_strong = _row(17, "2026-07-04T02:00:00", "2026-07-04T02:10:00")
+    ordered = sorted([old_strong, fresh_at_line], key=report.recency_sort_key)
+    assert ordered == [fresh_at_line, old_strong]
+
+
 def test_below_line_never_outranks_above_line():
     fresh_weak = _row(report.APPLY_LINE - 1, "2026-07-04T08:59:00", "2026-07-04T08:59:00")
     old_ok = _row(report.APPLY_LINE, "2026-06-01T00:00:00", "2026-06-01T00:00:00")

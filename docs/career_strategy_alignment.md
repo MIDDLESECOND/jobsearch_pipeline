@@ -1,8 +1,8 @@
 # Career Strategy Alignment
 
 - Decision authority: `D-2026-08-03-CAREER-REALIGNMENT`
-- Canonical decision: `D:\Github\learning_path\decisions\D-2026-08-03_CAREER_REALIGNMENT.md`
-- Canonical strategy: `D:\Github\learning_path\CAREER_STRATEGY.md`
+- Canonical decision: `../learning_path/decisions/D-2026-08-03_CAREER_REALIGNMENT.md`
+- Canonical strategy: `../learning_path/CAREER_STRATEGY.md`
 - Downstream scope: job-posting evaluation semantics only; this project does not redefine long-term career strategy.
 - Effective date: 2026-08-03
 

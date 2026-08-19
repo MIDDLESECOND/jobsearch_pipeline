@@ -620,9 +620,9 @@ Read `CLAUDE.md` for the repository's existing workflow and evidence rules.
 
 For career-related claims, also read:
 
-- `D:\Github\learning_path\governance\CROSS_PROJECT_RULES.md`
-- `D:\Github\learning_path\assumptions\AI_CAREER_CLAIM_LEDGER.md`
-- `D:\Github\learning_path\decisions\D-2026-08-03_CAREER_REALIGNMENT.md`
+- `../learning_path/governance/CROSS_PROJECT_RULES.md`
+- `../learning_path/assumptions/AI_CAREER_CLAIM_LEDGER.md`
+- `../learning_path/decisions/D-2026-08-03_CAREER_REALIGNMENT.md`
 
 If the canonical files are unavailable, report the missing access instead of reconstructing them
 from memory.

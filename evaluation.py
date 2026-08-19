@@ -268,6 +268,35 @@ def normalize_result(result):
     if isinstance(arb, dict) and arb.get("split"):
         _issue("arbitration-split")
 
+    # fit_score is a SORT KEY (the >=13 cold-apply / >=15 recruiter-route bars, the
+    # second judge's zone query, every fit-ordered view), not a routing gate — so
+    # unlike the depth cap a bad value never touches the verdict: it is nulled and
+    # flagged for review. Unvalidated, both failure shapes are silent at the DB
+    # boundary: sqlite3 binds float NaN as NULL, so the row vanishes from every
+    # fit-line query; a string is stored as TEXT, which SQLite orders ABOVE every
+    # integer, so 'abc' >= 15 is TRUE and garbage crosses the action bars straight
+    # into the paid second-judge zone. Same finite-number partition as the depth
+    # cap, plus the output spec's declared 0-18 domain. None/missing on a scored
+    # verdict is flagged too — the spec sets fit whenever gates pass, a scored row
+    # with NULL fit is the same invisibility class, and deriving the flag from the
+    # stored None is what keeps it alive through _write_result's re-normalization
+    # (the rebuilt-issues rule above). GATE_FAIL's deliberate None (set in the
+    # verdict branch) never reaches this check.
+    if verdict in (VERDICT_PASS, VERDICT_RECRUITER_ONLY):
+        f = result.get("fit_score")
+        if (isinstance(f, (int, float)) and not isinstance(f, bool)
+                and math.isfinite(f) and 0 <= f <= 18):
+            # The spec says integer but the model occasionally emits 15.5. Kept,
+            # not flagged: needs_arbitration/_fit_key already read any finite
+            # in-range float as a usable fit, so the consistent treatment is
+            # coercing to the declared integer domain rather than discarding a
+            # real score. int() truncates toward zero — floor on this
+            # non-negative range — so a fraction never rounds UP across a bar.
+            result["fit_score"] = int(f)
+        else:
+            result["fit_score"] = None
+            _issue("fit-score-invalid")
+
     if any(v is None for v in norm_gr.values()):
         _issue("gate-results-incomplete")
     explicit_fails = {g for g, v in norm_gr.items() if v == "FAIL"}
@@ -559,8 +588,10 @@ ARBITRATION_EXTRA_DRAWS = 2
 
 def needs_arbitration(result):
     """Trigger predicate over a NORMALIZED result: scored verdict, finite fit
-    inside the band. Same bool/NaN discipline as the depth cap — a malformed fit
-    must not arbitrate (it routed fail-closed already)."""
+    inside the band. Normalization nulls a malformed fit (fit-score-invalid), and
+    a None here must not arbitrate — the row is already flagged for human review,
+    so extra draws would be spent on a card someone has to look at anyway. The
+    bool/NaN guard stays as second defense for an un-normalized caller."""
     if result.get("verdict") not in (VERDICT_PASS, VERDICT_RECRUITER_ONLY):
         return False
     f = result.get("fit_score")
@@ -584,11 +615,12 @@ def arbitrate(draws):
     winners = [d for d in draws if d["verdict"] == verdict]
 
     def _fit_key(d):
-        # Only draws[0]'s fit was type-checked (by needs_arbitration); an extra
-        # draw's is whatever the model emitted. Sort unusable fits last on a
-        # SEPARATE key component so the comparison never mixes types — a bare
-        # (is_none, fit) key raises TypeError on str-vs-int and would discard all
-        # three already-paid draws by crashing the worker.
+        # Draws arrive normalized, so fit is int-or-None here (the 0-18 validation)
+        # — but None is still live on fit-score-invalid draws, and the guard also
+        # keeps an un-normalized caller from crashing the vote. Sort unusable fits
+        # last on a SEPARATE key component so the comparison never mixes types — a
+        # bare (is_none, fit) key raises TypeError on str-vs-int and would discard
+        # all three already-paid draws by crashing the worker.
         f = d.get("fit_score")
         ok = (isinstance(f, (int, float)) and not isinstance(f, bool)
               and math.isfinite(f))

@@ -369,6 +369,104 @@ def test_flags_left_alone_when_absent_or_malformed():
                  flags="not-a-list")["flags"] == "not-a-list"
 
 
+# ----- fit_score: the sort key must reach the DB as an integer 0-18 or NULL -----
+# fit is a SORT KEY, not a routing gate, so validation nulls-and-flags and never
+# touches the verdict. Unvalidated, both failure shapes are silent at the sqlite3
+# boundary: float NaN binds as NULL (the row vanishes from every fit-line query),
+# and a string stores as TEXT, which SQLite orders above every integer — so
+# 'abc' >= 15 is TRUE and garbage crosses the action bars into the paid batch.
+
+def test_fit_nan_nulled_and_flagged_without_touching_verdict():
+    r = _norm(verdict="PASS", fit_score=float("nan"), score_breakdown=_bd(3))
+    assert r["verdict"] == "PASS"          # review, never re-route
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_string_nulled_and_flagged():
+    r = _norm(verdict="PASS", fit_score="abc", score_breakdown=_bd(3))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_out_of_range_nulled_and_flagged():
+    # Finite and numeric but outside the spec's declared 0-18 domain: 999 would
+    # out-sort every real score and cross every bar, -5 would just sink — neither
+    # is a value any consumer can read as a fit.
+    for bad in (999, -5):
+        r = _norm(verdict="RECRUITER_ONLY", fit_score=bad, score_breakdown=_bd(2))
+        assert r["verdict"] == "RECRUITER_ONLY"
+        assert r["fit_score"] is None
+        assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_bool_true_is_not_a_valid_score():
+    # isinstance(True, int) is True in Python — same explicit bool rejection as
+    # the depth cap.
+    r = _norm(verdict="PASS", fit_score=True, score_breakdown=_bd(3))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_numeric_string_is_rejected_not_coerced():
+    # Deliberate, and the opposite of the leadership cap's value-based reading: that
+    # cap normalizes "true"/1/"yes" because it reads a small CLOSED vocabulary, while
+    # fit's near sibling is the depth cap, which takes numbers only. Coercing "15"
+    # would open a parsing surface with no bottom ("15/18", "fifteen", "15 of 18"),
+    # and a quoted number is exactly the TEXT storage class that made an unvalidated
+    # fit dangerous. Nulling costs nothing recoverable — eval_json keeps the raw
+    # value and the flag puts a human on the row.
+    r = _norm(verdict="PASS", fit_score="15", score_breakdown=_bd(3))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_fraction_truncates_not_flagged():
+    # needs_arbitration/_fit_key already read any finite in-range float as a
+    # usable fit, so 15.5 is coerced to the declared integer domain, not
+    # discarded. int() is floor on this non-negative range: a fraction never
+    # rounds UP across an action bar.
+    r = _norm(verdict="PASS", fit_score=15.5, score_breakdown=_bd(3))
+    assert r["fit_score"] == 15
+    assert "fit-score-invalid" not in r["eval_issues"]
+
+
+def test_fit_missing_on_scored_verdict_flagged():
+    # The output spec sets fit whenever gates pass; a scored row with NULL fit is
+    # the same invisibility class as NaN. Flagging the stored None is also what
+    # keeps the issue alive through _write_result's re-normalization, which
+    # rebuilds eval_issues from scratch.
+    r = _norm(verdict="PASS", score_breakdown=_bd(3))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
+def test_fit_flag_idempotent_on_renormalize():
+    # First pass nulls the garbage; the second pass must re-derive the flag from
+    # the stored None, not stack a duplicate.
+    r = _norm(verdict="PASS", fit_score="abc", score_breakdown=_bd(3))
+    evaluation.normalize_result(r)
+    assert r["eval_issues"].count("fit-score-invalid") == 1
+
+
+def test_fit_boundary_integers_untouched():
+    # The whole legal domain — historical replays (backtest_v2) must read exactly
+    # as before.
+    for edge in (0, 18):
+        r = _norm(verdict="PASS", fit_score=edge, score_breakdown=_bd(3))
+        assert r["fit_score"] == edge
+        assert "fit-score-invalid" not in r["eval_issues"]
+
+
+def test_gate_fail_null_fit_not_flagged():
+    # GATE_FAIL nulls fit BY DESIGN (no score on a rejected role); only scored
+    # verdicts are held to the 0-18 contract.
+    r = _norm(verdict="GATE_FAIL", failed_gate="years_floor",
+              gate_results=_gr(years_floor="FAIL"))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" not in r["eval_issues"]
+
+
 # ----- deepseek_request_body: one definition of the production request shape -----
 # Four validation probes each hand-copied this dict and every copy silently became a
 # different experiment when production moved (2026-08-07: a probe measured the wrong

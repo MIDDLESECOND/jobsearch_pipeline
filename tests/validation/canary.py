@@ -63,6 +63,9 @@ from states import VERDICTS
 from _common import RESULTS_DIR
 
 SET_PATH = Path(__file__).with_name("canary_set.local.json")
+# Mirrored by health.CANARY_HISTORY_PATH (the staleness sentinel reads this file to tell
+# whether the canary schedule is alive) — change one, change both, or the sentinel
+# permanently reports "canary: no run history on record".
 HISTORY_PATH = RESULTS_DIR / "canary_history.jsonl"
 TIMEOUT = 300
 

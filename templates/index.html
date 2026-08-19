@@ -2689,9 +2689,20 @@ function renderHealth() {
 
   const intro = document.createElement("div");
   intro.className = "funnel-intro";
+  // Silence sentinel (health.staleness_readings): every reading renders, stale ones loud.
+  // Facts only — a stale reading is something to investigate, never an automatic action.
+  const staleHours = h => h >= 48 ? `${Math.floor(h / 24)}d` : `${Math.round(h)}h`;
+  const staleBits = ((data.staleness || {}).readings || []).map(r => {
+    const label = ({pipeline_run: "pipeline run", canary: "canary",
+                    second_judge: "second judge"})[r.signal] || r.signal;
+    const age = r.age_hours == null ? "nothing on record" : `${staleHours(r.age_hours)} ago`;
+    return r.stale ? `<b>⚠ ${esc(label)}: ${esc(age)} (alert bar ${esc(staleHours(r.threshold_hours))})</b>`
+      : `${esc(label)}: ${esc(age)}`;
+  }).join(" · ");
   intro.innerHTML = `<div><h2>Pipeline health &amp; search yield</h2>`
     + `<div class="meta">Discovery cohort ${esc(data.range?.start || "?")} through ${esc(data.range?.end || "?")}</div></div>`
-    + `<div class="meta">Last full-cycle success: ${esc(data.last_successful_run_ended || "not recorded")}</div>`;
+    + `<div class="meta">Last full-cycle success: ${esc(data.last_successful_run_ended || "not recorded")}</div>`
+    + (staleBits ? `<div class="meta">Producer staleness: ${staleBits}</div>` : "");
   wrap.appendChild(intro);
 
   const grid = document.createElement("div");
@@ -2754,7 +2765,8 @@ function renderHealth() {
   const definitions = data.definitions || {};
   const note = document.createElement("div");
   note.className = "funnel-note";
-  note.textContent = [definitions.health, definitions.attribution, definitions.privacy]
+  note.textContent = [definitions.health, definitions.staleness, definitions.attribution,
+                      definitions.privacy]
     .filter(Boolean).join(" ");
   wrap.appendChild(note);
   list.appendChild(wrap);

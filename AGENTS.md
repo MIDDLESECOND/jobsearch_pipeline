@@ -92,8 +92,9 @@ re-export hub):
   (review, never re-route). Imports `core`, `evaluation` (the same prompt/parse/normalize
   path and price table as the primary judge), and `states`; the anthropic SDK loads lazily
   inside the network paths. Driven by `pipeline.py second-judge` / `run_second_judge.bat`.
-- `report.py` — the daily markdown report + renderers (uses `chain.effective_decision` and
-  `second_judge.opinion_summaries`).
+- `report.py` — the daily markdown report + renderers (uses `chain.effective_decision`,
+  `second_judge.opinion_summaries`, and `health.staleness_readings`/`failed_fetch_targets`
+  for the conditional header health line).
 - `workflow.py` — bounded, filterable UI read models and Action Center aggregation. It
   imports `report`/`chain`/`states`/`dupe_candidates`, performs no mutations, and keeps dashboard-query logic
   out of both the decision service and Flask routes.
@@ -508,6 +509,18 @@ Windows Task Scheduler.
   URLs, exception messages, credentials, JD text, or private role evidence in the run tables/API.
   Target-attempt detail is response-bounded; each run returns its full attempt count and an explicit
   truncation flag so an omitted tail is never presented as complete.
+  The silent-death direction (a schedule that stops firing — the 2026-08-18 seam audit found a
+  whole missing log day and a canary schedule that never once executed, with nothing noticing)
+  is instrumented by `health.staleness_readings`: a read-only sentinel comparing now against the
+  last successful-cycle stamp, the newest canary history entry, and the newest second-opinion
+  collection, each with a schedule-sized threshold (module constants in `health.py`). The stamps
+  mix frames — the DB stamps are naive local, canary's `ts` is aware UTC — so every comparison
+  normalizes through one helper (`health._wall_clock`) into naive local; don't add a reading that
+  compares frames raw. It surfaces facts only: the UI health tab shows every reading, and the
+  daily report opens with ONE conditional warning line (today's staleness plus that day's failed
+  fetch targets; past-date rebuilds render only the day-scoped failure facts, since staleness is
+  a now-fact). An absent or unreadable stamp reads as stale-with-no-timestamp, never as quiet
+  health, and the sentinel never registers, retries, or repairs anything.
 
 - **A flagged verdict is reviewed, never re-routed.** `normalize_result`'s contract
   diagnostics are denormalized onto `jobs.eval_issues` (comma-joined, NULL = clean). The eval

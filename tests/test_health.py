@@ -1,6 +1,7 @@
 """Pipeline health records facts; search metrics stay bounded and descriptive."""
 
 import contextlib
+import json
 import sys
 from datetime import date
 
@@ -563,3 +564,122 @@ def test_all_internal_target_failures_do_not_advance_cooldown(conn, monkeypatch)
     ).fetchone() is None
     run = conn.execute("SELECT status FROM pipeline_runs ORDER BY id DESC LIMIT 1").fetchone()
     assert run["status"] == "degraded"
+
+
+# --- Silence sentinel (staleness_readings) -------------------------------------------------
+# The 2026-08-18 seam audit: a scheduled producer that quietly dies leaves no reading
+# anywhere — the only arithmetic over last_run_ok_ended was the cooldown (too-often guard),
+# and nothing at all watched the canary or second-judge cadence. These tests pin the
+# too-rarely direction with an injected clock; fixtures are synthetic (a tmp jsonl and the
+# schema-built test DB), never the real jobs.db or the real canary history.
+
+
+def _canary_file(tmp_path, *ts_values):
+    path = tmp_path / "canary_history.jsonl"
+    path.write_text(
+        "\n".join(json.dumps({"ts": ts, "model": "m", "n": 24}) for ts in ts_values) + "\n",
+        encoding="utf-8")
+    return path
+
+
+def test_staleness_readings_pin_each_threshold_boundary(conn, tmp_path):
+    from health import staleness_readings
+
+    # All three stamps sit EXACTLY at their bar relative to now=2026-08-18T00:00:00
+    # (run 26h, canary 8 days, second judge 48h — naive local, matching the producers).
+    canary = _canary_file(tmp_path, "2026-08-10T00:00:00")
+    conn.execute("INSERT INTO meta (key,value) VALUES ('last_run_ok_ended','2026-08-16T22:00:00')")
+    conn.execute(
+        """INSERT INTO second_opinions (job_url,custom_id,model,status,submitted_at,collected_at)
+           VALUES ('https://example.com/job/x','c1','m','done',
+                   '2026-08-15T23:00:00','2026-08-16T00:00:00')""")
+    conn.commit()
+
+    at_bar = staleness_readings(conn, now="2026-08-18T00:00:00", canary_history_path=canary)
+    by_signal = {r["signal"]: r for r in at_bar["readings"]}
+
+    # Exactly AT a threshold is not yet stale: the alert is strictly "silent for longer
+    # than a missed slot", so a slot landing on the boundary can't flap.
+    assert [r["signal"] for r in at_bar["readings"]] == ["pipeline_run", "canary", "second_judge"]
+    assert not any(r["stale"] for r in at_bar["readings"])
+    assert by_signal["pipeline_run"]["age_hours"] == 26.0
+    assert by_signal["canary"]["age_hours"] == 192.0
+    assert by_signal["second_judge"]["age_hours"] == 48.0
+
+    # Six minutes later every reading is strictly past its bar and all three alert.
+    past_bar = staleness_readings(conn, now="2026-08-18T00:06:00", canary_history_path=canary)
+    assert all(r["stale"] for r in past_bar["readings"])
+
+
+def test_staleness_readings_surface_missing_stamps_as_stale_not_silence(conn, tmp_path):
+    from health import staleness_readings
+
+    # Fresh DB, no canary file: every signal reports stale-with-no-timestamp. Silence about
+    # silence would recreate the exact blind spot the sentinel exists to close.
+    result = staleness_readings(conn, now="2026-08-18T00:00:00",
+                                canary_history_path=tmp_path / "never_written.jsonl")
+
+    for reading in result["readings"]:
+        assert reading["stale"] is True
+        assert reading["last_at"] is None and reading["age_hours"] is None
+
+
+def test_staleness_readings_normalize_aware_canary_stamps(conn, tmp_path):
+    from health import staleness_readings
+
+    # canary.py writes `ts` as AWARE UTC while the DB stamps are naive local. Passing an
+    # aware `now` keeps this exact on any machine timezone (both sides normalize through
+    # the same local conversion); margins are wide so no DST wobble can flip the verdict.
+    canary = _canary_file(tmp_path, "2026-08-09T00:00:00+00:00", "2026-08-17T00:00:00+00:00")
+    fresh = staleness_readings(conn, now="2026-08-18T00:00:00+00:00",
+                               canary_history_path=canary)
+    reading = next(r for r in fresh["readings"] if r["signal"] == "canary")
+    # The NEWEST entry wins, and its raw stored stamp is reported as-is.
+    assert reading["stale"] is False and reading["last_at"] == "2026-08-17T00:00:00+00:00"
+
+    canary = _canary_file(tmp_path, "2026-08-09T00:00:00+00:00")   # 9 days > the 8-day bar
+    stale = staleness_readings(conn, now="2026-08-18T00:00:00+00:00",
+                               canary_history_path=canary)
+    reading = next(r for r in stale["readings"] if r["signal"] == "canary")
+    assert reading["stale"] is True
+
+
+def test_staleness_readings_tolerate_garbage_without_going_quiet(conn, tmp_path):
+    from health import staleness_readings
+
+    path = tmp_path / "canary_history.jsonl"
+    path.write_text('not json\n{"no_ts": 1}\n{"ts": "2026-08-17T12:00:00"}\n', encoding="utf-8")
+    conn.execute("INSERT INTO meta (key,value) VALUES ('last_run_ok_ended','not-a-timestamp')")
+    conn.commit()
+
+    result = staleness_readings(conn, now="2026-08-18T00:00:00", canary_history_path=path)
+    by_signal = {r["signal"]: r for r in result["readings"]}
+
+    # A garbage stamp surfaces as stale-with-no-timestamp — never as fresh, never a crash —
+    assert by_signal["pipeline_run"]["stale"] is True
+    assert by_signal["pipeline_run"]["last_at"] is None
+    # — while a readable canary entry behind garbage lines still counts.
+    assert by_signal["canary"]["stale"] is False
+    assert by_signal["canary"]["age_hours"] == 12.0
+
+
+def test_health_snapshot_carries_the_staleness_readings(conn, tmp_path, monkeypatch):
+    import health
+    from health import health_snapshot
+
+    # The snapshot uses the module default canary path; point it at a tmp file so the
+    # test never reads the real gitignored canary history (it exists on the user's
+    # machine) and stays deterministic about last_at/stale.
+    monkeypatch.setattr(health, "CANARY_HISTORY_PATH", tmp_path / "canary_history.jsonl")
+
+    snapshot = health_snapshot(conn, _cfg(), today=date(2026, 8, 7))
+
+    # Structure plus the missing-everything shape (fresh DB, no canary file); aged/fresh
+    # values are asserted in the injected-clock tests above, not against the live clock.
+    assert [r["signal"] for r in snapshot["staleness"]["readings"]] == [
+        "pipeline_run", "canary", "second_judge"]
+    assert all(r["stale"] and r["last_at"] is None
+               for r in snapshot["staleness"]["readings"])
+    assert all(isinstance(r["threshold_hours"], int) and r["threshold_hours"] > 0
+               for r in snapshot["staleness"]["readings"])
+    assert "staleness" in snapshot["definitions"]

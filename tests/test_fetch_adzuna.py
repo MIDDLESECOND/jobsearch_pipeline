@@ -3,8 +3,15 @@ tracking token, so storing it raw gives the same ad a fresh job_url (the PK) eve
 call — _adzuna_job_url must reduce a result to one stable URL per ad id so re-serves
 dedup at insert. The host comes from redirect_url itself (it follows the configured
 country — adzuna.co.uk for gb — so hardcoding www.adzuna.com would bake wrong-site
-links into the PK). Pure function, no network."""
+links into the PK). Pure function, no network.
 
+Also the response-envelope guard: a wrong-shaped 200 must record a FAILED attempt, never
+read as an empty success (urlopen monkeypatched — still no network)."""
+
+import io
+import json
+
+import fetch
 from fetch import _adzuna_job_url
 
 
@@ -92,3 +99,60 @@ def test_none_without_redirect_url():
     assert _adzuna_job_url({"id": 5783524007}) is None
     assert _adzuna_job_url({"redirect_url": ""}) is None
     assert _adzuna_job_url({"redirect_url": 42}) is None
+
+
+# ----------------------------------------------------------------- envelope guard
+
+def _adzuna_cfg():
+    return {
+        "settings": {"max_description_chars": 12000,
+                     "adzuna": {"delay_between_calls": 0}},
+        "searches": [{"name": "analyst", "adzuna": {"what_phrase": "data analyst"}}],
+    }
+
+
+def _run_adzuna(conn, monkeypatch, payload):
+    """Run fetch_adzuna against one canned HTTP payload inside a recorded pipeline run;
+    return (summary, that run's adzuna attempt rows)."""
+    from health import (reset_active_pipeline_run, set_active_pipeline_run,
+                        start_pipeline_run)
+    monkeypatch.setattr(fetch, "_ensure_api_key", lambda *a, **k: "fake-credential")
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda url, timeout=None: io.BytesIO(json.dumps(payload).encode()))
+    run_id = start_pipeline_run(conn, trigger="manual", run_date="2026-08-18")
+    token = set_active_pipeline_run(run_id)
+    try:
+        summary = fetch.fetch_adzuna(_adzuna_cfg(), conn)
+    finally:
+        reset_active_pipeline_run(token)
+    attempts = conn.execute(
+        """SELECT status,error_kind,returned_count FROM pipeline_fetch_attempts
+            WHERE run_id=? AND source_family='adzuna' ORDER BY id""", (run_id,)
+    ).fetchall()
+    return summary, attempts
+
+
+def test_wrong_shape_envelope_records_failed_not_empty_success(conn, monkeypatch, capsys):
+    # A 200 whose envelope lost/renamed `results` must record a FAILED parse_or_validation
+    # attempt — NOT success/returned_count=0, which would keep every health light green and
+    # the cooldown stamp advancing (run_has_successful_target) while the source is silently
+    # dead. Fixture keys are the real search envelope's other top-level fields (count/mean).
+    summary, attempts = _run_adzuna(conn, monkeypatch, {"count": 4123, "mean": 68123.45})
+    assert summary == 0 and summary.failures == 1 and summary.successes == 0
+    assert [(r["status"], r["error_kind"]) for r in attempts] == [
+        ("failed", "parse_or_validation")]
+    err = capsys.readouterr().err
+    assert "FAILED" in err
+    # The raise names keys/types only — never the request URL, whose query string carries
+    # the credentials (and _redact would have to save us).
+    assert "fake-credential" not in err
+
+
+def test_empty_results_is_still_success_zero(conn, monkeypatch):
+    # {"results": []} is a legitimate zero-result page — success, returned_count=0 (and the
+    # cooldown stamp may advance on it). The guard rejects shapes, not emptiness.
+    summary, attempts = _run_adzuna(conn, monkeypatch, {"results": [], "count": 0})
+    assert summary == 0 and summary.successes == 1 and summary.failures == 0
+    assert [(r["status"], r["error_kind"], r["returned_count"]) for r in attempts] == [
+        ("success", None, 0)]

@@ -245,7 +245,9 @@ _ADZUNA_WHAT_KEYS = ("what", "what_and", "what_phrase", "what_or", "what_exclude
 
 
 def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
-    """One Adzuna API call. `query` is a dict of what_* params. Returns the results list."""
+    """One Adzuna API call. `query` is a dict of what_* params. Returns the results list.
+    A wrong-shaped envelope raises — fetch_adzuna catches it and records a FAILED attempt,
+    so an API envelope change never masquerades as an empty result page."""
     import urllib.request
 
     params = {
@@ -271,7 +273,18 @@ def _adzuna_search(country, app_id, app_key, query, where, rpp, max_days):
     # safety net in case a future exception type embeds the URL.
     url = ADZUNA_SEARCH_URL.format(country=country) + "?" + parse.urlencode(params)
     with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.load(resp).get("results", [])
+        payload = json.load(resp)
+    # A wrong-shaped 200 (renamed/wrapped envelope) must raise so the caller records a FAILED
+    # attempt — never read as an empty page: a silent [] here becomes status='success'
+    # returned_count=0, which keeps every health light green (and the cooldown stamp advancing)
+    # while the source is dead. Same rule as the ATS readers. The message names types/keys
+    # only, never the URL — it carries app_key (see above).
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        shape = (f"object with keys {sorted(payload)[:10]}" if isinstance(payload, dict)
+                 else type(payload).__name__)
+        raise ValueError(f"Adzuna response carried no results list ({shape})")
+    return results
 
 
 def fetch_adzuna(cfg, conn) -> FetchSummary:

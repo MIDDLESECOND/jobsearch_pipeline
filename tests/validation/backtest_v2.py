@@ -57,6 +57,16 @@ import evaluation
 
 CASES_PATH = Path(__file__).with_name("backtest_cases.local.json")
 
+# Distinguishes "the model omitted the key" from "the model sent null" in the
+# fit-contract report below. A sentinel object, not a string, so a model emitting
+# this text verbatim can't impersonate an absent key.
+class _NoFitKey:
+    def __repr__(self):
+        return "<key absent>"
+
+
+NO_FIT_KEY = _NoFitKey()
+
 
 # The full vocabulary the runner understands. Validated on load because a typo'd
 # key in the JSON would otherwise be silently ignored — the case would degrade to
@@ -169,13 +179,22 @@ def evaluate(call, row, attempts=3):
     "stop", ~1/3 reproduction on affected postings — CHANGELOG 2026-08-07); one
     draw of that must not paint an anchor red, so parse failures retry like
     production's _evaluate_one does. The last failure propagates to the caller,
-    which reports it as an INFRA error, not a verdict mismatch."""
+    which reports it as an INFRA error, not a verdict mismatch.
+
+    Returns (normalized result, the fit_score EXACTLY as the model emitted it).
+    The raw value is carried out separately because normalization nulls an invalid
+    one, and after that every malformation looks identical — but they mean very
+    different things: an absent/null fit is the model omitting a score it was asked
+    for (measured at 0.03% of scored rows), while NaN or a string is a shape that
+    has never been observed and would be new evidence about the judge."""
     user_msg = evaluation.build_user_msg(row)
     last = None
     for attempt in range(attempts):
         try:
             text = call(user_msg)
-            return evaluation.normalize_result(evaluation.parse_eval_json(text))
+            parsed = evaluation.parse_eval_json(text)
+            raw_fit = parsed["fit_score"] if "fit_score" in parsed else NO_FIT_KEY
+            return evaluation.normalize_result(parsed), raw_fit
         except Exception as e:
             last = e
             if attempt < attempts - 1:
@@ -205,7 +224,7 @@ def main():
             skipped += 1
             continue
         try:
-            res = evaluate(call, row)
+            res, raw_fit = evaluate(call, row)
         except Exception as e:
             # An eval that never produced a parseable verdict is an INFRA fact
             # (provider outage, empty-answer build behavior), not evidence about
@@ -242,6 +261,20 @@ def main():
             ok = False
             extra_lines.append("gate_results INCONSISTENT with the verdict "
                                f"(gate_results={gr}, failed_gate={res.get('failed_gate')})")
+        # Same division of labour for the fit contract (2026-08-18): production nulls
+        # an invalid fit and flags it for a human (review, never re-route), and this is
+        # where it becomes a red — a scored verdict the judge could not actually score
+        # is a contract regression even when the verdict itself matched the anchor.
+        # Inert on GATE_FAIL cases: the token only fires on PASS/RECRUITER_ONLY, where
+        # the output spec requires a fit. Flake risk is bounded by the measured rate of
+        # the only shape ever observed (a model-emitted null, 12 of 37,765 scored rows
+        # = 0.03%), so a red here is signal, not noise — but re-run before acting, the
+        # same discipline every other anchor in this file carries.
+        if "fit-score-invalid" in (res.get("eval_issues") or []):
+            ok = False
+            extra_lines.append(
+                f"fit_score INVALID for a scored {verdict} — model emitted {raw_fit!r} "
+                "(normalization nulled it; the row would enter Needs attention)")
         if extra:
             if "flag" in extra:
                 hit = any(_norm(extra["flag"]) in _norm(f) for f in flags)

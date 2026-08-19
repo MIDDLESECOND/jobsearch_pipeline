@@ -47,13 +47,25 @@ RECRUITER_ONLY rows carry no fit and no flag** (0.03%, two of them from today) �
 model-emitted `"fit_score": null` with no `score_breakdown` at all, so the depth cap's
 fail-closed arm had already ROUTED them correctly; what was broken is only that they are
 invisible to every fit-ordered surface. Re-normalized under the new code, all 12 flag. Those
-historical rows are not retroactively rewritten; new ones will carry the token. `backtest_v2` re-run after the change: 8 anchors matched, 0 missed, 2 known-alarm
-XPASS, exit 0 — the regression baseline did not move, and no case produced the new token.
+historical rows are not retroactively rewritten; new ones will carry the token.
+`backtest_v2` re-run after the change: 8 anchors matched, 0 missed, 2 known-alarm XPASS,
+exit 0 — the regression baseline did not move, and no case produced the new token.
 
 **Not changed.** A legitimate integer 0–18 passes through untouched, so every already-stored
 row reads exactly as before and the re-evaluation instruments (`backtest_v2`, `canary`,
 `noise_probe` — all of which normalize a FRESH response, never a stored one) are unaffected
 on any well-formed draw. No gate, verdict, bucket, or schema moved.
+
+**Follow-up the same day — `backtest_v2` is the enforcement point.** The same division of
+labour the `gate_results` contract settled on 2026-08-07: production flags assistively, the
+regression guard is where the flag becomes a red. A case whose re-evaluation returns
+`fit-score-invalid` now fails even when its verdict matched the anchor — a scored verdict the
+judge could not actually score is a contract regression, not a near miss. The runner carries
+the model's RAW fit out of `evaluate()` beside the normalized result, because normalization
+nulls an invalid one and afterwards an omitted score and a NaN are indistinguishable — and
+they are different evidence: the omission is the measured 0.03% shape, while NaN or a string
+has never been observed and would be news about the judge. Inert on GATE_FAIL anchors, where
+the spec asks for no fit.
 
 ---
 

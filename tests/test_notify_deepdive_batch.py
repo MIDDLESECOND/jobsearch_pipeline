@@ -81,6 +81,20 @@ def test_zone_window_mirrors_the_second_judge():
     assert nb.FRESH_DAYS == second_judge.FRESH_DAYS
 
 
+def test_zone_window_is_inclusive_at_day_14_matching_the_judge(conn):
+    """A row exactly 14 days old is still zone material (`<` the cutoff, not `<=` —
+    a mutation round survived on fixtures at days 0/9/30). This module's FRESH_DAYS
+    literal mirrors second_judge's; the twin boundary test over there holds the pair
+    to the same edge behavior. Day 14 is far outside the 5-day batch window, so the
+    row is visible-not-batchable, like `mid` above."""
+    at_edge = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=14))
+    past_edge = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=15))
+    rows = _rows(conn)
+    assert at_edge["job_url"] in rows
+    assert rows[at_edge["job_url"]][1] is False
+    assert past_edge["job_url"] not in rows
+
+
 def test_second_judge_downgrade_removes_a_row_from_the_batch_scope(conn):
     agreed = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())
     demoted = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())

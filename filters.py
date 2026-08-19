@@ -24,7 +24,8 @@ FILTERS_PATH = BASE_DIR / "filters.yaml"
 
 def apply_salary_filter(cfg, conn):
     """Analyst-tier rule: drop only when annual salary is KNOWN and below the floor.
-    Unstated salary is kept — this is the '>80k or not mentioned' rule."""
+    Unstated salary is kept — this is the '>=80k or not mentioned' rule. The floor
+    itself passes: a posting at exactly min_salary is not below it."""
     filtered = 0
     for search in cfg["searches"]:
         floor = search.get("min_salary")

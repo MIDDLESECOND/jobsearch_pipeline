@@ -63,6 +63,22 @@ def test_zone_excludes_stale_posted_but_keeps_unparseable_dates(conn):
     assert no_date["job_url"] in urls
 
 
+def test_zone_freshness_window_is_inclusive_at_day_14(conn):
+    """The FRESH_DAYS=14 cutoff keeps a row posted exactly 14 days ago (`<`, not `<=`
+    — a mutation round survived because every fixture sat far from the edge). The 14
+    is deliberately literal: notify_deepdive_batch mirrors this window with its own
+    literal, and the twin test over there holds the pair to the same boundary."""
+    at_edge = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(),
+                       date_posted=(datetime.now() - timedelta(days=14))
+                       .isoformat(timespec="seconds"))
+    past_edge = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(),
+                         date_posted=(datetime.now() - timedelta(days=15))
+                         .isoformat(timespec="seconds"))
+    urls = _urls(second_judge.pending_rows(conn))
+    assert at_edge["job_url"] in urls
+    assert past_edge["job_url"] not in urls
+
+
 def test_zone_excludes_adzuna_snippet_rows_but_not_short_jds(conn):
     snip = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent(),
                     source="adzuna", description="x" * 500)

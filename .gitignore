@@ -17,8 +17,12 @@ Thumbs.db
 # Personal workflow skills (reference private local paths; not part of the public tool)
 .claude/skills/
 
-# Deepdive batch state (last-batch stamp + local calibration; maintained by the skill)
+# Deepdive batch state (last-batch stamp + local calibration; maintained by the skill).
+# The .* glob is load-bearing: the skill leaves .bak/.prev siblings that the bare name
+# does not match, and processed_urls inside them is a list of real posting URLs
+# (measured 2026-08-19: 152 and 112 in the two strays sitting here untracked).
 .deepdive_state.json
+.deepdive_state.json.*
 
 # ---- Secrets ----
 .env
@@ -39,6 +43,12 @@ linkedin/
 # ---- Generated / runtime data (third-party scraped content, run output) ----
 jobs.db
 *.db
+# Suffixed database copies - a drive migration leaves names like
+# jobs.db.MIGRATED-20260819 that *.db does not match (422 MB of private evidence
+# one `git add -A` away from a public push). 2026-08-19.
+jobs.db.*
+*.MIGRATED-*
+_MIGRATED_TO_*.txt
 # SQLite sidecars (WAL mode: -wal/-shm; rollback journal: -journal)
 *.db-wal
 *.db-shm

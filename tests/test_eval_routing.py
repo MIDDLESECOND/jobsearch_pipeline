@@ -408,6 +408,19 @@ def test_fit_bool_true_is_not_a_valid_score():
     assert "fit-score-invalid" in r["eval_issues"]
 
 
+def test_fit_numeric_string_is_rejected_not_coerced():
+    # Deliberate, and the opposite of the leadership cap's value-based reading: that
+    # cap normalizes "true"/1/"yes" because it reads a small CLOSED vocabulary, while
+    # fit's near sibling is the depth cap, which takes numbers only. Coercing "15"
+    # would open a parsing surface with no bottom ("15/18", "fifteen", "15 of 18"),
+    # and a quoted number is exactly the TEXT storage class that made an unvalidated
+    # fit dangerous. Nulling costs nothing recoverable — eval_json keeps the raw
+    # value and the flag puts a human on the row.
+    r = _norm(verdict="PASS", fit_score="15", score_breakdown=_bd(3))
+    assert r["fit_score"] is None
+    assert "fit-score-invalid" in r["eval_issues"]
+
+
 def test_fit_fraction_truncates_not_flagged():
     # needs_arbitration/_fit_key already read any finite in-range float as a
     # usable fit, so 15.5 is coerced to the declared integer domain, not

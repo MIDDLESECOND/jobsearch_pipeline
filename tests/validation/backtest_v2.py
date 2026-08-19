@@ -267,7 +267,7 @@ def main():
         # is a contract regression even when the verdict itself matched the anchor.
         # Inert on GATE_FAIL cases: the token only fires on PASS/RECRUITER_ONLY, where
         # the output spec requires a fit. Flake risk is bounded by the measured rate of
-        # the only shape ever observed (a model-emitted null, 12 of 37,765 scored rows
+        # the only shape ever observed (a model-emitted null, 12 of 37,777 scored rows
         # = 0.03%), so a red here is signal, not noise — but re-run before acting, the
         # same discipline every other anchor in this file carries.
         if "fit-score-invalid" in (res.get("eval_issues") or []):

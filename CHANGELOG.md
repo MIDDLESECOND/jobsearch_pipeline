@@ -40,9 +40,9 @@ before its `second_opinions` write. `workflow.py`'s needs-attention predicate al
 `eval_issues IS NOT NULL`, and both the report and the UI render issue tokens verbatim, so no
 query or rendering change rides along.
 
-**Measured before shipping.** Across the live DB's 37,765 scored rows, `fit_score` is
-currently `integer` or NULL in every one — the TEXT and out-of-range shapes have not
-happened yet, so that half of this is preemptive. The NULL half is live: **12
+**Measured before shipping.** Across the live DB's 37,777 scored rows (PASS +
+RECRUITER_ONLY), `fit_score` is currently `integer` (37,765) or NULL (12) in every one —
+the TEXT and out-of-range shapes have not happened yet, so that half of this is preemptive. The NULL half is live: **12
 RECRUITER_ONLY rows carry no fit and no flag** (0.03%, two of them from today) — each one a
 model-emitted `"fit_score": null` with no `score_breakdown` at all, so the depth cap's
 fail-closed arm had already ROUTED them correctly; what was broken is only that they are
@@ -65,7 +65,12 @@ the model's RAW fit out of `evaluate()` beside the normalized result, because no
 nulls an invalid one and afterwards an omitted score and a NaN are indistinguishable — and
 they are different evidence: the omission is the measured 0.03% shape, while NaN or a string
 has never been observed and would be news about the judge. Inert on GATE_FAIL anchors, where
-the spec asks for no fit.
+the spec asks for no fit. The live run that landed with the assertion put one anchor red for
+an unrelated reason worth recording: Franklin Fitch returned RECRUITER_ONLY against an
+expected PASS on a valid fit of 13, the function-precedent cap having fired on that draw.
+Three draws of that posting the same day read PASS, PASS, RECRUITER_ONLY — the documented
+~25% verdict-flip rate showing up inside the anchor set, which is why a single red here is
+re-run before it is acted on.
 
 ---
 

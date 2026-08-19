@@ -10,6 +10,7 @@ import json
 import re
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 
 MAX_HEALTH_DAYS = 365
@@ -24,6 +25,28 @@ MAX_ATTEMPTS_IN_RESPONSE = 1_000
 # cycles paying off a peak-deferral backlog have measured 85–194 minutes, and concurrent runs are
 # deliberately unguarded here, so a live run must never be reaped by another one starting.
 STALE_RUN_HOURS = 12
+# --- Scheduled-producer silence thresholds (staleness_readings) --------------------------
+# The 2026-08-18 seam audit found the silent-death direction completely uninstrumented: a
+# whole log day (pipeline-2026-07-28.log) absent from an otherwise daily sequence with
+# nothing noticing, a canary schedule that never once executed (its history is all manual
+# runs), and the only arithmetic ever applied to meta.last_run_ok_ended being the cooldown
+# guard — which protects against running too OFTEN, never too RARELY. These thresholds are
+# the too-rarely direction. Each is sized to its producer's schedule cadence: one missed
+# slot plus slack, so a single late slot stays quiet but a dead schedule does not.
+RUN_SILENCE_HOURS = 26            # pipeline runs several times a day; >26h = a whole day of
+                                  # slots missed, with slack for slot jitter
+CANARY_SILENCE_HOURS = 8 * 24     # canary is a weekly schedule; >8 days = the weekly slot
+                                  # missed plus a day of slack
+SECOND_JUDGE_SILENCE_HOURS = 48   # second judge runs daily; >48h = two missed days. A
+                                  # legitimately empty actionable zone also ages this
+                                  # reading — the sentinel reports the fact, the reader
+                                  # decides what it means.
+# Where tests/validation/canary.py appends its run history (HISTORY_PATH there — change one,
+# change both). Spelled here rather than imported: tests/validation is deliberately not an
+# importable package, and this module stays stdlib-only. The parent of this file is the repo
+# root, the same value as core.BASE_DIR.
+CANARY_HISTORY_PATH = (Path(__file__).resolve().parent
+                       / "tests" / "validation" / "results" / "canary_history.jsonl")
 _RUN_STATUSES = {"running", "succeeded", "degraded", "failed", "interrupted", "skipped",
                  "abandoned"}
 _ATTEMPT_STATUSES = {"success", "failed", "skipped"}
@@ -561,6 +584,137 @@ def _run_history(conn, limit):
     } for row in runs]
 
 
+def _wall_clock(value):
+    """One stored stamp as naive local wall time, or None when unreadable.
+
+    Every stamp this sentinel reads is naive local (`meta.last_run_ok_ended` and
+    `second_opinions.collected_at` are both written by datetime.now()) EXCEPT the canary
+    history's `ts`, which is aware UTC. Aware values are a valid spelling of a real
+    instant, so they normalize into the naive-local frame the others already use — the
+    same direction as pipeline._cooldown_active, and the inverse of abandon_stale_runs
+    (whose column is aware UTC). Comparing the two frames unnormalized would silently
+    shift every canary age by the UTC offset.
+    """
+    if isinstance(value, datetime):
+        stamp = value
+    else:
+        try:
+            stamp = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone().replace(tzinfo=None)
+    return stamp
+
+
+def _latest_canary_entry(path):
+    """Raw `ts` of the newest readable canary history entry, or None.
+
+    Tolerant on purpose: an absent file, an unreadable or undecodable file, and garbage
+    lines all degrade to "no readable evidence", never to a crash in the report/UI read
+    path — and a readable entry behind a garbage line still counts.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    # UnicodeDecodeError is a ValueError, not an OSError: a partially flushed or
+    # corruptly read history file must degrade like a missing one, not crash the
+    # deliberately unguarded report stage.
+    except (OSError, UnicodeDecodeError):
+        return None
+    newest_raw, newest = None, None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        raw = entry.get("ts") if isinstance(entry, dict) else None
+        stamp = _wall_clock(raw)
+        if stamp is not None and (newest is None or stamp > newest):
+            newest_raw, newest = raw, stamp
+    return newest_raw
+
+
+def _silence_reading(signal, raw_stamp, reference, threshold_hours):
+    """One reading from one raw stored stamp — parsing lives HERE, so a caller can never
+    pair a `last_at` with an `age_hours` computed from a different stamp."""
+    stamp = _wall_clock(raw_stamp)
+    if stamp is None:
+        # An absent or unreadable stamp surfaces as stale-with-no-timestamp, never as
+        # quiet health: this sentinel's failure direction is "surface" — the deliberate
+        # inverse of the cooldown guard's fail-open — because a swallowed read error IS
+        # the blind spot it exists to close.
+        return {"signal": signal, "last_at": None, "age_hours": None,
+                "threshold_hours": threshold_hours, "stale": True}
+    age = (reference - stamp).total_seconds() / 3600.0
+    # age_hours is clamped for display — a future-dated stamp (clock rollback) would
+    # otherwise surface as "-3h ago". Staleness compares the RAW age: a future stamp is
+    # simply not stale yet, matching _cooldown_active's tolerance of clock skew.
+    return {"signal": signal, "last_at": raw_stamp, "age_hours": round(max(age, 0.0), 1),
+            "threshold_hours": threshold_hours, "stale": age > threshold_hours}
+
+
+def failed_fetch_targets(conn, run_date):
+    """The day's distinct failed fetch targets: (source_family, target_label) rows.
+
+    Day-scoped through pipeline_runs.run_date, and deliberately without recovery
+    awareness — a target that failed at one slot and succeeded at the next still failed
+    that day (the per-run source view above is where recovery detail lives). Lives here,
+    not in its consumer: every production read of pipeline_fetch_attempts belongs to
+    this module, so an attempt-status vocabulary change can't miss a stray copy.
+    """
+    return conn.execute(
+        """SELECT DISTINCT a.source_family, a.target_label
+             FROM pipeline_fetch_attempts a JOIN pipeline_runs r ON r.id=a.run_id
+            WHERE r.run_date=? AND a.status='failed'""", (str(run_date),)
+    ).fetchall()
+
+
+def staleness_readings(conn, *, now=None, canary_history_path=None):
+    """How long since each scheduled producer last proved it ran — a read-only sentinel.
+
+    Three durable proofs of life, each against a threshold sized to its schedule (the
+    module constants above): the cooldown stamp `meta.last_run_ok_ended` (only a full
+    successful pipeline cycle writes it), the newest entry of the canary drift history,
+    and the newest `second_opinions.collected_at` (any collection activity, success or
+    error). Purely descriptive: it mutates nothing, registers or repairs no schedule,
+    and a stale reading is a fact to investigate, never an automatic action.
+
+    `now` is injectable for tests (ISO string or datetime; aware values normalize to
+    naive local exactly like the stamps — see _wall_clock). Stale is strictly "older
+    than the threshold", so a reading exactly at its bar has not yet alerted. This ships
+    numbers and signal names only; the human wording per signal lives with each surface
+    (report._SILENCE_PHRASES and index.html's staleBits label map — a new signal added
+    here degrades to a generic phrase there until both are extended).
+    """
+    if now is None:
+        reference = datetime.now()
+    else:
+        reference = _wall_clock(now)
+        if reference is None:
+            raise ValueError("now must be an ISO timestamp or datetime")
+    last_ok = conn.execute(
+        "SELECT value FROM meta WHERE key='last_run_ok_ended'"
+    ).fetchone()
+    canary_raw = _latest_canary_entry(
+        CANARY_HISTORY_PATH if canary_history_path is None else canary_history_path)
+    # MAX() is an aggregate: fetchone() always returns exactly one row (NULL inside when
+    # the table is empty), unlike the keyed meta lookup above.
+    judge_raw = conn.execute("SELECT MAX(collected_at) FROM second_opinions").fetchone()[0]
+    return {
+        "checked_at": reference.isoformat(timespec="seconds"),
+        "readings": [
+            _silence_reading("pipeline_run", last_ok[0] if last_ok else None,
+                             reference, RUN_SILENCE_HOURS),
+            _silence_reading("canary", canary_raw, reference, CANARY_SILENCE_HOURS),
+            _silence_reading("second_judge", judge_raw,
+                             reference, SECOND_JUDGE_SILENCE_HOURS),
+        ],
+    }
+
+
 def health_snapshot(conn, cfg, *, today=None, days=30, run_limit=20):
     """Return bounded run facts and chain-deduped first-storage attribution metrics."""
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_HEALTH_DAYS:
@@ -572,6 +726,11 @@ def health_snapshot(conn, cfg, *, today=None, days=30, run_limit=20):
     if not isinstance(today, date):
         raise ValueError("today must be a date")
     cutoff = today - timedelta(days=days - 1)
+    # Staleness runs BEFORE the read transaction opens: it touches the canary history
+    # FILE, and on this machine's drive a wedged file read can stall for minutes — that
+    # stall must not hold the WAL read snapshot open under it. Its readings make no
+    # snapshot-consistency claim anyway (the sentinel is descriptive, not transactional).
+    staleness = staleness_readings(conn)
     owns_snapshot = not conn.in_transaction
     if owns_snapshot:
         conn.execute("BEGIN")
@@ -582,10 +741,12 @@ def health_snapshot(conn, cfg, *, today=None, days=30, run_limit=20):
         result = {
             "range": {"days": days, "start": cutoff.isoformat(), "end": today.isoformat()},
             "last_successful_run_ended": last_ok[0] if last_ok else None,
+            "staleness": staleness,
             "runs": _run_history(conn, run_limit),
             "search_effectiveness": _search_effectiveness(conn, cfg, cutoff.isoformat()),
             "definitions": {
                 "health": "Source status records configured units that completed, failed, or were intentionally skipped; zero new postings alone is not a failure. A run without ended_at means completion was not recorded (it may still be active or may have been interrupted externally).",
+                "staleness": "Staleness compares now against each scheduled producer's last durable stamp: the successful-cycle cooldown stamp, the newest canary history entry, and the newest second-opinion collection. Readings are descriptive sentinel facts with schedule-sized thresholds; nothing is retried, registered, or repaired automatically.",
                 "attribution": "Posting counts use each stored row's own source/search. Role, strong, and applied counts use one current chain assigned to its earliest stored posting; only chains first seen inside the cohort qualify. Merge/unlink can change those current-chain counts, so the view is descriptive rather than causal.",
                 "privacy": "Run records retain counts and exception class names, never exception messages, URLs, credentials, or posting text.",
             },

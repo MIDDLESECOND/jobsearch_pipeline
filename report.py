@@ -15,6 +15,7 @@ from datetime import date, datetime, time
 
 from core import BASE_DIR, PARSE_MIN, PARSE_MAX, recency_dt
 from chain import effective_decisions
+from health import failed_fetch_targets, staleness_readings
 from second_judge import opinion_summaries
 from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
                     STATUS_NEEDS_MANUAL, STATUS_NEW, STATUS_ERROR, STATUS_SALARY_FILTERED,
@@ -85,6 +86,21 @@ def generate_report(cfg, conn, for_date=None):
     # and the line disappears — an unexplained gap must never be the resting state.
     awaiting = [r for r in rows if r["status"] == STATUS_NEW]
     lines = [f"# Job Pipeline Report — {d}", ""]
+    # The health warning renders at the very top: this report is the ONE surface a human
+    # reads every day, and the 2026-08-18 seam audit showed a dead schedule (a missing log
+    # day, a canary that never ran) was otherwise invisible — report.py previously carried
+    # no health information at all. Staleness is a now-fact, so it enters TODAY's render
+    # only: stamping today's readings into a `report --date` rebuild of a past day would be
+    # an anachronism and would break the rebuild-stability contract the age anchor above
+    # establishes. The day's failed fetch targets are a day-fact (health's per-target
+    # attempt records — no new storage) and render for any date.
+    failed_targets = failed_fetch_targets(conn, d)
+    warning = _health_warning_line(
+        staleness_readings(conn) if d_date == today else None,
+        len(failed_targets), sorted({t["source_family"] for t in failed_targets}))
+    if warning:
+        lines.append(warning)
+        lines.append("")
     lines.append(
         f"**{len(rows)} new postings** | {len(passes)} cold-apply (PASS) | "
         f"{len(recruiter)} recruiter-only | {len(fails)} gate fails | "
@@ -214,6 +230,47 @@ def generate_report(cfg, conn, for_date=None):
     out_path = out_dir / f"report_{d}.md"
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"[report] written: {out_path}")
+
+
+# Wording per staleness signal for the daily health line: (aged-phrase prefix, phrase for a
+# signal with no readable stamp at all). Deliberately neutral fact-statements — the sentinel
+# reports, it never diagnoses intent (an unregistered schedule may be a choice).
+_SILENCE_PHRASES = {
+    "pipeline_run": ("last successful run", "no successful run on record"),
+    "canary": ("canary last ran", "canary: no run history on record"),
+    "second_judge": ("second judge last collected", "second judge: nothing collected on record"),
+}
+
+
+def _health_warning_line(staleness, failed_target_count, failed_sources):
+    """Compose the report's one conditional health line, or None when nothing warrants it.
+
+    Pure over its inputs so the two states are testable without a clock: `staleness` is
+    health.staleness_readings() output (or None when suppressed — a past-date rebuild),
+    `failed_target_count`/`failed_sources` come from the day's per-target attempt facts.
+    The quiet state stays quiet: a healthy day renders no line at all, so the warning
+    keeps its signal value on the day it finally appears.
+    """
+    parts = []
+    for reading in (staleness or {}).get("readings", []):
+        if not reading["stale"]:
+            continue
+        prefix, never = _SILENCE_PHRASES.get(
+            reading["signal"],
+            (f"{reading['signal']} last seen", f"{reading['signal']}: nothing on record"))
+        if reading["age_hours"] is None:
+            parts.append(never)
+        else:
+            # age_hours is source-clamped to >=0, and stale implies age > a positive
+            # threshold anyway, so this branch never sees a negative span.
+            parts.append(f"{prefix} {_span_label(reading['age_hours'])}")
+    if failed_target_count:
+        plural = "s" if failed_target_count != 1 else ""
+        names = f" ({', '.join(failed_sources)})" if failed_sources else ""
+        parts.append(f"{failed_target_count} fetch target{plural} failed{names}")
+    if not parts:
+        return None
+    return "⚠ pipeline health: " + "; ".join(parts)
 
 
 def _second_opinion_lines(conn, rows):

@@ -580,6 +580,17 @@ Windows Task Scheduler.
   exact reviewed revision, observed license, adopted and rejected ideas, and any copied or adapted
   code/assets in `ACKNOWLEDGEMENTS.md` before pushing an inspired feature. Do not imply a stronger
   source relationship than the evidence supports.
+- **Three test rules, each bought by a real escape** (2026-08-18 audit). (1) A test's expected
+  value must not reuse the code-under-test's own comparison or normalization — an oracle sharing
+  the implementation's assumption certifies its bugs (the timeline ordering test's lexicographic
+  oracle matched the buggy SQL it existed to catch; the same naive-timestamp convention later
+  reappeared inverted in `jd_diff`). Pin literals, or a test-local reimplementation. (2) A fixture
+  modeling an external format — a scraped page, an API response, another process's state file — is
+  derived from a captured probe and names the probe date, never invented to satisfy the parser
+  (38 green Dice tests once covered a fetcher that extracted nothing from any real page). (3)
+  Touching a boundary is not pinning it: the assertion must expect a different outcome on each
+  side (a `>=`→`>` mutation at the report's apply line survived the full suite because the
+  boundary test's expected order was identical in both worlds).
 - **Windows environment**: PowerShell/cmd; API keys via `setx` with a registry-read fallback
   (`_ensure_api_key`): `DEEPSEEK_API_KEY` (default eval provider) or `ANTHROPIC_API_KEY`, plus
   `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` for the optional Adzuna source.

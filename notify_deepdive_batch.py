@@ -23,6 +23,7 @@ logged on"), same as the visible run_pipeline.bat console.
 import ctypes
 import datetime as dt
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -84,6 +85,25 @@ def load_state():
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def processed_set(raw):
+    """The state file's `processed_urls` as a set of URLs, empty when malformed.
+
+    The key is skill-written and hand-editable, so its type is a hope, not a fact —
+    and it is read before any popup, where an exception is a doorbell that never
+    rings (arrivals_mark's rule: a malformed state file degrades, never kills).
+    set() over a scalar (5, true) raises; a bare string is worse, because
+    set("abc") SUCCEEDS as {'a','b','c'} and silently poisons the watermark
+    derivation. json.load can only ever produce a list here, so anything else
+    degrades to "no batch has consumed anything" — the same repair semantics
+    load_state applies to the file as a whole. Non-string members are dropped
+    rather than handed to SQLite as parameters (a dict member would raise there,
+    and an unhashable one at set() itself).
+    """
+    if not isinstance(raw, list):
+        return set()
+    return {u for u in raw if isinstance(u, str)}
 
 
 def _save_doorbell_state(patch):
@@ -173,6 +193,36 @@ def zone_rows(conn):
         out.append((url, first_seen or "", bool(snippet),
                     bool(batchable) and fresh_enough))
     return out
+
+
+def _cal(cal, key, default):
+    """One calibration constant from the state file, else `default` (always finite).
+
+    Calibration constants are written by the skill, so a key can exist holding
+    JSON null — dict.get's default does NOT cover that, and float(None) raises.
+    Raising is not the whole hazard either: float("nan") and float("inf") SUCCEED
+    (and json.loads mints the floats directly from bare NaN/Infinity tokens; a
+    skill-side division is one zero away from producing them), and the estimate
+    lines' round() over the products then dies — ValueError on nan, OverflowError
+    on inf — before any popup. So a non-finite value degrades to the default
+    exactly like null and junk strings do; the defaults are module constants and
+    the chained `base` of _cal_pair, all finite by construction.
+    """
+    value = cal.get(key)
+    try:
+        got = float(default if value is None else value)
+    except (TypeError, ValueError):
+        return float(default)
+    return got if math.isfinite(got) else float(default)
+
+
+def _cal_pair(cal, per_class, blended, default):
+    """Per-class costs: a per-class key wins, else the legacy blended one, else the
+    default — so a state file written before the 2026-08-16 split still prices exactly
+    as it used to instead of silently reading 0."""
+    base = _cal(cal, blended, default)
+    return (_cal(cal, f"{per_class}_full_row", base),
+            _cal(cal, f"{per_class}_snippet_row", base))
 
 
 def guard_budget(now_pct):
@@ -339,9 +389,18 @@ def session_pct(quota):
     for label, pct, _ in quota:
         if label == SESSION_LABEL:
             try:
-                return float(pct)
+                got = float(pct)
             except (TypeError, ValueError):
                 return None
+            # nan/inf survive float() while being the definition of "not a known
+            # percent", and they are the one unknown here that fails CLOSED: nan
+            # flows through guard_budget into max(0.0, nan) == 0.0, which truncates
+            # the batch to nothing AND stamps guard_skipped_at, so the next popup
+            # reports a guard skip that never happened. Measured: (0, 0) where an
+            # unknown window gives (21, 3). No observed trigger — `percent` is read
+            # verbatim, so the endpoint would have to emit a bare NaN token — this
+            # only completes the partition the docstring above already promises.
+            return got if math.isfinite(got) else None
     return None
 
 
@@ -575,7 +634,7 @@ def main():
     state = load_state()
     if not isinstance(state, dict):     # a state file that is valid JSON but not an object
         state = {}
-    processed = set(state.get("processed_urls") or [])
+    processed = processed_set(state.get("processed_urls"))
     door = state.get("doorbell")
     door = door if isinstance(door, dict) else {}
 
@@ -618,26 +677,11 @@ def main():
     cal = state.get("calibration") or {}
     if not isinstance(cal, dict):
         cal = {}
-
-    def _cal(key, default):
-        """Calibration constants are written by the skill, so a key can exist holding
-        JSON null — dict.get's default does NOT cover that, and float(None) raises."""
-        value = cal.get(key)
-        try:
-            return float(default if value is None else value)
-        except (TypeError, ValueError):
-            return float(default)
-
-    # Per-class costs: a per-class key wins, else the legacy blended one, else the
-    # default — so a state file written before the 2026-08-16 split still prices exactly
-    # as it used to instead of silently reading 0.
-    def _pair(per_class, blended, default):
-        base = _cal(blended, default)
-        return (_cal(f"{per_class}_full_row", base), _cal(f"{per_class}_snippet_row", base))
-
-    full_min, snip_min = _pair("minutes_per", "minutes_per_row", DEFAULT_MIN_PER_ROW)
-    full_ktok, snip_ktok = _pair("ktokens_per", "ktokens_per_row", DEFAULT_KTOK_PER_ROW)
-    full_pct, snip_pct = _pair("session_pct_per", "session_pct_per_row", 0)
+    full_min, snip_min = _cal_pair(cal, "minutes_per", "minutes_per_row",
+                                   DEFAULT_MIN_PER_ROW)
+    full_ktok, snip_ktok = _cal_pair(cal, "ktokens_per", "ktokens_per_row",
+                                     DEFAULT_KTOK_PER_ROW)
+    full_pct, snip_pct = _cal_pair(cal, "session_pct_per", "session_pct_per_row", 0)
 
     quota = plan_usage()
     if quota:

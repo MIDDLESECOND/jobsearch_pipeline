@@ -291,6 +291,19 @@ def test_batch_fails_open_when_the_window_or_calibration_is_unknown():
         21, nb.SNIPPET_QUOTA)
 
 
+def test_calibration_pair_prefers_per_class_then_blended_then_default():
+    """The pricing chain the 2026-08-16 per-class split left behind: a per-class key
+    wins, a pre-split state file still prices on its blended key, and a missing or
+    null key lands on the module default (JSON null is the case dict.get cannot see)."""
+    cal = {"minutes_per_row": 2.0, "minutes_per_full_row": 3.5}
+    assert nb._cal_pair(cal, "minutes_per", "minutes_per_row", 4.0) == (3.5, 2.0)
+    assert nb._cal_pair({"minutes_per_row": 2.0},
+                        "minutes_per", "minutes_per_row", 4.0) == (2.0, 2.0)
+    assert nb._cal_pair({}, "minutes_per", "minutes_per_row", 4.0) == (4.0, 4.0)
+    assert nb._cal_pair({"minutes_per_row": None},
+                        "minutes_per", "minutes_per_row", 4.0) == (4.0, 4.0)
+
+
 def test_session_pct_reads_the_window_row_and_survives_a_shapeless_payload():
     """The usage endpoint is undocumented: percent may be missing or non-numeric, and
     None must mean 'unknown' (fail open), never 0 (which would read as a full window)."""
@@ -298,6 +311,21 @@ def test_session_pct_reads_the_window_row_and_survives_a_shapeless_payload():
     assert nb.session_pct([(nb.SESSION_LABEL, None, "y")]) is None
     assert nb.session_pct([(nb.SESSION_LABEL, "n/a", "y")]) is None
     assert nb.session_pct([]) is None
+
+
+def test_a_non_finite_percent_is_unknown_and_still_fails_open():
+    """"Unknown" has to mean ONE thing in this file. nan/inf pass float() and then
+    fail CLOSED where every other unknown fails open: nan reaches guard_budget,
+    max(0.0, nan) is 0.0, the batch truncates to nothing AND the run stamps
+    guard_skipped_at — so the next popup reports a guard skip that never happened.
+    Measured before the guard: (0, 0) against (21, 3) for an unreadable window."""
+    for junk in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+        assert nb.session_pct([(nb.SESSION_LABEL, junk, "y")]) is None
+    # composition, not just the parse: a non-finite percent must reach batch_counts
+    # as "unknown" and leave the counts unguarded, exactly like an unreadable quota.
+    unknown = nb.session_pct([(nb.SESSION_LABEL, float("nan"), "y")])
+    assert nb.batch_counts(21, 31, nb.guard_budget(unknown), 0.27, 0.27) == (
+        21, nb.SNIPPET_QUOTA)
 
 
 def test_arrivals_watermark_comes_from_the_column_it_is_compared_against(conn):
@@ -367,7 +395,7 @@ def _counts(conn, state):
     the stamp pending_split compares against. No state key reaches pending_split
     directly (`last_batch_iso` in particular has no production reader — the skill
     still writes it, but main() derives the mark from the DB since 7a0b350)."""
-    processed = set(state.get("processed_urls") or [])
+    processed = nb.processed_set(state.get("processed_urls"))
     door = state.get("doorbell")
     door = door if isinstance(door, dict) else {}
     last_batch = nb.arrivals_mark(conn, processed, door.get("arrivals_mark"))
@@ -416,6 +444,50 @@ def test_processed_rows_leave_pending_and_can_empty_it(conn):
 
 
 # ------------------------------------------------------------- malformed state
+
+def test_calibration_constant_degrades_on_non_finite_values():
+    """float() raising is not the whole hazard: float("nan")/float("inf") SUCCEED, and
+    the estimate lines' round() over the products dies on both — ValueError on nan,
+    OverflowError on inf — before any popup, which under Task Scheduler is a doorbell
+    that never rings. The skill computes these constants (a division is one zero away
+    from either), and json.loads mints the floats straight from bare NaN/Infinity
+    tokens, so both the string and float spellings must degrade to the default."""
+    for junk in ("nan", "inf", "-inf", "Infinity", float("nan"), float("inf")):
+        assert nb._cal({"minutes_per_row": junk}, "minutes_per_row",
+                       nb.DEFAULT_MIN_PER_ROW) == nb.DEFAULT_MIN_PER_ROW
+    # the two real state-file shapes from the audit, through the pricing pair
+    full_min, snip_min = nb._cal_pair({"minutes_per_row": "nan"}, "minutes_per",
+                                      "minutes_per_row", nb.DEFAULT_MIN_PER_ROW)
+    assert (full_min, snip_min) == (nb.DEFAULT_MIN_PER_ROW, nb.DEFAULT_MIN_PER_ROW)
+    full_pct, snip_pct = nb._cal_pair({"session_pct_per_full_row": "inf"},
+                                      "session_pct_per", "session_pct_per_row", 0)
+    assert (full_pct, snip_pct) == (0.0, 0.0)
+    # the very expressions that died (est_min / est_pct): round() must survive them
+    assert round(3 * full_min + 2 * snip_min) == round(5 * nb.DEFAULT_MIN_PER_ROW)
+    assert round(3 * full_pct + 2 * snip_pct) == 0
+
+
+def test_processed_urls_degrades_to_empty_on_non_list_shapes(conn):
+    """set() over a scalar (5, true) raises before any popup; a bare string is worse —
+    set("abc") succeeds as {'a','b','c'} and silently poisons the watermark derivation.
+    Anything json.load could yield that is not a list means "no batch has consumed
+    anything", and the two consumers keep working on that degraded value."""
+    row = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    for junk in (5, 4.5, True, "abc", None, {"a": 1}):
+        processed = nb.processed_set(junk)
+        assert processed == set()
+        assert nb.arrivals_watermark(conn, processed) == ""      # watermark: no rows, no max
+        pending, _, new_rows = nb.pending_split(nb.zone_rows(conn), processed)
+        assert pending == [row["job_url"]] == new_rows           # pending counts intact
+
+
+def test_processed_set_keeps_urls_and_drops_non_string_members():
+    """A member that is not a string is never a URL a batch consumed: passing it on
+    would hand SQLite a dict parameter (raises) or die at set() on an unhashable one."""
+    assert nb.processed_set(["https://a", 5, None, ["x"], {"y": 1}]) == {"https://a"}
+    assert nb.processed_set(["https://a", "https://b"]) == {"https://a", "https://b"}
+    assert nb.processed_set([]) == set()
+
 
 def test_load_state_survives_missing_and_corrupt_files(tmp_path, monkeypatch):
     monkeypatch.setattr(nb, "STATE_PATH", tmp_path / "absent.json")

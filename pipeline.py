@@ -10,9 +10,11 @@ Usage:
   python pipeline.py report                     # regenerate today's report only (no fetch, no API calls)
   python pipeline.py stats                      # quick database stats
   python pipeline.py ui                         # local web UI to triage postings (applied/passed/reject)
-  python pipeline.py applied --url X [--resume V] [--channel C]  # mark a posting (full URL or unique
-                                                #   substring) as applied-to; --resume records the variant
-                                                #   sent, --channel how it went out (direct|agency|referral)
+  python pipeline.py applied --url X [--resume V] [--channel C] [--date D]  # mark a posting (full URL
+                                                #   or unique substring) as applied-to; --resume records the
+                                                #   variant sent, --channel how it went out
+                                                #   (direct|agency|referral), --date back-dates an
+                                                #   application made outside the pipeline
   python pipeline.py passed  --url X            # mark a posting as reviewed-and-passed
   python pipeline.py expired --url X            # posting is dead/expired: chain-wide passed + a fixed
                                                 #   note event, so relistings auto-skip (refused on an
@@ -150,12 +152,12 @@ def cmd_backup(conn, output=None):
     return destination, summary
 
 
-def cmd_mark(conn, url, status, resume=None, channel=None):
+def cmd_mark(conn, url, status, resume=None, channel=None, status_date=None):
     """CLI wrapper over chain.mark_posting: record the user's decision on a posting
     (`status` is 'applied', 'passed', or None for undo; `resume` and `channel` optionally
-    record the resume variant sent / the application channel with an 'applied'). `url` may
-    be a unique substring of the job_url. The decision propagates across the whole repost
-    chain."""
+    record the resume variant sent / the application channel with an 'applied'; `status_date`
+    back-dates the decision). `url` may be a unique substring of the job_url. The decision
+    propagates across the whole repost chain."""
     label = status or "undo"
     for flag, val in (("--resume", resume), ("--channel", channel)):
         if val and status != "applied":
@@ -164,11 +166,16 @@ def cmd_mark(conn, url, status, resume=None, channel=None):
             print(f"[{label}] {flag} only applies with `applied` — ignored", file=sys.stderr)
     if status != "applied":
         resume = channel = None
+    if status_date and not status:
+        # An undo clears status_date outright, so a date typed with --undo asks for something
+        # that cannot happen. Say so rather than accepting it silently.
+        print(f"[{label}] --date does not apply to `--undo` — ignored", file=sys.stderr)
+        status_date = None
     m, err = resolve_posting(conn, url)
     if err:
         print(f"[{label}] {err}", file=sys.stderr)
         return False
-    ok, msg, _, _ = mark_posting(conn, m, status, resume, channel)
+    ok, msg, _, _ = mark_posting(conn, m, status, resume, channel, status_date)
     print(f"[{label}] {msg}", file=sys.stdout if ok else sys.stderr)
     if ok and status == "applied":
         try:
@@ -489,7 +496,10 @@ def main():
                                         "expired", "reject", "event", "dupe", "prune",
                                         "backup", "email-shadow", "second-judge", "ui"])
     ap.add_argument("--date", help="report date YYYY-MM-DD (default today); "
-                                   "`event`: the date the event happened (default today)")
+                                   "`event`: the date the event happened (default today); "
+                                   "`applied`/`passed`: the date the decision happened "
+                                   "(default today) — back-dates an application made "
+                                   "outside the pipeline")
     ap.add_argument("--url", help="job_url (or unique substring) for `applied` / `passed` / "
                                   "`expired` / `reject` / `event` / `dupe`")
     ap.add_argument("--of", help="`dupe`: job_url (or unique substring) of the other posting this duplicates")
@@ -834,7 +844,8 @@ def main():
     elif args.command == "stats":
         cmd_stats(conn)
     elif args.command in ("applied", "passed"):
-        cmd_mark(conn, args.url, None if args.undo else args.command, args.resume, args.channel)
+        cmd_mark(conn, args.url, None if args.undo else args.command, args.resume, args.channel,
+                 args.date)
     elif args.command == "expired":
         cmd_expired(conn, args.url, args.undo)
     elif args.command == "reject":

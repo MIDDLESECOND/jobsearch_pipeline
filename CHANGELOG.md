@@ -7,6 +7,35 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-16 — `applied`/`passed` accept `--date`: a decision can be back-dated
+
+**Problem (live).** A GSI Environmental application submitted 2026-08-09 through the
+employer's portal was never recorded in `jobs.db`. It surfaced only because the candidate
+portal happened to be open while the deepdive batch was recommending a cold apply to the
+same requisition's Adzuna relisting. Recording it correctly was impossible:
+`chain.mark_posting` hard-coded `date.today()`, so the only available record was
+`status_date='2026-08-16'` — a false fact in the authoritative store, and one that shifts
+every derived reading by the delay.
+
+**What `status_date` drives**, and therefore what a wrong one corrupts: follow-up
+eligibility (application date + 7 days — the real day 7 was the day of recording, so the
+reminder would have fired a week late), the funnel's cohorting, and the re-apply guard's
+60-day window.
+
+**Change.** `mark_posting` takes an optional `status_date`; `pipeline.py applied|passed`
+passes the existing `--date` flag through. Validation happens before any write and mirrors
+`record_event`'s window exactly (2000-01-01..today, parse-strict) — the two carry
+cross-referencing comments, change one change both. The future bound is the load-bearing
+half: a future-dated typo silently retires the follow-up reminder with nothing on the card
+to explain it. Omitting `--date` still stamps today, so every existing path is unchanged;
+`--date` with `--undo` is refused out loud rather than ignored. The stamp is written
+chain-wide like every other decision field.
+
+**Not changed.** This is a recording affordance, not a judgment change: no gate, score,
+verdict, bucket, or schema moved. `app_events` dates already had this capability.
+
+---
+
 ## 2026-08-15 — Snippet-evidence rule: Adzuna snippet verdicts are provisional
 
 **Problem (measured).** Adzuna stores only the API's 500-char snippet, and the evaluator

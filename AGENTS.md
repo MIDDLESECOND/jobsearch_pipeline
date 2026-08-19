@@ -199,7 +199,7 @@ python pipeline.py second-judge [--wait M] [--collect-only] [--backfill-days N] 
 # First setup only: add --login; scheduled runs fail closed rather than opening auth UI.
 
 # Per-posting user decisions (--url takes a unique substring of the job_url, e.g. the job id):
-python pipeline.py applied --url <id> [--resume V] [--channel C] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral)
+python pipeline.py applied --url <id> [--resume V] [--channel C] [--date YYYY-MM-DD] [--undo]   # --resume records the variant sent; --channel how it went out (direct|agency|referral); --date back-dates an application made outside the pipeline (validated 2000-01-01..today, same window as `event --date`)
 python pipeline.py passed  --url <id> [--undo]
 python pipeline.py expired --url <id> [--undo]   # posting is dead/delisted (Adzuna lists stale ads): fixed note event + chain-wide passed, so relistings auto-skip; refused on applied chains — record an outcome event instead
 python pipeline.py reject  --url <id> --gate <name> [--pattern P] [--undo]

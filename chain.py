@@ -732,17 +732,35 @@ def _undo_exempt(conn, row, targets):
     return sorted(keep)
 
 
-def mark_posting(conn, row, status, resume_variant=None, channel=None):
+def mark_posting(conn, row, status, resume_variant=None, channel=None, status_date=None):
     """Set (status='applied'|'passed') or clear (status=None) the user's decision across
     `row`'s whole repost chain. `resume_variant` and `channel` (optional, applied only)
     record which resume went out and through which channel (states.ALL_CHANNELS).
+    `status_date` (optional, decisions only; default today) back-dates the decision to the
+    day it actually happened — the path for recording an application made outside the
+    pipeline, where stamping today would put a false fact in the authoritative store.
     Returns (ok, message, affected_urls, exempt_urls)."""
     channel, err = _norm_channel(channel)
     if err:
         return False, err, [], []
+    stamp = None
+    if status:
+        stamp = (status_date or "").strip() or date.today().isoformat()
+        try:
+            d = date.fromisoformat(stamp)
+        except (TypeError, ValueError):  # TypeError: a non-string from the JSON body
+            return False, f"decision date must be YYYY-MM-DD (got {status_date!r})", [], []
+        # Same window and rationale as record_event's — change one, change both. The FUTURE
+        # bound is the load-bearing half here too: status_date drives follow-up eligibility
+        # (applied date + 7 days), the funnel's cohorting, and the re-apply guard's 60-day
+        # window, so one accepted future-dated typo silently retires the follow-up reminder
+        # and mis-cohorts the role, with nothing on the card to show why.
+        if not (date(2000, 1, 1) <= d <= date.today()):
+            return False, (f"decision date {d.isoformat()} is outside 2000-01-01..today — a "
+                           f"decision records what already happened"), [], []
+        stamp = d.isoformat()
     targets = _chain_targets(conn, row)
     exempt = _forward_exempt(conn, row, targets) if status else None  # pre-state read
-    stamp = date.today().isoformat() if status else None
     propagate_app_status(conn, targets, status, stamp, resume_variant, channel)
     # Sync the outcome cache with the decision: re-applying restores the outcome from any
     # surviving event history; an undo (or a switch to 'passed') clears the cached columns

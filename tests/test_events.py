@@ -169,6 +169,52 @@ def test_reassert_applied_without_resume_keeps_stored_variant(conn):
     assert chain.effective_decision(conn, row)["resume_variant"] == "variant-B"
 
 
+def test_back_dated_decision_stamps_the_given_day_chainwide(conn):
+    # An application made outside the pipeline is recorded after the fact, so status_date must
+    # be settable to the day it really happened — stamping today would put a false fact in the
+    # authoritative store and shift the follow-up cadence (applied date + 7 days) by the delay.
+    make_job(conn, job_url="canon", company="Chain Co")
+    canon = conn.execute("SELECT * FROM jobs WHERE job_url='canon'").fetchone()
+    make_job(conn, job_url="relist", company="Chain Co", repost_of="canon")
+    ok, msg, _, _ = chain.mark_posting(conn, canon, "applied", "variant-B",
+                                       status_date="2026-01-05")
+    assert ok and "2026-01-05" in msg
+    stamps = [r[0] for r in conn.execute("SELECT status_date FROM jobs ORDER BY job_url")]
+    assert stamps == ["2026-01-05", "2026-01-05"]  # written chain-wide, like every other field
+    # Omitting it still means today, so the default path is untouched.
+    make_job(conn, job_url="u2")
+    row2 = conn.execute("SELECT * FROM jobs WHERE job_url='u2'").fetchone()
+    chain.mark_posting(conn, row2, "applied")
+    assert conn.execute("SELECT status_date FROM jobs WHERE job_url='u2'").fetchone()[0] == TODAY
+
+
+def test_back_dated_decision_rejects_garbage_and_future_dates(conn):
+    # Validation runs BEFORE any write: a rejected date must leave the chain untouched, not
+    # half-stamped. The future bound is the load-bearing one — status_date drives follow-up
+    # eligibility, funnel cohorting, and the re-apply guard's 60-day window, so a future typo
+    # would silently retire the reminder with nothing on the card to explain it.
+    row = make_job(conn, job_url="u1")
+    for bad in ("not-a-date", "2026-13-01", "2999-01-01", "1999-12-31"):
+        ok, msg, affected, _ = chain.mark_posting(conn, row, "applied", status_date=bad)
+        assert not ok and affected == [], bad
+        assert conn.execute(
+            "SELECT app_status, status_date FROM jobs WHERE job_url='u1'"
+        ).fetchone()[:] == (None, None), bad
+    # A real past date on the same row then works, proving nothing was left in a bad state.
+    ok, _, _, _ = chain.mark_posting(conn, row, "applied", status_date="2026-01-05")
+    assert ok
+
+
+def test_undo_clears_a_back_dated_stamp(conn):
+    # status_date rides the decision: clearing the decision must clear the date too, or an
+    # undone chain keeps a date that no longer describes anything.
+    row = make_job(conn, job_url="u1")
+    chain.mark_posting(conn, row, "applied", status_date="2026-01-05")
+    chain.mark_posting(conn, row, None)
+    assert conn.execute(
+        "SELECT app_status, status_date FROM jobs WHERE job_url='u1'").fetchone()[:] == (None, None)
+
+
 def test_resume_variant_never_rides_a_non_applied_chain(conn):
     # resume_variant is an applied-only field. A 'passed' mark with a variant must not store
     # it (it would be invisible and un-clearable: the UI renders the field only on applied

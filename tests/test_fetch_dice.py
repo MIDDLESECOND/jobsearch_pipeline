@@ -41,7 +41,7 @@ def _job(guid, *, title="Solutions Architect", company="Acme Corp",
     }
 
 
-def _search_payload(jobs, total_results=None, total_pages=1):
+def _search_payload(jobs, total_results=None, total_pages: int | None = 1):
     # A decoy widget AFTER the job list carries its own (site-wide) totals — the parser
     # must keep the first pair following the jobList anchor, exactly like the real pages.
     # total_pages=None OMITS the key: the LIVE envelope shape (probed 2026-08-10, per

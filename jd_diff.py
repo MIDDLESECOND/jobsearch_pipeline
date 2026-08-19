@@ -25,13 +25,21 @@ class JDEvidenceUnavailable(ValueError):
     """A selected immutable evidence object cannot be read and verified."""
 
 
-def _time_key(value):
+def _time_key(value, *, naive_timezone=None):
+    """Order version timestamps on one UTC clock (timeline._time_key's convention).
+
+    Historical producers stored naive machine-local ``datetime.now()`` values, while
+    fetch-side rows can carry aware instants; reading a naive value as UTC would misorder
+    mixed versions by the machine's UTC offset and attach diffs to the wrong snapshot.
+    ``naive_timezone`` exists for deterministic boundary tests.
+    """
     value = str(value or "")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-        return parsed
+        if parsed.tzinfo is None:
+            parsed = (parsed.replace(tzinfo=naive_timezone) if naive_timezone is not None
+                      else parsed.astimezone())
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     except (ValueError, OSError, OverflowError):
         return datetime.min
 

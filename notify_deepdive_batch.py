@@ -136,8 +136,12 @@ def zone_rows(conn):
     earns its keep: a placeholder date ("9999-12-31") reads as permanently fresh here
     while the second judge correctly ages it out through first_seen.
     """
-    cutoff = dt.date.today() - dt.timedelta(days=FRESH_DAYS)
-    batch_cutoff = dt.date.today() - dt.timedelta(days=BATCH_FRESH_DAYS)
+    # One clock read: across a midnight slot two date.today() calls would let the zone
+    # cutoff and the batch-freshness cutoff disagree by a day — the exact split the
+    # "same recency reading" note below promises cannot happen.
+    today = dt.date.today()
+    cutoff = today - dt.timedelta(days=FRESH_DAYS)
+    batch_cutoff = today - dt.timedelta(days=BATCH_FRESH_DAYS)
     rows = conn.execute(
         """
         SELECT j.job_url, j.first_seen, j.date_posted,

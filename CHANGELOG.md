@@ -7,6 +7,56 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-18 — `fit_score` is validated at normalization: garbage can no longer cross the action bars
+
+**Problem (verified against a real SQLite).** `normalize_result` holds `ai_artifact_depth` to a
+finite-number partition, but `fit_score` — the value every action bar reads — was written to the
+DB exactly as the model emitted it; the only code that ever touched it was the GATE_FAIL branch's
+deliberate null. Two failure shapes, both silent at the sqlite3 boundary: a float NaN **binds as
+NULL**, so a PASS row vanishes from every fit-line query (the second judge's zone selection,
+report ordering, the backlog's score views); a string is **stored as TEXT**, which SQLite orders
+above every integer, so `'abc' >= 15` is TRUE and a garbage row crosses the cold-apply and
+recruiter-route bars straight into the paid second-judge batch. `second_judge.py` transcribes the
+same value into `second_opinions`, so the pollution propagated to the review layer.
+
+**Change.** The scored-verdict side of `normalize_result` now holds `fit_score` to the output
+spec's declared domain (`"null or integer 0-18"`): int/float, not bool, finite, 0–18 — the depth
+cap's partition plus the range. An invalid value is nulled and flagged **`fit-score-invalid`**
+into `eval_issues`, which routes the undecided row into the Needs-attention queue. Review, never
+re-route: fit is a sort key, not a routing gate, so unlike the depth cap the verdict is untouched
+— the row just becomes visible instead of invisibly sorted (NaN) or fraudulently promoted (TEXT).
+None/missing on a scored verdict is flagged too: the spec sets fit whenever gates pass, a scored
+row with NULL fit is the same invisibility class, and deriving the flag from the stored None is
+what keeps it alive through `_write_result`'s re-normalization, which rebuilds `eval_issues` from
+scratch.
+
+**Fractions are coerced, not discarded.** The model occasionally emits 15.5;
+`needs_arbitration`/`_fit_key` already read any finite in-range float as a usable fit, so the
+consistent treatment is truncation to the declared integer domain. `int()` is floor on this
+non-negative range: a fraction never rounds UP across an action bar.
+
+**Coverage.** Both judges share the fix — the second judge normalizes through the same path
+before its `second_opinions` write. `workflow.py`'s needs-attention predicate already keys on
+`eval_issues IS NOT NULL`, and both the report and the UI render issue tokens verbatim, so no
+query or rendering change rides along.
+
+**Measured before shipping.** Across the live DB's 37,765 scored rows, `fit_score` is
+currently `integer` or NULL in every one — the TEXT and out-of-range shapes have not
+happened yet, so that half of this is preemptive. The NULL half is live: **12
+RECRUITER_ONLY rows carry no fit and no flag** (0.03%, two of them from today) — each one a
+model-emitted `"fit_score": null` with no `score_breakdown` at all, so the depth cap's
+fail-closed arm had already ROUTED them correctly; what was broken is only that they are
+invisible to every fit-ordered surface. Re-normalized under the new code, all 12 flag. Those
+historical rows are not retroactively rewritten; new ones will carry the token. `backtest_v2` re-run after the change: 8 anchors matched, 0 missed, 2 known-alarm
+XPASS, exit 0 — the regression baseline did not move, and no case produced the new token.
+
+**Not changed.** A legitimate integer 0–18 passes through untouched, so every already-stored
+row reads exactly as before and the re-evaluation instruments (`backtest_v2`, `canary`,
+`noise_probe` — all of which normalize a FRESH response, never a stored one) are unaffected
+on any well-formed draw. No gate, verdict, bucket, or schema moved.
+
+---
+
 ## 2026-08-17 — `pipeline_runs` gains `abandoned`: a killed run stops reading as in-flight
 
 **Problem (measured).** A run only ever writes its own terminal status, so a process that is

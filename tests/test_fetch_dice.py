@@ -44,11 +44,15 @@ def _job(guid, *, title="Solutions Architect", company="Acme Corp",
 def _search_payload(jobs, total_results=None, total_pages=1):
     # A decoy widget AFTER the job list carries its own (site-wide) totals — the parser
     # must keep the first pair following the jobList anchor, exactly like the real pages.
+    # total_pages=None OMITS the key: the LIVE envelope shape (probed 2026-08-10, per
+    # fetch.py's derivation comment — real pages ship totalResults but no totalPages), so
+    # a fixture carrying the key is the tolerated variant, not the norm it reads as.
     total = len(jobs) if total_results is None else total_results
+    tp = "" if total_pages is None else ',"totalPages":%d' % total_pages
     return ('12:["$","$L2e",null,{"jobList":{"data":%s,'
-            '"totalResults":%d,"totalPages":%d}}]\n'
+            '"totalResults":%d%s}}]\n'
             '13:{"siteWideWidget":{"totalResults":6033,"totalPages":202}}'
-            % (json.dumps(jobs), total, total_pages))
+            % (json.dumps(jobs), total, tp))
 
 
 _DETAIL_JD = ("<p>Own the pipeline &amp; ship it</p>"
@@ -593,6 +597,40 @@ def test_fetch_dice_walks_pages_and_stops_at_total_pages(conn, monkeypatch):
 
     assert fetch.fetch_dice(_dice_cfg(results_pages=5), conn) == 2
     assert len([u for u in calls if "dice.com/jobs?" in u]) == 2
+
+
+def test_fetch_dice_derives_the_page_bound_when_the_envelope_has_no_total_pages(
+        conn, monkeypatch):
+    """The LIVE envelope shape: real pages ship totalResults but NO totalPages (probed
+    2026-08-10 — fetch.py derives the bound as ceil(totalResults / first page's size)).
+    Until now every fixture here carried the key, so the derivation branch production
+    actually runs had zero coverage — the 4aa54e5 class of gap, where an invented
+    fixture shape keeps a suite green around untested code. The derived bound must stop
+    the sweep exactly at the last real page: past the end Dice answers an EMPTY envelope
+    still advertising the full total, which reads as a parse failure and fails a healthy
+    query. Three rows across two pages, five allowed: exactly two search requests, page
+    sizes 2 then 1 (ceil(3/2) = 2, floor would stop at page 1), and a third request
+    would KeyError loudly."""
+    pages = {
+        1: _flight_html(_search_payload([_job("p1a"), _job("p1b")],
+                                        total_results=3, total_pages=None)),
+        2: _flight_html(_search_payload([_job("p2a")],
+                                        total_results=3, total_pages=None)),
+    }
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if "dice.com/jobs?" in url:
+            return pages[int(parse_qs(urlsplit(url).query)["page"][0])]
+        return _detail_html()
+
+    monkeypatch.setattr(fetch, "_dice_get", get)
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    summary = fetch.fetch_dice(_dice_cfg(results_pages=5), conn)
+    assert summary == 3 and summary.successes == 1 and summary.failures == 0
+    assert len([u for u in calls if "dice.com/jobs?" in u]) == 2   # ceil(3/2), never 5
 
 
 def test_fetch_dice_sends_the_phrase_quoted(conn, monkeypatch):

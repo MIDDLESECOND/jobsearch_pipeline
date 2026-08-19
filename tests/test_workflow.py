@@ -342,6 +342,25 @@ def test_route_cadence_values_are_validated(conn):
             workflow.query_action_page(conn, "recruiter_route", **bad)
 
 
+def test_recruiter_route_bar_defaults_mirror_the_states_constant():
+    """states.py documents RECRUITER_ROUTE_MIN_FIT as "workflow's recruiter_route
+    default", but the defaults are LITERALS — two signature defaults here and the
+    config-absent fallback inside app._route_cadence — and nothing tied them to the
+    constant: raise the bar in states.py and every suite stays green while the Action
+    Center keeps queueing at the old line. Pin all three to the constant (whether
+    production should import it instead of repeating 15 is a separate decision)."""
+    import inspect
+
+    import app
+    from states import RECRUITER_ROUTE_MIN_FIT
+
+    for fn in (workflow.query_action_page, workflow.action_center):
+        assert (inspect.signature(fn).parameters["route_min_score"].default
+                == RECRUITER_ROUTE_MIN_FIT), fn.__name__
+    assert (app._route_cadence({"settings": {}})["route_min_score"]
+            == RECRUITER_ROUTE_MIN_FIT)
+
+
 def test_action_center_includes_pageable_possible_duplicates(conn):
     today = date.today().isoformat()
     make_job(conn, job_url="li", company="Same Co", title="Data Analyst",

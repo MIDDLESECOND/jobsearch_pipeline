@@ -381,7 +381,11 @@ def _body(**overrides):
 
 def test_request_body_carries_the_production_settings():
     b = _body()
-    assert b["reasoning_effort"] == evaluation.DEEPSEEK_EFFORT
+    # The literal, not evaluation.DEEPSEEK_EFFORT: asserting the constant against
+    # itself stays green at any value, and "low" is the cost-bearing default tier
+    # (measured 2026-08-13: low is honored; illegal values 400). Same rule as the
+    # other literals below — a drifted default must turn this red.
+    assert b["reasoning_effort"] == "low"
     assert b["max_tokens"] == 16000
     assert b["temperature"] == 0
     assert b["response_format"] == {"type": "json_object"}

@@ -71,6 +71,16 @@ def test_stale_rows_leave_the_zone_and_the_batch_window_is_tighter(conn):
     assert stale["job_url"] not in rows
 
 
+def test_zone_window_mirrors_the_second_judge():
+    """FRESH_DAYS says "mirror the ... second-judge window" in a comment, and until now
+    the comment was the only coupling: widen one side to 21 and both modules' suites
+    stay green while the popup counts a different zone than the judge actually reviews
+    (the AGENTS.md change-one-change-both pair — the predicate has already drifted
+    twice). Import-and-compare is deliberately the whole test."""
+    import second_judge
+    assert nb.FRESH_DAYS == second_judge.FRESH_DAYS
+
+
 def test_second_judge_downgrade_removes_a_row_from_the_batch_scope(conn):
     agreed = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())
     demoted = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())
@@ -338,10 +348,16 @@ def test_arrivals_watermark_chunks_a_long_processed_list(conn):
 
 
 def _counts(conn, state):
-    """main()'s own derivation — the function, not a copy of it."""
-    pending, _, new_rows = nb.pending_split(
-        nb.zone_rows(conn), set(state.get("processed_urls") or []),
-        state.get("last_batch_iso", ""))
+    """main()'s own derivation, call for call — the functions, not a copy of them:
+    `processed` and the remembered doorbell mark feed arrivals_mark, and ITS result is
+    the stamp pending_split compares against. No state key reaches pending_split
+    directly (`last_batch_iso` in particular has no production reader — the skill
+    still writes it, but main() derives the mark from the DB since 7a0b350)."""
+    processed = set(state.get("processed_urls") or [])
+    door = state.get("doorbell")
+    door = door if isinstance(door, dict) else {}
+    last_batch = nb.arrivals_mark(conn, processed, door.get("arrivals_mark"))
+    pending, _, new_rows = nb.pending_split(nb.zone_rows(conn), processed, last_batch)
     return pending, new_rows
 
 
@@ -351,7 +367,7 @@ def test_arrivals_are_always_a_subset_of_pending(conn):
     make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())          # batchable, new
     make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())          # sub-bar, new
     make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())  # RO, new
-    for state in ({}, {"last_batch_iso": _recent(days=1)}):
+    for state in ({}, {"doorbell": {"arrivals_mark": _recent(days=1)}}):
         pending, new_rows = _counts(conn, state)
         assert set(new_rows) <= set(pending)
         assert len(new_rows) <= len(pending)

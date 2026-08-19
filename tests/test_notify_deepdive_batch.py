@@ -289,6 +289,21 @@ def test_session_pct_reads_the_window_row_and_survives_a_shapeless_payload():
     assert nb.session_pct([]) is None
 
 
+def test_a_non_finite_percent_is_unknown_and_still_fails_open():
+    """"Unknown" has to mean ONE thing in this file. nan/inf pass float() and then
+    fail CLOSED where every other unknown fails open: nan reaches guard_budget,
+    max(0.0, nan) is 0.0, the batch truncates to nothing AND the run stamps
+    guard_skipped_at — so the next popup reports a guard skip that never happened.
+    Measured before the guard: (0, 0) against (21, 3) for an unreadable window."""
+    for junk in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+        assert nb.session_pct([(nb.SESSION_LABEL, junk, "y")]) is None
+    # composition, not just the parse: a non-finite percent must reach batch_counts
+    # as "unknown" and leave the counts unguarded, exactly like an unreadable quota.
+    unknown = nb.session_pct([(nb.SESSION_LABEL, float("nan"), "y")])
+    assert nb.batch_counts(21, 31, nb.guard_budget(unknown), 0.27, 0.27) == (
+        21, nb.SNIPPET_QUOTA)
+
+
 def test_arrivals_watermark_comes_from_the_column_it_is_compared_against(conn):
     """The state file's last_batch_iso is written by prose instruction in a gitignored
     skill file, and on 2026-08-16 it arrived as a UTC wall clock where the contract asks

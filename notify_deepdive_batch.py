@@ -385,9 +385,18 @@ def session_pct(quota):
     for label, pct, _ in quota:
         if label == SESSION_LABEL:
             try:
-                return float(pct)
+                got = float(pct)
             except (TypeError, ValueError):
                 return None
+            # nan/inf survive float() while being the definition of "not a known
+            # percent", and they are the one unknown here that fails CLOSED: nan
+            # flows through guard_budget into max(0.0, nan) == 0.0, which truncates
+            # the batch to nothing AND stamps guard_skipped_at, so the next popup
+            # reports a guard skip that never happened. Measured: (0, 0) where an
+            # unknown window gives (21, 3). No observed trigger — `percent` is read
+            # verbatim, so the endpoint would have to emit a bare NaN token — this
+            # only completes the partition the docstring above already promises.
+            return got if math.isfinite(got) else None
     return None
 
 

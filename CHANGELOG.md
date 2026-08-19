@@ -7,6 +7,41 @@ changes to *how postings are judged* do.
 
 ---
 
+## 2026-08-17 — `pipeline_runs` gains `abandoned`: a killed run stops reading as in-flight
+
+**Problem (measured).** A run only ever writes its own terminal status, so a process that is
+killed — machine sleep or shutdown, a closed console, the USB-drive death recorded in the
+project notes — leaves its row at `status='running'` with `ended_at IS NULL` forever. Measured
+2026-08-16: **5 of 44 runs (11%)** sat that way, the oldest for eight days. Two consequences,
+both silent: "is a cycle in flight right now" was unanswerable, and the ~11% mid-cycle death
+rate was invisible because nothing surfaces an unfinished row.
+
+**Not a cooldown bug.** `meta.last_run_ok_ended` is stamped only after a full successful cycle,
+so zombies never suppressed a slot. That is precisely why they went unnoticed for nine days.
+
+**Change.** `health.abandon_stale_runs` marks `running` rows older than `STALE_RUN_HOURS` (12)
+as `abandoned`, and `start_pipeline_run` calls it — a starting run is the one moment the
+pipeline is certainly executing, so no separate sweep can be forgotten. `ended_at` stays NULL
+on purpose: the real end time is unknown and stamping "now" would manufacture a duration for a
+run that stopped hours earlier. Liveness therefore reads off `status`, never `ended_at IS NULL`.
+
+**Why 12 hours.** The threshold must clear the longest LEGITIMATE run by a wide margin, because
+concurrent runs are deliberately unguarded here and a live one must never be reaped by another
+starting. Eval-heavy cycles paying off a peak-deferral backlog have measured 85 and 194 minutes,
+so 12h leaves roughly a 4x margin; a run stuck that long is certainly dead.
+
+**On extending the `status` vocabulary.** The `eval_deferred` precedent (2026-08-16) deliberately
+added a separate column rather than a status value, on the grounds that a deferred slot really
+did complete and overloading `status` would make `completed_run_status` lie. This case differs:
+`running → abandoned` is a terminal transition on the same axis `status` already describes, not
+an orthogonal fact about a stage. No schema migration is needed — the column carries no CHECK.
+
+**Not changed.** No gate, score, verdict, bucket, or `jobs` schema moved. The two guarded UPDATEs
+already required `status='running'`, so an abandoned row simply can no longer be finished or
+accrue fetch attempts — correct for a run whose process is gone.
+
+---
+
 ## 2026-08-16 — `applied`/`passed` accept `--date`: a decision can be back-dated
 
 **Problem (live).** A GSI Environmental application submitted 2026-08-09 through the

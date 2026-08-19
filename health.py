@@ -16,7 +16,16 @@ MAX_HEALTH_DAYS = 365
 MAX_RUN_HISTORY = 100
 MAX_EFFECTIVENESS_ROWS = 500
 MAX_ATTEMPTS_IN_RESPONSE = 1_000
-_RUN_STATUSES = {"running", "succeeded", "degraded", "failed", "interrupted", "skipped"}
+# A run whose process died leaves its row at 'running' forever: the recorder only ever writes a
+# terminal status from inside the process it is recording. Measured 2026-08-16, 5 of 44 runs
+# (11%) sat that way — the oldest for 8 days — which made "is a run in flight" unanswerable and
+# hid the death rate entirely. STALE_RUN_HOURS is the age past which a 'running' row is read as
+# dead rather than slow. It must exceed the longest LEGITIMATE run by a wide margin: eval-heavy
+# cycles paying off a peak-deferral backlog have measured 85–194 minutes, and concurrent runs are
+# deliberately unguarded here, so a live run must never be reaped by another one starting.
+STALE_RUN_HOURS = 12
+_RUN_STATUSES = {"running", "succeeded", "degraded", "failed", "interrupted", "skipped",
+                 "abandoned"}
 _ATTEMPT_STATUSES = {"success", "failed", "skipped"}
 _SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$")
 _ACTIVE_RUN_ID: ContextVar[int | None] = ContextVar(
@@ -121,10 +130,55 @@ def fetch_error_kind(exc):
     return "unexpected"
 
 
+def abandon_stale_runs(conn, *, now=None, older_than_hours=STALE_RUN_HOURS):
+    """Mark 'running' rows older than `older_than_hours` as 'abandoned'. Returns the count.
+
+    A run only ever writes its own terminal status, so a process that is killed — machine sleep
+    or shutdown, a closed console, the USB-drive death — leaves its row 'running' permanently.
+    Nothing else notices: the cooldown stamp (`meta.last_run_ok_ended`) is written only on full
+    success, so zombies never suppress a slot, and that is exactly why they stayed invisible.
+
+    `ended_at` is deliberately left NULL. The row's end time is genuinely unknown, and stamping
+    "now" would manufacture a duration for a run that stopped hours earlier. Liveness therefore
+    reads off `status`, not `ended_at IS NULL` — the two guarded UPDATEs in this module already
+    require `status='running'`, so an abandoned row can never be finished or accrue attempts
+    afterwards, which is the correct behaviour for a run whose process is gone.
+    """
+    if isinstance(older_than_hours, bool) or not isinstance(older_than_hours, (int, float)) \
+            or older_than_hours <= 0:
+        raise ValueError("older_than_hours must be a positive number of hours")
+    try:
+        if now is None:
+            reference = datetime.now(timezone.utc)
+        else:
+            reference = datetime.fromisoformat(now) if isinstance(now, str) else now
+        # start_pipeline_run writes _iso_now(), i.e. an aware UTC stamp, so the column is
+        # offset-consistent and a string comparison is a time comparison. A naive `now` would
+        # silently compare against those offsets, so normalize it rather than trust the caller.
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        cutoff = (reference.astimezone(timezone.utc)
+                  - timedelta(hours=older_than_hours)).isoformat(timespec="seconds")
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("now must be an ISO timestamp or datetime") from exc
+    updated = conn.execute(
+        """UPDATE pipeline_runs SET status='abandoned'
+            WHERE status='running' AND ended_at IS NULL AND started_at < ?""",
+        (cutoff,),
+    )
+    conn.commit()
+    return updated.rowcount
+
+
 def start_pipeline_run(conn, *, trigger, run_date, started_at=None):
-    """Insert a durable running marker before any source or paid stage starts."""
+    """Insert a durable running marker before any source or paid stage starts.
+
+    Reaps stale 'running' rows first: a starting run is the one moment the pipeline is certainly
+    executing, which makes it the natural place to retire rows that can no longer be in flight.
+    """
     if conn.in_transaction:
         raise RuntimeError("cannot start pipeline health record inside another transaction")
+    abandon_stale_runs(conn)
     trigger = _safe_token(trigger, "run trigger")
     try:
         run_date = date.fromisoformat(str(run_date)).isoformat()

@@ -90,6 +90,71 @@ def test_run_lifecycle_persists_bounded_structured_source_facts(conn):
         )
 
 
+def _running_rows(conn, *started_at):
+    """Insert 'running' rows with exact start times, bypassing start_pipeline_run's own reaper."""
+    ids = []
+    for stamp in started_at:
+        cur = conn.execute(
+            """INSERT INTO pipeline_runs (started_at,ended_at,trigger,run_date,status)
+               VALUES (?,NULL,'scheduled',?,'running')""", (stamp, stamp[:10]))
+        ids.append(cur.lastrowid)
+    conn.commit()
+    return ids
+
+
+def test_stale_running_rows_are_abandoned_but_a_live_long_run_is_not(conn):
+    # A killed process never writes its own terminal status, so its row sits 'running' forever
+    # (measured 2026-08-16: 5 of 44 runs, oldest 8 days). The reaper retires those — but eval
+    # backlogs after a peak-deferral have measured 85-194 minutes and concurrent runs are
+    # deliberately unguarded, so a run that is merely SLOW must survive another one starting.
+    from health import abandon_stale_runs
+
+    # Inserted directly, not through start_pipeline_run: that entry point reaps against the REAL
+    # clock, which would retire these fixtures before the assertions ever run.
+    dead, slow = _running_rows(conn, "2026-08-08T22:00:00+00:00", "2026-08-17T04:00:00+00:00")
+    now = "2026-08-17T07:30:00+00:00"          # `slow` is 3.5h in — legitimately long, not dead
+
+    assert abandon_stale_runs(conn, now=now) == 1
+    states = dict(conn.execute("SELECT id, status FROM pipeline_runs").fetchall())
+    assert states[dead] == "abandoned"
+    assert states[slow] == "running"
+    # ended_at stays NULL: the row's real end time is unknown and stamping "now" would invent a
+    # duration for a run that stopped hours earlier.
+    assert conn.execute("SELECT ended_at FROM pipeline_runs WHERE id=?", (dead,)).fetchone()[0] is None
+    # Idempotent — a second pass finds nothing left to retire.
+    assert abandon_stale_runs(conn, now=now) == 0
+
+
+def test_abandoned_run_cannot_be_finished_or_accrue_attempts(conn):
+    # Both guarded UPDATEs in health.py require status='running', so retiring a row must close
+    # it to later writes; a dead run acquiring a terminal status or new attempts would be a lie.
+    import pytest
+
+    from health import abandon_stale_runs, finish_pipeline_run, record_fetch_attempt
+
+    (dead,) = _running_rows(conn, "2026-08-08T22:00:00+00:00")
+    assert abandon_stale_runs(conn, now="2026-08-17T07:30:00+00:00") == 1
+    with pytest.raises(ValueError):
+        finish_pipeline_run(conn, dead, status="succeeded")
+    with pytest.raises(ValueError):
+        record_fetch_attempt(conn, run_id=dead, source_family="linkedin", target_kind="search",
+                             target_label="x", definition_hash="d" * 16, status="success")
+
+
+def test_starting_a_run_reaps_stale_rows(conn):
+    # The reaper hangs off start_pipeline_run because a starting run is the one moment the
+    # pipeline is certainly executing — no separate scheduled sweep to forget to wire up.
+    from health import start_pipeline_run
+
+    conn.execute(
+        """INSERT INTO pipeline_runs (started_at,ended_at,trigger,run_date,status)
+           VALUES ('2026-01-01T00:00:00+00:00',NULL,'scheduled','2026-01-01','running')""")
+    conn.commit()
+    start_pipeline_run(conn, trigger="manual", run_date="2026-08-17")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM pipeline_runs WHERE status='abandoned'").fetchone()[0] == 1
+
+
 def test_run_history_marks_globally_bounded_attempt_details_as_partial(conn, monkeypatch):
     import health
     from health import finish_pipeline_run, health_snapshot, start_pipeline_run

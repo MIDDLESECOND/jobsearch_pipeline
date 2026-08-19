@@ -485,7 +485,14 @@ Windows Task Scheduler.
   `pipeline_fetch_attempts`; a legitimate zero-result response is success, while target inserts
   and their success fact commit together. A target failure first rolls back its partial jobs, then
   commits only a categorized failure fact. `pipeline_runs` brackets the complete cycle; an
-  uncaught downstream failure stores its stage and exception class but not its message. The
+  uncaught downstream failure stores its stage and exception class but not its message. A run
+  writes its own terminal status, so a KILLED process (sleep, shutdown, closed console) leaves
+  its row `running` forever — measured 2026-08-16, 5 of 44 runs. `health.abandon_stale_runs`
+  (called by `start_pipeline_run`, threshold `STALE_RUN_HOURS`=12) retires those as `abandoned`
+  with `ended_at` left NULL, because the real end time is unknown and stamping "now" would invent
+  a duration. **Liveness reads off `status`, never `ended_at IS NULL`.** The threshold must stay
+  far above the longest legitimate run — eval-heavy cycles measured 85–194 min, and concurrent
+  runs are deliberately unguarded, so a live run must never be reaped by another one starting. The
   cooldown success stamp advances only when at least one real fetch target succeeded, including a
   successful zero-result response—not when every target failed or nothing was configured.
   `pipeline_runs.eval_deferred` records that a completed cycle deliberately skipped the paid

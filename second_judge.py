@@ -1,11 +1,53 @@
 """Second-opinion review layer: an independent judge re-reads the day's
 interesting zone and its opinions render in the report as evidence.
 
-The zone is PASS at/above the cold-apply bar plus RECRUITER_ONLY at/above the
-recruiter-route bar (states.COLD_APPLY_MIN_FIT / RECRUITER_ROUTE_MIN_FIT) —
-undecided, unfiltered, posted within 14 days: every row the user might act on
-plus the border band where the primary judge's ~22% draw noise buries or
-under-scores real candidates. Adzuna snippet rows (500-char stored text —
+RETIRED 2026-08-22 — UNSCHEDULED, NOT DELETED. `run_second_judge.bat` no longer
+invokes it; `pipeline.py second-judge` still works by hand, the module is intact,
+and `second_opinions` keeps all 728 collected opinions as evidence. Restore by
+uncommenting the two lines in that .bat (and re-adding health.py's sentinel).
+
+Why: the layer's only mechanical consumer is notify_deepdive_batch's `batchable`
+subquery, and on 2026-08-22 the deepdive batch floor dropped to PASS 13, which
+made the pre-screen duplicative. Measured over the 4 post-08-19 days: all 97
+opinions landed on rows INSIDE the batch's own 5-day window (zero on rows the
+batch cannot reach), and the 11 verdict-level downgrades saved 2.8 rows/day —
+about 3.6 minutes of reading — for $1.70/day. The 2026-08-19 entry had justified
+keeping this band on "5.4 more genuine rows of coverage per day rather than merely
+saved time"; that claim required SESSION_GUARD_PCT to truncate batches, and all
+44 doorbell firings in the guard's 7-day life (2026-08-16 on) left zero
+guard-skip lines. It was merely saved time, at 3.6 min/day. Full evidence in CHANGELOG 2026-08-22.
+
+The zone is PASS at/above the standing allocation's cold-apply bar (PASS_MIN_FIT) —
+undecided, unfiltered, posted within 14 days: the rows the user might actually
+cold-apply to.
+
+It was WIDER until 2026-08-19, also covering PASS 13-14 ("rescue" the primary
+judge's draw-noise burials) and RECRUITER_ONLY >=15. The 2026-08-12 layer's
+one-week cost/yield review cut both bands; the CHANGELOG entry carries the
+evidence, and the short version is that neither could pay out by construction:
+the second judge scores ~2.5 fit LOWER than the primary (mean -2.49 over 608
+pairs, 3 rows scored higher), so it can never lift a 13-14 row over the bar —
+measured ceiling across 297 opinions was 14, zero reached 15 — and neither band
+could reach the one mechanical consumer of an opinion: at the time,
+notify_deepdive_batch's `batchable` needed verdict='PASS' AND fit>=BATCH_MIN_FIT
+(15), so PASS 13-14 failed the fit leg and RECRUITER_ONLY failed the verdict leg.
+Behaviourally both were inert too: 297 PASS 13-14 opinions produced 1 user
+decision (against the opinion), and 59 RECRUITER_ONLY opinions produced 0
+contacts / 0 tasks / 0 stars / 0 decisions, against a DB where 0 of 12 recorded
+contacts sit on a RECRUITER_ONLY row at all.
+
+Do not widen this back without new evidence on BOTH legs. The consumer leg is now
+MET FOR BOTH bands — 2026-08-22 dropped BATCH_MIN_FIT to states.COLD_APPLY_MIN_FIT
+(13) that morning and added RECRUITER_ONLY to `batchable` that evening, so the
+deepdive batch reads PASS 13-14 AND RECRUITER_ONLY >=13 unscreened. Both bands
+stay out on the cost leg alone — only a verdict-level opinion
+(RECRUITER_ONLY/GATE_FAIL, ~14% of rows) removes a row from a batch, and for
+RECRUITER_ONLY rows only a GATE_FAIL opinion does, so re-reading ~19 PASS 13-14
+plus ~20 RECRUITER_ONLY full-text rows/day at the measured $0.070/row (~$2.7/day)
+would spare the batch a few rows/day priced at 0.10% of the 5h window each: a
+pre-screen that costs more than what it screens, guarding a batch nowhere near
+its guard. That arithmetic is the reopening condition now: a batch that actually
+hits SESSION_GUARD_PCT, or a unit cost well under $0.07/row. Adzuna snippet rows (500-char stored text —
 core.ADZUNA_SNIPPET_MAX_CHARS) are OUT of the zone since 2026-08-15: both
 judges read the same stored description, so a snippet opinion pays to re-read
 known-insufficient evidence; those rows go through browser JD completion
@@ -41,12 +83,19 @@ from datetime import date, datetime, timedelta
 from core import ADZUNA_SNIPPET_MAX_CHARS, _ensure_api_key, recency_dt
 from evaluation import (MODEL_PRICES, build_system_prompt, build_user_msg,
                         first_text, normalize_result, parse_eval_json)
-from states import (COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT, VERDICT_PASS,
-                    VERDICT_RECRUITER_ONLY, classify_disagreement)
+from states import VERDICT_PASS, classify_disagreement
 
 MODEL = "claude-opus-5"
-PASS_MIN_FIT = COLD_APPLY_MIN_FIT        # PASS zone floor (13+ includes the rescue band)
-RO_MIN_FIT = RECRUITER_ROUTE_MIN_FIT     # RECRUITER_ONLY zone floor
+# The zone floor. A LOCAL literal, deliberately not states.RECRUITER_ROUTE_MIN_FIT even
+# though both are 15: that constant means "the recruiter-route action bar", while this
+# one means "the standing allocation's cold-apply bar" — the same value for different
+# reasons, and importing one for the other would silently move this zone the next time
+# the recruiter queue is retuned. notify_deepdive_batch.BATCH_MIN_FIT shared the number
+# until 2026-08-22; it now aliases states.COLD_APPLY_MIN_FIT (13 - a code-owned
+# admission line, not a guide bar; the guide's own cold-apply line reads 15), so the
+# batch reads two fit points BELOW what this judge pre-screens — the module docstring
+# carries the cost/yield arithmetic for leaving that gap open.
+PASS_MIN_FIT = 15
 # date_posted backstop — the standing allocation's own freshness rule. Nearly inert in
 # the daily flow (LinkedIn ships no date_posted at all and the fetchers run every 3h at
 # hours_old=4, so discovery age IS posting age for half the zone); it earns its keep only
@@ -71,10 +120,15 @@ DELTA_DAYS = 2
 # lands pays to write its OWN copy at 1.25x input. Measured 2026-08-12 on two real batches:
 # 51 requests shared it (17.2k read / 4.7k written per row, $0.046/row) while 150 fanned out
 # and duplicated it (5.0k read / 16.9k WRITTEN per row, $0.082/row -- cache writes alone were
-# 65% of that batch's $12.22). Sized to the steady-state daily flow (~50 zone rows) so one
-# slot normally drains it in a single well-cached batch. Two data points, not a curve: if a
-# batch this size still thrashes, dropping cache_control entirely is the bounded fallback
-# (a plain uncached system prompt is $0.043/row, cheaper than a write that nobody reads).
+# 65% of that batch's $12.22). Sized to the steady-state daily flow so one slot normally
+# drains it in a single well-cached batch; after the 2026-08-19 band cut that flow is
+# ~19 rows/day, so the cap is now headroom rather than a live constraint.
+# 2026-08-19 correction, from the week's real spend: $0.046/row was ONE lucky batch, not
+# the unit cost — 24 batches ran 0-82% shared with no size relationship after 08-13, and
+# the actual mean was $0.070/row (cache writes 58% of spend, prompt 23.3k tok/row).
+# DO NOT take the cache_control fallback on those numbers: re-priced over all 24 batches,
+# caching still SAVED $7.58 of $51.72 (15%); it only loses below 21.7% sharing, and the
+# 12 batches under that line cost $1.33 between them.
 MAX_PER_SUBMIT = 50
 MAX_TOKENS = 8000   # thinking is on by default on this model and counts against the cap
 MAX_RETRIES = 2     # bounded: a persistently failing row must not become a paid loop
@@ -176,25 +230,30 @@ def pending_rows(conn, backfill_days=None):
     # logic a NULL source makes the inner AND evaluate to NULL, and NOT NULL is NULL —
     # which WHERE treats as false, silently dropping a short-but-complete JD from the
     # zone. COALESCE makes the predicate mean what it says.
-    # THIS FUNCTION OWNS THE ACTIONABLE-ZONE PREDICATE (status/filter_source/app_status,
-    # the two verdict+fit bars, the snippet exclusion, the recency window).
-    # notify_deepdive_batch.zone_rows mirrors it for the doorbell's counts — change one,
-    # change both. It has already drifted twice (a missing filter_source clause; a
-    # textual date_posted slice instead of recency_dt), so treat any edit here as a
-    # two-file edit.
+    # THIS FUNCTION OWNS THE PAID-REVIEW PREDICATE (status/filter_source/app_status, the
+    # PASS fit bar, the snippet exclusion, the recency window).
+    #
+    # notify_deepdive_batch.zone_rows used to mirror it exactly. Since 2026-08-19 the two
+    # are DELIBERATELY DIFFERENT and that is not drift: this predicate answers "which rows
+    # do we pay to have re-read", the doorbell's answers "how much is in front of the user
+    # right now", and the band cut below changed only the first question. The doorbell
+    # therefore keeps PASS 13-14 and RECRUITER_ONLY >=15 in its zone counts. Every OTHER
+    # leg (status/filter_source/app_status, the snippet exclusion, recency through
+    # recency_dt) is still shared and still a two-file edit — that pair has drifted twice
+    # already (a missing filter_source clause; a textual date_posted slice instead of
+    # recency_dt). See the matching note in notify_deepdive_batch.zone_rows.
     rows = conn.execute(
         """SELECT * FROM jobs
            WHERE status='evaluated' AND filter_source IS NULL
              AND app_status IS NULL
-             AND ((verdict=? AND fit_score>=?) OR (verdict=? AND fit_score>=?))
+             AND verdict=? AND fit_score>=?
              AND substr(first_seen,1,10) >= ?
              AND NOT (COALESCE(source,'')='adzuna'
                       AND length(COALESCE(description,'')) <= ?)
              AND job_url NOT IN (SELECT job_url FROM second_opinions
                                  WHERE status != 'retry')
            ORDER BY first_seen DESC""",
-        (VERDICT_PASS, PASS_MIN_FIT, VERDICT_RECRUITER_ONLY, RO_MIN_FIT, seen_floor,
-         ADZUNA_SNIPPET_MAX_CHARS),
+        (VERDICT_PASS, PASS_MIN_FIT, seen_floor, ADZUNA_SNIPPET_MAX_CHARS),
     ).fetchall()
     # Chains, not rows: dupe-linked siblings both keep status='evaluated', but one
     # opinion covers the whole chain (opinion_summaries maps it back to every member).

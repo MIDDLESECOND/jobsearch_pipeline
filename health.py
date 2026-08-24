@@ -37,10 +37,15 @@ RUN_SILENCE_HOURS = 26            # pipeline runs several times a day; >26h = a 
                                   # slots missed, with slack for slot jitter
 CANARY_SILENCE_HOURS = 8 * 24     # canary is a weekly schedule; >8 days = the weekly slot
                                   # missed plus a day of slack
-SECOND_JUDGE_SILENCE_HOURS = 48   # second judge runs daily; >48h = two missed days. A
-                                  # legitimately empty actionable zone also ages this
-                                  # reading — the sentinel reports the fact, the reader
-                                  # decides what it means.
+# SECOND_JUDGE_SILENCE_HOURS (48) was removed 2026-08-22 with the layer it watched. A
+# sentinel outliving its schedule is not caution, it is a permanent false alarm: nothing
+# writes second_opinions.collected_at any more, so the reading would go stale within two
+# days and stay stale forever, and a warning line that fires every single day is how the
+# two REAL sentinels beside it (pipeline_run, canary) stop being read. This is the
+# opposite of the 2026-08-18 direction (do not leave a schedule unwatched) only in
+# appearance: there is no schedule here to watch. Restore both the constant and the
+# reading below if the layer is ever rescheduled — report._SILENCE_PHRASES and
+# index.html's staleBits map still carry its wording, so a restore needs no edit there.
 # Where tests/validation/canary.py appends its run history (HISTORY_PATH there — change one,
 # change both). Spelled here rather than imported: tests/validation is deliberately not an
 # importable package, and this module stays stdlib-only. The parent of this file is the repo
@@ -675,12 +680,15 @@ def failed_fetch_targets(conn, run_date):
 def staleness_readings(conn, *, now=None, canary_history_path=None):
     """How long since each scheduled producer last proved it ran — a read-only sentinel.
 
-    Three durable proofs of life, each against a threshold sized to its schedule (the
+    Two durable proofs of life, each against a threshold sized to its schedule (the
     module constants above): the cooldown stamp `meta.last_run_ok_ended` (only a full
-    successful pipeline cycle writes it), the newest entry of the canary drift history,
-    and the newest `second_opinions.collected_at` (any collection activity, success or
-    error). Purely descriptive: it mutates nothing, registers or repairs no schedule,
+    successful pipeline cycle writes it) and the newest entry of the canary drift
+    history. Purely descriptive: it mutates nothing, registers or repairs no schedule,
     and a stale reading is a fact to investigate, never an automatic action.
+
+    A third reading watched `second_opinions.collected_at` until 2026-08-22, when the
+    second-opinion layer was retired; see the constant block above for why a sentinel
+    over a retired schedule is removed rather than kept.
 
     `now` is injectable for tests (ISO string or datetime; aware values normalize to
     naive local exactly like the stamps — see _wall_clock). Stale is strictly "older
@@ -700,17 +708,12 @@ def staleness_readings(conn, *, now=None, canary_history_path=None):
     ).fetchone()
     canary_raw = _latest_canary_entry(
         CANARY_HISTORY_PATH if canary_history_path is None else canary_history_path)
-    # MAX() is an aggregate: fetchone() always returns exactly one row (NULL inside when
-    # the table is empty), unlike the keyed meta lookup above.
-    judge_raw = conn.execute("SELECT MAX(collected_at) FROM second_opinions").fetchone()[0]
     return {
         "checked_at": reference.isoformat(timespec="seconds"),
         "readings": [
             _silence_reading("pipeline_run", last_ok[0] if last_ok else None,
                              reference, RUN_SILENCE_HOURS),
             _silence_reading("canary", canary_raw, reference, CANARY_SILENCE_HOURS),
-            _silence_reading("second_judge", judge_raw,
-                             reference, SECOND_JUDGE_SILENCE_HOURS),
         ],
     }
 

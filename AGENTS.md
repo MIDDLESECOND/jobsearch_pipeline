@@ -8,8 +8,8 @@ read AGENTS.md natively get it directly. One source of truth, zero sync surfaces
 
 A personal job-search pipeline: it pulls configured searches from LinkedIn (scraped via
 python-jobspy logged-out guest endpoints — **never** add login cookies), from the Adzuna API
-(sanctioned, free), from per-company ATS boards (the Greenhouse/Lever/Ashby public JSON
-APIs), and from Dice search pages (public, logged-out, no keys), dedupes into SQLite, runs
+(sanctioned, free), from per-company ATS boards (the Greenhouse/Lever/Ashby/Workday public
+JSON APIs), and from Dice search pages (public, logged-out, no keys), dedupes into SQLite, runs
 each new posting through an LLM "gate-check" evaluation, and
 writes one markdown report per day. Single-user CLI tool, not a service.
 
@@ -19,7 +19,9 @@ re-export hub):
 - `states.py` — the status/verdict/gate vocabulary and the `status` state-machine doc, plus the
   fit-score action bars (`COLD_APPLY_MIN_FIT`/`RECRUITER_ROUTE_MIN_FIT`) and
   `classify_disagreement` (the ONE "second judge disagrees" definition the report section and
-  UI card share). The leaf; imports nothing.
+  UI card share) with its `DISAGREEMENT_FIT_MARGIN` — a within-verdict demotion must clear
+  that margin, because the second judge scores on a measurably lower scale and a bar
+  crossing produced by offset alone is not disagreement. The leaf; imports nothing.
 - `chain.py` — repost/content-dedup + the decision-chain core (normalization, fingerprint,
   `effective_decision`, propagation), plus the decision service cores both front-ends share:
   `resolve_posting`, `mark_posting`, `reject_posting`, `dupe_resolve`/`dupe_commit`/
@@ -79,12 +81,23 @@ re-export hub):
   auth path only (a Windows-marked dependency, so importing this module stays free on other
   platforms); `pipeline.py` is its CLI wrapper.
 - `fetch.py` — the four sources (`fetch_new_jobs` = LinkedIn, `fetch_adzuna` = Adzuna API,
-  `fetch_ats` = Greenhouse/Lever/Ashby ATS boards, `fetch_dice` = Dice search pages). Imports
+  `fetch_ats` = Greenhouse/Lever/Ashby/Workday/iCIMS boards, `fetch_dice` = Dice pages). Imports
   `core`, `posting_store`, `health` (the per-target attempt facts every fetcher records), and
   `filters` (`_pattern_matches`, so the ATS/Dice config filters speak the filters.yaml dialect).
 - `evaluation.py` — the LLM gate-check (prompt, providers, `normalize_result`'s 50/0 cap, eval loop).
-- `second_judge.py` — the second-opinion review layer: zone selection over evaluated rows
-  (undecided PASS/RECRUITER_ONLY at the `states.py` action bars, posted ≤14 days, one
+- `second_judge.py` — the second-opinion review layer, **RETIRED 2026-08-22** (unscheduled,
+  not deleted: the module, the `second_opinions` table's 728 opinions, and the
+  `pipeline.py second-judge` CLI are all intact; `run_second_judge.bat` simply no longer
+  calls it, and that .bat still carries the doorbell — cutting the SCHEDULE instead of
+  editing the file would have killed the deepdive trigger). Retired because its only
+  mechanical consumer is the doorbell's `batchable` subquery and the 2026-08-22 floor drop
+  made the pre-screen duplicative: all 97 post-08-19 opinions landed inside the batch's own
+  window, saving 2.8 rows/day (~3.6 min) for $1.70/day, and the guard-truncation premise
+  that justified keeping it in 2026-08-19 was falsified by the guard's own log: zero
+  guard-skips across all 44 doorbell firings of its 7-day life (08-16 → 08-22). What it did while live: zone selection over evaluated rows
+  (undecided PASS at `PASS_MIN_FIT`=15 — a local literal meaning the standing allocation's
+  cold-apply bar, deliberately not imported from `states`, and since 2026-08-22 two points
+  above the deepdive batch's floor on purpose — posted ≤14 days, one
   submission per duplicate chain), Anthropic Batch API submit/collect into the
   `second_opinions` table (intent rows commit BEFORE the paid create; errored rows get a
   bounded requeue), and `opinion_summaries` — the chain-scoped read model the report section
@@ -121,8 +134,20 @@ re-export hub):
   reads live plan utilization, and pops a Yes/No message box whose Yes opens a Claude Code
   console carrying the batch trigger. It opens `jobs.db` READ-ONLY, decides nothing about
   postings, and writes exactly one thing: the `doorbell` key of the gitignored
-  `.deepdive_state.json`. Its zone query MIRRORS `second_judge.pending_rows`' predicate
-  (that function owns it) — change one, change both. The rest of that state file
+  `.deepdive_state.json`. Its zone query shares every NON-verdict leg with
+  `second_judge.pending_rows` (status/filter_source/app_status, the snippet flag, recency
+  through `recency_dt`) — change one, change both, even though the judge is retired and
+  that function now runs only by hand. The verdict/fit legs are deliberately different and
+  must not be "aligned": the judge's zone was PASS ≥15 (what was worth paying a second
+  model to re-read); the doorbell's zone and the batch read PASS **and RECRUITER_ONLY**
+  ≥13 (`BATCH_MIN_FIT` = `states.COLD_APPLY_MIN_FIT`, a code-owned ADMISSION line for
+  re-reading, not the guide's cold-apply bar, which still reads `fit >= 15` — see the
+  correction in `states.py`). Both 2026-08-22 widenings were measured: the plan budget the
+  old 15 assumed never bound (a 14-row batch moved the 5h window one point; the guard never
+  fired in its life), and the 14-day sweep read RECRUITER_ONLY 13–14 full text at 4.4%
+  apply-grade against PASS 13–14's 2.1%, so at that fit the primary's PASS/RO split is not
+  an admission signal. Reading is not routing: the batch re-judges under the guide and the
+  `recruiter_route` queue is untouched (CHANGELOG 2026-08-22, three entries). The rest of that state file
   (`last_batch_iso`, `processed_urls`, `calibration`) is written by the local `deepdive`
   skill under `.claude/skills/` — gitignored because it names private paths, which is why
   the repo shows a consumer with no visible producer. Imports `core` and `states` only.
@@ -131,8 +156,9 @@ re-export hub):
   ENFORCES the session guard: it prices the two row classes separately, truncates the
   proposed batch to what fits under `SESSION_GUARD_PCT` of the 5h window, and stays
   silent when nothing fits — a console that opens is never one the skill's between-rows
-  check would abort on row 1. Both the quota and the guard threshold are mirrored in
-  SKILL.md; a quota or ceiling changed on one side only silently misprices every popup.
+  check would abort on row 1. The batch floor, the quota and the guard threshold are all
+  mirrored in SKILL.md; a floor, quota or ceiling changed on one side only silently
+  misprices every popup.
   A batch the guard truncates MUST say so at the top of its report: uncapping was bought
   on "zero cold applies" being a statement about the whole day's full-text inflow, and a
   partial run that reads as full coverage sends the user back to triaging by hand.
@@ -160,12 +186,32 @@ official API, so it sidesteps that entirely. It's optional: active only for sear
 `adzuna:` block and only when `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set, else it is skipped.
 Adzuna rows carry only a 500-char description snippet, and ML-*predicted* salaries are dropped to NULL
 (so the deterministic salary filter never acts on a guess); both facts are flagged in the report/UI.
-The ATS boards (Greenhouse/Lever/Ashby) are official public JSON APIs with **no keys at all** —
-gated purely on config (`settings.ats.companies`). They are per-company, not per-query: a board
-returns every open role, so the config-side `title_any` (required) and `location_any` (optional)
-filters are what keep irrelevant roles out of the DB and the paid eval. ATS descriptions are full
-text; salaries are stored NULL ("unstated" — kept by the salary filter, same convention as Adzuna's
-predicted salaries).
+The ATS boards (Greenhouse/Lever/Ashby/Workday/iCIMS) need **no keys at
+all** (public JSON APIs, plus iCIMS's server-rendered public portal pages) — gated purely on config (`settings.ats.companies`). They are per-company, not per-query: a
+board returns every open role, so the config-side `title_any` (required) and `location_any`
+(optional) filters are what keep irrelevant roles out of the DB and the paid eval. A company
+entry may add `title_any_extra`: per-board patterns UNIONED with the shared list (never
+replacing it — shared tuning keeps applying everywhere, and a board-local list can only widen
+its own board), for boards whose titles speak a different language than the shared list was
+tuned for — the law-firm boards' "AI Legal Engineer"/"AI Systems Manager" seats, which
+vendor-tuned SA/SE patterns admitted 2 of 11 (measured live 2026-08-20; 10 of 11 with extras). ATS descriptions
+are full text; salaries are stored NULL ("unstated" — kept by the salary filter, same convention as
+Adzuna's predicted salaries).
+**Workday and iCIMS (both added 2026-08-20) are the boards that are not a single GET** — each
+is a paged list plus one detail GET per genuinely-new posting, so both readers take `conn` to
+skip known urls *before* paying for a detail fetch (`fetch._workday_rows`/`_icims_rows`; same
+economics Dice states). Workday's CXS API is a POST list with a composite
+`<tenant>/<dc>/<site>` slug; it is also the only source carrying a **requisition identity**
+(`jobReqId`) and the employer's own `startDate` — which is why it was built: the aggregators
+re-date evergreen reqs (measured: Adzuna dated one Wilson Sonsini req 2026-08-18 whose Workday
+`startDate` is 2026-06-03) and a filled req vanishes from a board while its aggregator ad lives
+on. iCIMS's portal is server-rendered HTML behind a JS shell (`/jobs/search?ss=1&in_iframe=1`,
+paged `pr=N`); its detail ld+json carries a real JD but its `datePosted` is render-time fiction
+(measured: now-minus-exactly-two-years, tracking the probe's own pacing), so iCIMS rows store
+`date_posted` NULL and `first_seen` stands in. Neither slug family is derivable from the
+company name (Greenberg Traurig is `gtlaw`, Holland & Knight is `hklaw`), so each is probed by
+hand once — the same maintenance shape as the other boards' slugs. Census + feasibility
+evidence lives in `tests/validation/results/ats_census_20260820.md`.
 Dice (added 2026-08-09 after an overlap probe measured ~210 new company+title keys/week
 against the other three) is a page scrape like LinkedIn but with no bot wall: the job list is
 embedded in the search page HTML as an escaped Next.js flight payload, readable logged-out.
@@ -190,7 +236,7 @@ current salary/hard filters, repost skips, and evaluator in the next normal run.
 pip install -r requirements.txt          # python-jobspy, anthropic, pyyaml (.venv present)
 
 python pipeline.py run                    # full cycle: fetch → error requeue → repost-skip restores → salary filter → hard filters → repost-skip forward → eval → report
-#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; also defers the paid eval inside DeepSeek's 2x peak-rate window (UTC 01-04/06-10); bare `run` always executes and always evaluates
+#   --scheduled (passed by run_pipeline.bat): cooldown guard — no-op if the last successful run ended <60 min ago; also defers the paid eval inside DeepSeek's 2x peak-rate window (UTC 01-04/06-10, Beijing-calendar weekdays only); bare `run` always executes and always evaluates
 python pipeline.py report [--date YYYY-MM-DD]   # rebuild a report from the DB only (no fetch, no API cost)
 python pipeline.py stats                  # DB counts
 python pipeline.py backup [--output PATH]          # create + verify an evidence ZIP
@@ -255,10 +301,15 @@ Windows Task Scheduler.
   and report rebuild all wait for the next executed run).
   Separately, a `--scheduled` run whose provider is DeepSeek defers ONLY the paid eval
   stage inside DeepSeek's 2x peak-rate windows (01:00–04:00 / 06:00–10:00 UTC = Beijing
-  9–12 / 14–18, billed since 2026-08-17; `evaluation.in_deepseek_peak`, gated by
-  `pipeline._defer_eval_for_peak`): fetch/filters/report still run, rows stay `new` for
-  the next off-peak slot, and the cooldown stamp still advances. The windows are pinned
-  in UTC on purpose — a local-clock schedule would drift into peak at every DST change.
+  9–12 / 14–18, billed since 2026-08-17, and since 2026-08-23 on Beijing-calendar
+  WEEKDAYS only — Saturday and Sunday bill off-peak all day, so a US-evening slot that
+  lands at 01:00 UTC defers on local Sunday–Thursday evenings and evaluates on Friday
+  and Saturday; `evaluation.in_deepseek_peak`, gated by `pipeline._defer_eval_for_peak`):
+  fetch/filters/report still run, rows stay `new` for the next off-peak slot, and the
+  cooldown stamp still advances. The windows are pinned in UTC on purpose — a
+  local-clock schedule would drift into peak at every DST change — and the weekend
+  exemption is read on the Beijing calendar (UTC+8, no DST), which inside these windows
+  is the UTC date.
   Manual runs and non-DeepSeek providers always evaluate; a manual run inside the window
   gets a `[price]` warning (at run start and again at eval start) naming when off-peak
   resumes on the local clock, but is never blocked.
@@ -440,7 +491,7 @@ Windows Task Scheduler.
   contact (any kind) is that queue's completion event and never decides the role; the cadence
   defaults (14 days / score 15) are overridable via the optional `recruiter_route_days` /
   `recruiter_route_min_score` settings, and finding the person remains a manual act in the
-  user's own browser.
+  user's own browser. Since 2026-08-22 the deepdive batch also READS undecided RECRUITER_ONLY ≥13 rows (`notify_deepdive_batch`'s batchable leg); that is review, not routing — this queue's membership and its contact-recorded exit are unchanged.
 
 - **Role tasks are explicit local next actions, not inferred state.** `job_tasks` rows use the
   same canonical-at-write/current-chain read pattern as contacts and events, so duplicate merges
@@ -512,8 +563,12 @@ Windows Task Scheduler.
   The silent-death direction (a schedule that stops firing — the 2026-08-18 seam audit found a
   whole missing log day and a canary schedule that never once executed, with nothing noticing)
   is instrumented by `health.staleness_readings`: a read-only sentinel comparing now against the
-  last successful-cycle stamp, the newest canary history entry, and the newest second-opinion
-  collection, each with a schedule-sized threshold (module constants in `health.py`). The stamps
+  last successful-cycle stamp and the newest canary history entry, each with a schedule-sized
+  threshold (module constants in `health.py`). A third reading watched second-opinion collection
+  until 2026-08-22 and was removed WITH the layer it watched — a sentinel over a retired schedule
+  is a permanent false alarm, and a line that warns every single day is how the two real readings
+  beside it stop being read. Removing a sentinel is otherwise exactly the wrong direction here, so
+  the test asserts that reading's ABSENCE and carries the reason. The stamps
   mix frames — the DB stamps are naive local, canary's `ts` is aware UTC — so every comparison
   normalizes through one helper (`health._wall_clock`) into naive local; don't add a reading that
   compares frames raw. It surfaces facts only: the UI health tab shows every reading, and the

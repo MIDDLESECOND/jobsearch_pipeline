@@ -1,20 +1,28 @@
 @echo off
-rem Second-opinion layer (second_judge.py): submits the day's interesting zone to the
-rem Anthropic Batch API, waits for the batch (usually <1h, --wait 90 cap), ingests the
-rem opinions, and rebuilds exactly the daily reports whose rows gained one (none of
-rem them on a slot where nothing landed).
-rem Schedule this AFTER each run_pipeline.bat slot (e.g. +15 min)  -  it only spends on
-rem rows the main run already evaluated, and a crash here never blocks the pipeline.
-rem The app tees stdout/stderr into logs\second-judge-*.log via core.run_log.
+rem Deepdive doorbell slot. Schedule this AFTER each run_pipeline.bat slot (e.g. +15 min).
+rem
+rem This .bat used to run the paid second-opinion layer (pipeline.py second-judge) and
+rem then the doorbell. The judge was RETIRED 2026-08-22 - see CHANGELOG - but the file
+rem keeps its name on purpose: the Windows Task Scheduler action points at this path, so
+rem renaming it would need a scheduler edit and the doorbell is what the slot is really
+rem for. Killing the scheduled task instead of editing this file would have taken the
+rem DOORBELL down with the judge, and the doorbell is the only trigger deepdive batches
+rem have.
+rem
+rem To restore the judge: put the two commented lines back. second_judge.py, the
+rem second_opinions table, its 728 collected opinions, and the `pipeline.py second-judge`
+rem CLI are all intact - nothing was deleted, only unscheduled.
 cd /d %~dp0
-".venv\Scripts\python.exe" pipeline.py second-judge
-set JUDGE_RC=%errorlevel%
-rem Doorbell: now that opinions are in, pop the deepdive batch proposal (zone count +
-rem time/quota estimate). Read-only helper; its outcome never masks the judge exit code.
-rem PYTHONUTF8 guards the doorbell's Chinese popup text against the GBK console codepage.
-rem It tees into the same day log as the judge (core.run_log), so which branch it took -
-rem popup, no-batchable-row, quota read failure, traceback - is recoverable afterwards;
-rem under Task Scheduler the console output itself goes nowhere.
+rem ".venv\Scripts\python.exe" pipeline.py second-judge
+rem set JUDGE_RC=%errorlevel%
+rem Doorbell: counts the deepdive-actionable zone and pops the batch proposal (zone count
+rem + time/quota estimate). Read-only helper. PYTHONUTF8 guards its Chinese popup text
+rem against the GBK console codepage. It tees into the day log via core.run_log, so which
+rem branch it took - popup, no-batchable-row, quota read failure, traceback - is
+rem recoverable afterwards; under Task Scheduler the console output goes nowhere.
+rem Its exit code IS this slot's outcome now that it is the only command here: a doorbell
+rem that cannot run means no batch is ever proposed, which is exactly the silent-death
+rem class the health sentinels exist to catch.
 set PYTHONUTF8=1
 ".venv\Scripts\python.exe" notify_deepdive_batch.py
-exit /b %JUDGE_RC%
+exit /b %errorlevel%

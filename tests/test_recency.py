@@ -2,7 +2,7 @@
 into the report and the web UI. All pure-function tests inject `now`; the integration tests use
 the conn fixture + make_job (synthetic rows, never the real jobs.db)."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import report
 from conftest import make_job
@@ -265,3 +265,64 @@ def test_ui_today_view_two_band_order_and_age_label(conn):
     jobs = webapp.jobs_for_view(conn, "today", d, cap=12000)
     assert [j["job_url"] for j in jobs] == ["u2", "u1", "u3"]
     assert all("age_label" in j and "date_posted" in j for j in jobs)
+
+
+# ------------------------------------------------- evergreen floor (added 2026-08-20)
+# An aggregator can re-stamp a long-open requisition with a fresh date: Adzuna dated Wilson
+# Sonsini's R1579 2026-08-18 against a Workday `startDate` of 2026-06-03, and PNM's evergreen
+# req 2026-08-19 against a Jun 3 board opening — 76 and 78 days, on rows the <=14d cold-apply
+# leg had already admitted. The floor is the earliest date carried by any row with the same
+# stored text. Every expected string below is a PINNED LITERAL: recomputing it through
+# posting_age's own arithmetic would let the same bug pass on both sides.
+
+def test_floor_appends_rather_than_replacing_the_rows_own_age():
+    # The row still says 2d — the floor is added, never substituted, because it is a lower
+    # bound and demoting a row on a bound could hide a live role.
+    assert report.posting_age("2026-07-02T09:00:00", "2026-07-04T08:00:00", now=NOW,
+                              floor=date(2026, 5, 16)) == "2d ago (same JD dated ≥49d ago)"
+
+
+def test_floor_qualifier_absent_without_a_floor():
+    assert report.posting_age("2026-07-02T09:00:00", "2026-07-04T08:00:00", now=NOW) == "2d ago"
+
+
+def test_floor_gap_boundary_differs_on_each_side():
+    """EVERGREEN_MIN_GAP_DAYS is 3. Asserting only one side would survive a >=/> mutation, so
+    both sides are pinned and they must NOT render the same string."""
+    posted = "2026-07-02T09:00:00"
+    below = report.posting_age(posted, "2026-07-04T08:00:00", now=NOW, floor=date(2026, 6, 30))
+    at = report.posting_age(posted, "2026-07-04T08:00:00", now=NOW, floor=date(2026, 6, 29))
+    assert below == "2d ago"                                   # 2d gap — under the bar, silent
+    assert at == "2d ago (same JD dated ≥5d ago)"               # 3d gap — at the bar, speaks
+    assert below != at
+
+
+def test_floor_applies_to_seen_rows_too():
+    # LinkedIn rows carry no date_posted at all (100% of them), so they render through the
+    # 'seen' branch — which must still be able to say the text is older than the sighting.
+    assert report.posting_age("", "2026-07-04T06:00:00", now=NOW,
+                              floor=date(2026, 5, 16)) == "seen 3h ago (same JD dated ≥49d ago)"
+
+
+def test_evergreen_floors_finds_the_earliest_date_for_identical_text(conn):
+    from conftest import make_job
+    same = "x" * 400          # >200 chars, the length floor evergreen_floors applies
+    make_job(conn, job_url="u1", description=same, date_posted="2026-08-19")
+    make_job(conn, job_url="u2", description=same, date_posted="2026-06-03")
+    make_job(conn, job_url="u3", description="y" * 400, date_posted="2026-08-19")
+    floors = report.evergreen_floors(conn)
+    r1 = conn.execute("SELECT * FROM jobs WHERE job_url='u1'").fetchone()
+    r3 = conn.execute("SELECT * FROM jobs WHERE job_url='u3'").fetchone()
+    assert report.floor_for(r1, floors) == date(2026, 6, 3)    # re-stamped: floor is the older
+    assert report.floor_for(r3, floors) == date(2026, 8, 19)   # unique text: floor is its own
+    # ...and a unique row's floor is its own date, so the gap is 0 and nothing is appended:
+    assert "same JD" not in report.posting_age(
+        r3["date_posted"], r3["first_seen"], now=NOW, floor=report.floor_for(r3, floors))
+
+
+def test_floor_for_is_none_without_a_map_or_text(conn):
+    from conftest import make_job
+    make_job(conn, job_url="u4", description="short", date_posted="2026-08-19")
+    r = conn.execute("SELECT * FROM jobs WHERE job_url='u4'").fetchone()
+    assert report.floor_for(r, None) is None      # no map computed
+    assert report.floor_for(r, {}) is None        # empty map

@@ -119,7 +119,8 @@ def _drive_run(conn, monkeypatch, argv, fetch_crashes=False):
     for name in ("skip_decided_reposts", "skip_evaluated_reposts"):
         monkeypatch.setattr(pipeline, name,
                             lambda cn, forward=True, restore=True, _n=name: calls.append(_n))
-    monkeypatch.setattr(pipeline, "generate_report", lambda c, cn, d: calls.append("report"))
+    monkeypatch.setattr(pipeline, "generate_report",
+                        lambda c, cn, d, **k: calls.append("report"))
     monkeypatch.setattr(sys, "argv", ["pipeline.py"] + argv)
     pipeline.main()
     return calls

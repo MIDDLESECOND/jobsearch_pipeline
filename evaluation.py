@@ -15,7 +15,7 @@ import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from core import PROFILE_PATH, GUIDE_PATH, _ensure_api_key
 from states import (GATE_NAMES, GATE_OTHER, VERDICTS, VERDICT_PASS, VERDICT_GATE_FAIL,
@@ -327,10 +327,19 @@ def normalize_result(result):
 # _ensure_api_key (used by both the Adzuna fetch and the eval) moved to core.py (re-imported above).
 
 
-# (input cache-miss, output) USD per token. DeepSeek V4 rates per the official
-# card (api-docs.deepseek.com/quick_start/pricing); cache-hit input is ~$0.0028/1M
-# for flash (auto-cached prefix), far below the 0.1x the tally assumes — so the
-# DeepSeek cost line is a slight over-estimate, which is the safe direction.
+# (input cache-miss, output) USD per token. DeepSeek repriced effective 2026-08-16
+# 16:00 UTC and now bills clock-dependent rates, so these entries are the OFF-PEAK
+# card. Off-peak is the honest default here because --scheduled runs deliberately sit
+# out the peak windows (pipeline._defer_eval_for_peak); a manual run inside
+# 01:00-04:00 / 06:00-10:00 UTC on a Beijing weekday pays 2x and this line under-reports
+# it by that factor.
+# Flash carries the values the 2026-08-17 invoice reconciliation closed to the cent
+# (0.22 uncached in / 0.007 cache hit / 0.66 out per 1M). Pro is DERIVED from the
+# published multiplier chart (one decimal: x1.5 uncached in, x2.3 out on the old list),
+# so it is an estimate rather than a card reading — it only moves the cost line if
+# someone actually runs Pro. Cache-hit input is ~$0.007/1M for flash (auto-cached
+# prefix), still far below the 0.1x the tally assumes — so the DeepSeek cost line
+# stays a slight over-estimate on the cache leg, which is the safe direction.
 MODEL_PRICES = {
     "claude-sonnet-4-6":          (3.0 / 1e6, 15.0 / 1e6),
     "claude-haiku-4-5":           (1.0 / 1e6, 5.0 / 1e6),
@@ -340,33 +349,49 @@ MODEL_PRICES = {
     "claude-sonnet-5":            (3.0 / 1e6, 15.0 / 1e6),
     "claude-opus-5":              (5.0 / 1e6, 25.0 / 1e6),
     "claude-fable-5":             (10.0 / 1e6, 50.0 / 1e6),
-    "deepseek-v4-flash":          (0.14 / 1e6, 0.28 / 1e6),
-    "deepseek-v4-pro":            (0.435 / 1e6, 0.87 / 1e6),
+    "deepseek-v4-flash":          (0.22 / 1e6, 0.66 / 1e6),
+    "deepseek-v4-pro":            (0.653 / 1e6, 2.00 / 1e6),
 }
 
 # DeepSeek bills clock-dependent rates from 2026-08-17 (same pricing page): peak =
 # 01:00-04:00 and 06:00-10:00 UTC (Beijing 9-12 / 14-18) at 2x the off-peak rate.
+# Since 2026-08-23 00:00 Beijing (= 2026-08-22 16:00 UTC; announced by DeepSeek by
+# email on 2026-08-22) the windows apply on Beijing-calendar WEEKDAYS only: Saturday
+# and Sunday bill the off-peak rate all day. No effective-date gate here — the last
+# weekend window under the old rule had closed before the announcement arrived, and
+# nothing reads this predicate for a historical instant.
 # The windows are fixed in UTC, so the predicate reads UTC directly — immune to the
 # DST shifts that would silently move a local-clock schedule back into peak twice a
-# year. Checked once at eval-stage start, not per request: a batch that starts
-# off-peak and drags across a boundary pays peak for its tail, so keep scheduled
-# slots clear of the window edges rather than teaching this to re-check mid-run.
+# year. The weekend rule is read on the Beijing calendar (UTC+8, no DST) because that
+# is the calendar it is written in; inside today's windows (09:00–18:00 Beijing) the
+# Beijing date IS the UTC date, so the two frames cannot disagree — the Beijing read
+# exists so a window that ever straddles Beijing midnight (16:00 UTC) is still judged
+# on the billing day. Checked once at eval-stage start, not per request: a batch that
+# starts off-peak and drags across a boundary pays peak for its tail, so keep
+# scheduled slots clear of the window edges rather than teaching this to re-check
+# mid-run.
 DEEPSEEK_PEAK_HOURS_UTC = ((1, 4), (6, 10))  # [start, end) hour windows
+DEEPSEEK_CALENDAR = timezone(timedelta(hours=8))  # Beijing: the weekend rule's calendar
 
 
 def in_deepseek_peak(now=None):
-    """True inside DeepSeek's 2x peak-rate windows. `now`: aware datetime, any tz —
-    a NAIVE value is read as machine-local (astimezone's rule), so never hand this
-    a naive UTC clock. Defined through deepseek_peak_end so the window table is read
-    in exactly ONE place: "am I in a window" and "when does it end" cannot disagree."""
+    """True inside DeepSeek's 2x peak-rate windows (Beijing-calendar weekdays only).
+    `now`: aware datetime, any tz — a NAIVE value is read as machine-local
+    (astimezone's rule), so never hand this a naive UTC clock. Defined through
+    deepseek_peak_end so the window table is read in exactly ONE place: "am I in a
+    window" and "when does it end" cannot disagree."""
     return deepseek_peak_end(now) is not None
 
 
 def deepseek_peak_end(now=None):
     """Aware-UTC end of the peak window containing `now`, or None while off-peak —
-    the ONE reading of DEEPSEEK_PEAK_HOURS_UTC (in_deepseek_peak delegates here).
+    the ONE reading of DEEPSEEK_PEAK_HOURS_UTC and of the weekend exemption
+    (in_deepseek_peak delegates here, and pipeline._peak_price_note reads this
+    directly — which is why the weekend rule lives here, not in the boolean).
     Both windows close before midnight UTC, so the end is always on `now`'s date."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if now.astimezone(DEEPSEEK_CALENDAR).weekday() >= 5:  # Saturday=5, Sunday=6
+        return None
     for lo, hi in DEEPSEEK_PEAK_HOURS_UTC:
         if lo <= now.hour < hi:
             return now.replace(hour=hi, minute=0, second=0, microsecond=0)

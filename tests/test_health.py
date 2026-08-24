@@ -569,9 +569,12 @@ def test_all_internal_target_failures_do_not_advance_cooldown(conn, monkeypatch)
 # --- Silence sentinel (staleness_readings) -------------------------------------------------
 # The 2026-08-18 seam audit: a scheduled producer that quietly dies leaves no reading
 # anywhere — the only arithmetic over last_run_ok_ended was the cooldown (too-often guard),
-# and nothing at all watched the canary or second-judge cadence. These tests pin the
-# too-rarely direction with an injected clock; fixtures are synthetic (a tmp jsonl and the
-# schema-built test DB), never the real jobs.db or the real canary history.
+# and nothing at all watched the canary cadence. These tests pin the too-rarely direction
+# with an injected clock; fixtures are synthetic (a tmp jsonl and the schema-built test DB),
+# never the real jobs.db or the real canary history.
+# The second-judge reading was removed 2026-08-22 with the layer it watched; the test below
+# asserts its ABSENCE, because a retired schedule's sentinel is a daily false alarm and the
+# failure mode is the two real readings beside it going unread.
 
 
 def _canary_file(tmp_path, *ts_values):
@@ -585,10 +588,13 @@ def _canary_file(tmp_path, *ts_values):
 def test_staleness_readings_pin_each_threshold_boundary(conn, tmp_path):
     from health import staleness_readings
 
-    # All three stamps sit EXACTLY at their bar relative to now=2026-08-18T00:00:00
-    # (run 26h, canary 8 days, second judge 48h — naive local, matching the producers).
+    # Both stamps sit EXACTLY at their bar relative to now=2026-08-18T00:00:00
+    # (run 26h, canary 8 days — naive local, matching the producers).
     canary = _canary_file(tmp_path, "2026-08-10T00:00:00")
     conn.execute("INSERT INTO meta (key,value) VALUES ('last_run_ok_ended','2026-08-16T22:00:00')")
+    # A collected opinion the retired layer left behind. It must NOT resurrect a reading:
+    # the table still holds 728 rows of evidence, so "no reading" has to come from the
+    # sentinel list, not from an empty table.
     conn.execute(
         """INSERT INTO second_opinions (job_url,custom_id,model,status,submitted_at,collected_at)
            VALUES ('https://example.com/job/x','c1','m','done',
@@ -600,13 +606,13 @@ def test_staleness_readings_pin_each_threshold_boundary(conn, tmp_path):
 
     # Exactly AT a threshold is not yet stale: the alert is strictly "silent for longer
     # than a missed slot", so a slot landing on the boundary can't flap.
-    assert [r["signal"] for r in at_bar["readings"]] == ["pipeline_run", "canary", "second_judge"]
+    assert [r["signal"] for r in at_bar["readings"]] == ["pipeline_run", "canary"]
+    assert "second_judge" not in by_signal
     assert not any(r["stale"] for r in at_bar["readings"])
     assert by_signal["pipeline_run"]["age_hours"] == 26.0
     assert by_signal["canary"]["age_hours"] == 192.0
-    assert by_signal["second_judge"]["age_hours"] == 48.0
 
-    # Six minutes later every reading is strictly past its bar and all three alert.
+    # Six minutes later every reading is strictly past its bar and both alert.
     past_bar = staleness_readings(conn, now="2026-08-18T00:06:00", canary_history_path=canary)
     assert all(r["stale"] for r in past_bar["readings"])
 
@@ -677,7 +683,7 @@ def test_health_snapshot_carries_the_staleness_readings(conn, tmp_path, monkeypa
     # Structure plus the missing-everything shape (fresh DB, no canary file); aged/fresh
     # values are asserted in the injected-clock tests above, not against the live clock.
     assert [r["signal"] for r in snapshot["staleness"]["readings"]] == [
-        "pipeline_run", "canary", "second_judge"]
+        "pipeline_run", "canary"]
     assert all(r["stale"] and r["last_at"] is None
                for r in snapshot["staleness"]["readings"])
     assert all(isinstance(r["threshold_hours"], int) and r["threshold_hours"] > 0

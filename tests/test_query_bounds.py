@@ -99,8 +99,11 @@ def test_generate_report_query_count_is_bounded(conn, tmp_path):
     cfg = {"settings": {"reports_dir": str(tmp_path)}}
     with count_queries(conn) as nq:
         report.generate_report(cfg, conn, for_date="2026-06-15")
-    # One SELECT for the day's rows + one batched effective_decisions chunk = ~2; allow slack.
-    assert nq[0] <= 5, f"generate_report issued {nq[0]} queries — N+1 regression (should be ~2)"
+    # One SELECT for the day's rows + one batched effective_decisions chunk + one corpus
+    # pass each for evergreen_floors and fulltext_readings (both deliberate, both BOUNDED —
+    # a fixed count regardless of postings rendered); allow slack. The guard exists to catch
+    # a count that GROWS with the fixture's ~100 rows, not deliberate batched additions.
+    assert nq[0] <= 6, f"generate_report issued {nq[0]} queries — N+1 regression (should be ~4)"
 
 
 def test_recruiter_route_page_query_count_is_bounded(conn):

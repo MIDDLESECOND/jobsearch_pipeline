@@ -6,6 +6,577 @@ substantive change. Day-to-day search-term edits in `config.yaml` don't belong h
 changes to *how postings are judged* do.
 
 ---
+## 2026-08-23 — Code review of the 08-19→08-22 batch: two silent-death holes in the iCIMS reader, and three claims that had gone false
+
+**No verdict, score, routing, filter, or schema change.** A max-effort review of the
+uncommitted 08-19→08-22 work. Eleven findings, all applied; 955 tests pass (5 new), and each
+new behavioral test was mutation-checked — the fix reverted, the test confirmed failing.
+
+- **iCIMS: a persistent cookie wall read as a healthy empty board.** `_icims_get` detects the
+  "Please Enable Cookies" interstitial, retries once — and then discarded that signal. A
+  second interstitial reached `_icims_cards`, which finds no cards; `_icims_rows`' branding
+  guard cannot tell an **iCIMS-served** interstitial from an empty board, so a walled tenant
+  would have logged `success / returned_count=0` forever, and the same page arriving mid-crawl
+  (session expiry) would have truncated the crawl through the no-new-ids break with nothing
+  said. `_icims_get` now raises on a surviving interstitial → that board's FAILED attempt fact.
+  This is the exact hazard the reader's own docstring says its shape guard exists to prevent.
+- **iCIMS silently truncated at 500 postings.** Its page loop had no cap notice, while
+  `_workday_rows` 200 lines above carries an explicit "No silent caps" for/else — the rule that
+  is also why White & Case's 3,500-role board is deliberately unconfigured. A deep portal read
+  as fully covered. Added the notice (it reports what WAS read; iCIMS pages carry no total).
+- **iCIMS card hrefs are now anchored to the tenant's own origin.** The extracted url is BOTH
+  stored as `job_url` and fetched for the JD, so an unanchored pattern let a link in scraped
+  page HTML choose an outbound request target. `_workday_rows` is immune by construction
+  (it interpolates a path into a fixed base); this reader now says so in code, not just prose.
+- **`report._VERDICT_QUALITY` was a second owner of `states.VERDICT_FAVOR`** — a verbatim copy
+  in a file that already imports and uses the real one. It also disagreed on unknown verdicts
+  (`.get(v, 0)`, i.e. tied with GATE_FAIL, vs states' `-1`). Deleted; both call sites read
+  `VERDICT_FAVOR`. states.py:68 states the rule this broke: *one list, one owner*.
+- **`report.SNIPPET_MAX_CHARS` was a third spelling of `core.ADZUNA_SNIPPET_MAX_CHARS`** (same
+  520), and `fulltext_contradiction` applied it **without** the `source='adzuna'` leg its two
+  sibling consumers carry — so a terse but COMPLETE ATS/Dice JD under the bound could be told
+  "snippet-scored", the mirror of the short-but-complete-JD hazard those two guard against.
+  Now imports the constant and checks the source. **Measured no-trigger, recorded in the
+  docstring**: of 58,425 evaluated rows at/under the bound, 58,295 are adzuna and the 130 that
+  are not (120 linkedin, 10 dice) produce zero flags either way, because a short non-adzuna row
+  needs a >2,000-char sibling reading of the same role to flag at all and none has one. The leg
+  changes nothing today; it stops the label lying as the ATS/Dice lanes grow.
+- **`report.corpus_maps` (new): the two whole-corpus scans run once per render batch, not once
+  per rendered day.** `evergreen_floors` + `fulltext_readings` are day-independent groupings
+  computed inside `generate_report`, while `pipeline.py` rebuilds several days in one pass
+  whenever rows were evaluated late (peak deferral, error requeue). Measured on the live corpus:
+  1.5s + 1.0s over **107k rows / 240 MB** of description text, and a 3-day rebuild goes
+  **8.50s → 3.03s**. The old docstring's "~1s over 66k rows … a once-per-run cost" was stale on
+  both counts, and that claim is what justifies excluding the web UI — corrected in place.
+- **`states.DISAGREEMENT_FIT_MARGIN`'s rationale named a consequence that cannot occur.** It
+  said verdict-level moves stay unmargined partly because "it is the leg
+  `notify_deepdive_batch`'s `batchable` subquery reads — margining it would silently re-admit
+  downgraded rows to the deepdive batch." **False.** `batchable` compares raw
+  `second_opinions.verdict` in SQL and never calls `classify_disagreement`; the two read the
+  same fact independently and neither guards the other. The real reason (a category has no
+  offset to subtract) stands alone. Corrected in place rather than deleted, same as the
+  `COLD_APPLY_MIN_FIT` correction of 08-22 — **and this entry is the correction of record for
+  the 2026-08-19 entry above, which repeats the wrong claim.**
+- **`states.py` kept the sentence the margin invalidated** — "classify_disagreement flags a
+  crossing of EITHER" — 22 lines above the constant making a crossing necessary-but-not-
+  sufficient in the demote direction. It now says candidate, not verdict.
+- **`second_judge.py`'s docstring argued from a `batchable` that no longer exists.** It said
+  RECRUITER_ONLY "fails the verdict leg", corrected only the PASS 13-14 half, and left the RO
+  half standing as a live reason that band stays out — while the same working tree had added
+  RECRUITER_ONLY to `batchable`. Both bands' consumer legs are now met; both stay out on the
+  **cost** leg, and the docstring carries that arithmetic instead.
+- **iCIMS was missing from three of the places a reader looks first**: `fetch.py`'s module
+  docstring, `fetch_ats`'s docstring, and AGENTS.md's module-layout line (which called the
+  lane "Greenhouse/Lever/Ashby/Workday"). It is also HTML scraping, not a JSON API.
+- **`fulltext_readings` drops location from its blocking key** — one requisition mass-posted
+  across many cities pools into a single reading. Direction is conservative (pooling can only
+  silence a flag, never invent one), but the docstring said nothing; it does now, the same
+  disclosure `dupe_candidates` owes for the same trade.
+
+**Second pass, over the fixes above.** The host anchoring in the first pass was itself a
+silent-death risk and got reworked:
+
+- **`_icims_cards` now MATCHES-THEN-FILTERS instead of anchoring its regex.** An anchored
+  pattern is silent by construction: a tenant whose real cards sit on a host not derivable
+  from `slug` would have yielded zero cards and read as an empty board — reintroducing the
+  exact failure the interstitial fix had just closed, through the fix for a different one.
+  Filtering counts what it drops and prints the offending host.
+- **`_icims_rows`' page-0 guard now separates "broken reader" from "empty board".** Cards
+  present in the HTML but none parsed → raise. This also closes a hole that predates this
+  review: the old guard only checked for `iCIMS` branding, so an iCIMS **skin change** moving
+  the card markup would have read as a healthy empty board indefinitely. Its test asserts both
+  sides on the summary's unit outcome, not the inserted count — both spellings insert 0 rows,
+  which is precisely why "0 rows" cannot be the signal.
+- **`notify_deepdive_batch`'s `batchable` CASE is the last copy of `states.VERDICT_FAVOR`**
+  and now carries the change-one-change-both cross-reference, plus an explicit note that it is
+  NOT `classify_disagreement` — the confusion that produced the corrected claim above.
+- **`evergreen_floors` groups by TEXT, not employer, and 13.4% of floor-producing groups span
+  more than one company string** (measured: 699 of 5,203). Recorded rather than changed,
+  because both kinds are wanted: most are one employer under several spellings (`cla` /
+  `clifton larson allen` / `cliftonlarsonallen`; `jpmorgan chase` / `jpmorgan chase bank n a`)
+  that the company+title fingerprint splits and this grouping sees through, and the rest are
+  staffing agencies relisting one client requisition — the evergreen signal itself.
+- Verified and clean, no change needed: all six `.bat` files are pure ASCII (the house rule);
+  every validation script writes under the gitignored `tests/validation/results/`; the live
+  `run_drive_watch.bat` fixes every defect its abandoned D: draft had (separate-device
+  destination, 14-pack retention, no blocking dialog, `%~dp0` instead of a hardcoded path).
+
+Totals after both passes: 957 tests (7 new), every new behavioral test mutation-checked.
+
+---
+## 2026-08-22 — RECRUITER_ONLY ≥13 joins the deepdive batch (`batchable` drops its PASS-only leg)
+
+**No verdict, score, routing, filter, or schema change.** The third and last membership move
+of the day: the doorbell's zone and the batch now admit `RECRUITER_ONLY` rows from the same
+floor as PASS (`BATCH_MIN_FIT` = `states.COLD_APPLY_MIN_FIT` = 13). The zone's RO leg moves
+from `RECRUITER_ROUTE_MIN_FIT` (15) to that floor; the downgrade leg becomes verdict-relative
+(a PASS row is excluded by any non-PASS opinion, an RO row only by GATE_FAIL — an RO opinion on
+an RO row is agreement). The `recruiter_route` Action Center queue is untouched.
+
+**Why.** The recall measurement in `tests/validation/results/recall_layers_20260822.md` (the
+2026-08-21 14-day sweep: 981 groups, one reader, one rubric, one window) found RO 13–14 full
+text to be the largest identified leak — and a better-yielding band than the one admitted that
+morning: **5/114 apply-grade (4.4%) + 23 candidates, against PASS 13–14's 3/144 (2.1%) + 25.**
+The five (Microsoft Cloud Solution Architect – Copilot, PubMatic FDE, Adapt 365 D365 CE, Intapp
+AI Transformation Lead, Hightouch GTM Engineer; `formal_leadership_required` = 0, Bucket 1 or 3)
+were all applied to by the user after the full read. Of the sweep's 17 apply-grade finds, seven
+were RO rows, and none of the seven could reach any surface: the batch excluded them by verdict,
+the recruiter_route queue starts at 15, and the UI sorts them under every PASS row. At fit
+13–14 the primary judge's PASS/RO split is therefore not an admission signal, and reading one
+side of it but not the other was the inconsistency.
+
+**What it is not.** Not a re-route: the batch produces a fresh full-text evaluation under the
+guide, and a row whose full read also lands RECRUITER_ONLY goes to the report's 压线需裁 /
+recruiter section, never 建议投. The guide's RO channel rule ("pursue via recruiter, do not
+cold-apply") still governs the OUTPUT; what changed is only who gets re-read. The
+recruiter_route queue keeps its membership (RO ≥15, no recorded contact) and its exit.
+
+**Cost.** RO ≥13 full text is ~20 rows/day (14-day mean: 14.4 at 13–14, 5.5 at ≥15) ≈ +2
+window points/day at the 0.10%/row calibration, ~+25 min/day of attended background time;
+expected yield ≈ +4 apply-grade/week (95% CI ≈ 2–10 on n=114). The morning's finding — that
+the plan budget the old floor assumed never bound — is what makes this free.
+
+**Honest ceiling, stated so nobody reads this as a funnel fix.** The cold-apply funnel converts
+at 1.4% (358 applied → 4 recruiter screens + 1 interview). Closing every identified recall leak
+(≈6–7 apply-grade/week) is worth about one additional employer conversation per quarter. This
+change is taken because it is nearly free and its evidence is the strongest of the day, not
+because recall is where the leverage is. The one remaining unknown that could change that
+arithmetic is GATE_FAIL (336 full-text rows/day, no instrument below ~8%):
+`tests/validation/gatefail_probe_sample.py` draws the 60-row stratified sample that bounds it,
+for one attended deepdive session, with the rubric in its worksheet.
+
+**Tests.** Both verdicts pinned from both sides as literals (PASS 13 / RO 13 batchable, PASS 12
+/ RO 12 not zone material); the verdict-relative downgrade has an RO-agreement and an
+RO-GATE_FAIL case; the tests that used RO rows as "visible-not-batchable" filler now use rows
+past the 5-day window, which is what that slice of the zone actually is now.
+
+---
+
+## 2026-08-22 — Second-opinion layer retired (unscheduled, not deleted)
+
+**No verdict, score, routing, filter, or schema change.** The paid review layer stops
+running. `run_second_judge.bat` no longer invokes `pipeline.py second-judge`;
+`second_judge.py`, the `second_opinions` table with all **728** collected opinions, and the
+CLI command are intact, and restoring the layer is uncommenting two lines in that .bat plus
+re-adding one health sentinel. Direct consequence of the same day's `BATCH_MIN_FIT` 15 → 13
+widening (entry below), which turned the pre-screen into duplicated work.
+
+**The 2026-08-19 justification is falsified, and this is the correction.** That entry kept
+PASS ≥15 on one sentence: *"those 38 rows/week (~5.4/day) are real removed work — ≈8 min/day,
+and under `SESSION_GUARD_PCT` truncation that is 5.4 more genuine rows of coverage per day
+rather than merely saved time."* All three clauses measured after the fact:
+
+- **5.4 rows/day → 2.8.** Since 08-19: 97 opinions, 11 verdict-level downgrades over 4 days.
+- **8 min/day → 3.6.** The skill's own calibration fell from 1.5 to 1.3 min/full row.
+- **"more coverage, not merely saved time" → merely saved time.** That clause required the
+  session guard to be truncating batches. **Every doorbell firing since the guard was added on
+  2026-08-16 — 44 of them across its 7-day life — left zero guard-skip lines** (an earlier draft
+  of this entry said "30 days of logs"; the log retention is 30 days, the guard is 7 days old,
+  and the evidence is the 7); the guard has never fired in its life, and the day's four batches
+  ran at 4–11% of a 50% ceiling. (`.deepdive_state.json`'s
+  `guard_skipped_at` cannot answer this — it is cleared once a popup carries the notice — so
+  the durable log line is the evidence.)
+
+Net: **$1.70/day** (4-day mean; $2.06 on 08-22) buying **3.6 minutes/day** of reading that is
+billed to a flat-rate subscription. ~$52/month for ~1.8 hours/month of already-paid time.
+
+**And the pre-screen is now duplicative by construction.** All **97** post-08-19 opinions landed
+on rows inside the deepdive batch's own 5-day window; **zero** landed on a row the batch cannot
+reach. The batch reads the browser-completed JD with the same brain files, while the second judge
+reads the same stored text the primary judge already read — so for every row it screens, a
+strictly better reader was going to arrive anyway. The 08-22 widening made this worse in kind,
+not just degree: the batch now reads PASS 13–14 with **no** pre-screen at a 12% junk rate while
+we paid to pre-screen PASS ≥15 at 13% — the same rate, opposite treatment.
+
+**Every argument that could have saved it, tested and failed:**
+
+- *Unattended insurance for days without a batch* — there have been no such days. Every date
+  from 2026-08-15 to 2026-08-22 carries at least two deepdive reports (2, 9, 10, 6, 4, 6, 4, 5).
+- *Catching real errors rather than score offset* — 11 GATE_FAIL opinions on ≥15 rows
+  (`years_floor` 5, `work_auth` 3, `tool_requirement` 2, `employment_type` 1) produced **0
+  applies, 1 pass, 10 undecided**. Not consumed; and because a GATE_FAIL opinion removes the row
+  from `batchable`, the flag was *preventing* the better reader from seeing those 11 rows.
+- *Predictive power of the ⬇ flag* — flagged ≥15 rows are applied to at 7.3% against 19.7%
+  unflagged (n=82 vs 290), but the user sees the flag before deciding, so the correlation is
+  contaminated (the 08-19 entry says so itself). ⬆ promotions in this band: **0, all-time**.
+- *Cross-model drift detection* — that is `canary.py` plus the `[eval] done` arbitration rate,
+  a question already settled.
+
+**Two couplings that had to be handled, either of which would have made this a bad change:**
+
+1. **The .bat carries the doorbell.** `run_second_judge.bat` runs the judge *and*
+   `notify_deepdive_batch.py`. Retiring the layer by deleting its Task Scheduler entry — the
+   obvious move — would have taken down the doorbell, which is the only trigger deepdive
+   batches have. The file is edited instead and keeps its name, because the scheduler action
+   points at that path; its header says so.
+2. **`health.SECOND_JUDGE_SILENCE_HOURS` (48) would have become a permanent false alarm.**
+   Nothing writes `second_opinions.collected_at` any more, so within two days the sentinel goes
+   stale and the daily report's health line fires forever — and a warning that appears every day
+   is how the two real sentinels beside it (`pipeline_run` 26h, `canary` 8d) stop being read.
+   The reading and its constant are removed with the layer. This is not the 2026-08-18 direction
+   reversed: that audit's rule is "no schedule goes unwatched", and there is no schedule here to
+   watch. The test now asserts the reading's **absence** (with a leftover opinion row in the
+   fixture, so absence comes from the sentinel list rather than an empty table) and carries the
+   reason, and `report._SILENCE_PHRASES` / `index.html`'s label map keep their wording so a
+   restore needs no edit there.
+
+**Degradations accepted.** The report's Second opinion section and the UI card's opinion warning
+render nothing new; `/api/freshness` counts 0 collected opinions, so its "the DB moved" banner
+stops appearing (it was only ever fed by opinion collection). Existing opinions keep excluding
+rows from `batchable` until they age out of the 5-day window — self-limiting, and correct while
+they last.
+
+**Reversal condition.** Reschedule the layer if the deepdive batch starts actually hitting
+`SESSION_GUARD_PCT` (a pre-screen buys real coverage only when the reader is rationed), or if
+batches stop running daily (the unattended-insurance argument becomes live again), or if a
+second opinion ever becomes readable on rows the batch cannot reach.
+
+---
+
+## 2026-08-22 — Deepdive batch floor drops to `states.COLD_APPLY_MIN_FIT` (`BATCH_MIN_FIT` 15 → 13)
+
+**No verdict, score, or filter change; no schema change.** What moves is which evaluated rows
+the local deepdive batch — the Claude Code plan, not the paid API — reads: undecided PASS 13–14
+rows inside the 5-day apply window are now batch material. `notify_deepdive_batch.BATCH_MIN_FIT`
+becomes an alias of `states.COLD_APPLY_MIN_FIT` (13), the bar the doorbell's zone already used
+for its PASS leg, instead of a second literal carrying the standing allocation's 15. The skill's
+membership leg 1 (the gitignored SKILL.md mirror) moves with it.
+
+**The measurement that bought it.** The 15 was a budget assumption from the 2026-08-16 uncapping
+(calibration then 0.27% of the 5h window per row, "full-text full coverage ≈6%/day"). The budget
+never bound. The day's four batches (00:55 / 14:00 / 16:22 / 17:12) read 9+3, 0+3, 11+3 and 0+4
+rows and moved the window about one point each — batch `_3`: 14 rows, 4% → 5%; `_4`: four
+snippet completions, 10% → 11% — against a 50% guard, and the skill's rolling calibration now
+reads **0.10%/full row, 0.193%/snippet row** (1.3 / 3.67 min). From the outside the batches
+looked capped at 9–14 rows; nothing caps them (the top-10 cap died 08-16 and the Project brain
+files carry no top-N instruction) — the floor excluded a band as large as the one it admitted.
+14-day daily inflow of evaluated, unfiltered rows by `first_seen` (full text / Adzuna snippet):
+PASS ≥15 **22.1 / 20.3**, PASS 13–14 **18.6 / 21.8**, PASS 12 **17.6 / 40.6**, RECRUITER_ONLY
+≥15 5.1 full. Full coverage of PASS ≥13 full text is therefore ≈41 rows/day ≈ **4 points of the
+window per day** plus the 3-snippet quota (≈0.6) — under a tenth of the guard, ~65 min/day of
+attended background time.
+
+**What 13 is, and what it is not (corrected within the same session).** An earlier draft of
+this entry called 13 "the guide's own cold-apply bar". **It is not.** `evaluation_guide.md`'s
+standing allocation reads `fit >= 15, posted <= 14 days` (briefly 14 on 2026-08-07, restored the
+same evening) and names no 13 at all. The false claim came from a stale comment on
+`states.COLD_APPLY_MIN_FIT` that described itself as "the guide's PASS action bar (apply at
+13+)"; it was believed and propagated into three documents before the guide was re-read. That
+comment is now corrected in place, with the correction recorded rather than quietly deleted — a
+comment naming another file's rule is a claim, and this one had gone silently false.
+
+The correct framing is that **`BATCH_MIN_FIT` is an ADMISSION threshold for re-reading, not an
+apply bar.** The batch produces a fresh full-text evaluation; the guide's `fit >= 15` governs
+that output, not the primary score that let the row through the door. Reading is not applying.
+
+**And 13 is nearer the guide than it looks, by the guide's own calibration rule.** The guide sets
+its bar by a STRICTNESS GAP — bar minus the gates-passed fit mean — historically **4.1**, and
+deliberately **4.4** when the bar was restored on 2026-08-07 against a scale of ~10.6. Measured
+2026-08-22, that scale is **~9.5** (weekly gates-passed means: 10.94 → 10.66 → **9.55** → 9.23 →
+9.56, the step landing 08-03), so the standing bar's gap is now **5.4–5.8**. Applying the guide's
+own 4.4 rule to today's scale puts the bar at **14.0**; the historical 4.1 puts it at 13.6. So
+this admission threshold sits about one point of margin below the current-scale equivalent of the
+guide's line, which is what an admission threshold should look like. **The bar itself is NOT
+moved here** — that is a guide edit gated on `backtest_v2` (and the 2026-08-07 note already
+records the standing instruction: "if the scale keeps sliding, move the bar again, not the
+scoring rules"). It is now flagged as a live, measured question.
+
+**Why 13 and not 12.** The brief named "13/12". 12 sits below both the code-owned line and any
+gap-derived equivalent of the guide's bar, so batching it means asking the local read to overturn
+the primary's placement rather than to check it. The supporting number is the
+all-DB apply base rate on PASS rows by fit: 18 → 25%, 17 → 16%, 16 → 6.1%, 15 → 2.6%,
+**14 → 0.76%, 13 → 0.45%, 12 → 0.08%** (3 applies in 3,573 rows), against ~18 more full
+rows/day. **That base rate is confounded and is not load-bearing here**: none of these bands
+were ever batched, and the UI sorts by fit, so 13–14 were simply more visible than 12 — part of
+the gradient is exposure, not fit. What is not confounded: scores in this region are
+arbitration-stabilized already (`evaluation.ARBITRATION_BAND` = 11–17 buys extra draws and a
+majority vote precisely because flips there change actions), so a 12 that survived arbitration
+is a settled 12, not a coin-flip that might be a 15. Revisit on the first two weeks of batch
+data, not on principle: zero cold applies found in the band sends the floor back to 15; finds
+clustering at the bottom of it argue for trying 12.
+
+**The 2026-08-19 reversal condition is met, and the second judge still stays at 15.** That entry
+wrote: "if `BATCH_MIN_FIT` ever drops to the guide's 13 [*sic* — 13 is `states.COLD_APPLY_MIN_FIT`,
+not a guide line; see the correction above], the PASS 13–14 band becomes reachable by
+a real consumer and the question genuinely reopens." It has; here is the answer in the consumer's
+own units. An opinion removes a row from a batch only on a verdict-level move (RECRUITER_ONLY /
+GATE_FAIL — ~14% of opinions; within-verdict fit drops never touch `batchable`). Re-reading the
+band's ~19 full-text rows/day at the measured $0.070/row is ~$1.3/day to spare the batch ~2.6
+rows/day, each priced at 0.10% of the window and 1.3 minutes: the pre-screen costs more than what
+it screens, and the batch it would protect is nowhere near its guard. `second_judge.PASS_MIN_FIT`
+keeps its 15 — now deliberately two points above the batch floor, which both docstrings and
+AGENTS.md say out loud. What reopens it: a batch that actually hits `SESSION_GUARD_PCT`, or a
+unit cost well under $0.07/row.
+
+**Untouched on purpose.** `SNIPPET_QUOTA` stays 3 even though snippets are the larger deferral
+(batch `_3` deferred 90; the first widened doorbell holds 109 beyond the quota): that is a yield
+rule, not a budget rule — 10 of 148 completed pairs kept their action (6.8%) and each completion
+is a browser fetch — and today's finding is about budget. `BATCH_FRESH_DAYS` (5) and the
+RECRUITER_ONLY exclusion are unchanged.
+
+**First effect, read with `notify_deepdive_batch.py --print` after the change:** pending
+**214** (only 6 of them arrivals since the mark — the rest were always there, invisible),
+proposing **102 full text + 3 snippets**, estimated ≈146 min and ≈11% of the window against a
+window at 18%. Composition matters more than the total: **99 of those 102 full-text rows are
+the newly-admitted 13–14 band** and only 3 are ≥15, because the day's four batches had already
+drained ≥15. So the first widened batch is close to a clean experiment on exactly the band this
+entry admits, spread across the whole 5-day window (08-17 … 08-22, 81 rows from 08-21 alone).
+Legacy screening is negligible: 30 pending rows carry a pre-08-19 second opinion and all 30 are
+PASS, while exactly **2** rows in the window are excluded by a pre-08-19 downgrade.
+
+**What the admitted band actually holds, measured 2026-08-22 after the change (a live DB —
+the band's applied count moved 38 → 40 during the reading).** Three findings, one of which
+retires an argument this entry could otherwise have leaned on:
+
+- **The band is not junkier than the one above it.** Second-judge verdict-level downgrade rate
+  is **36/297 = 12% at PASS 13–14** against **49/372 = 13% at PASS ≥15** — statistically the
+  same. If 13–14 were a noise heap, the independent judge should GATE_FAIL it harder; it does
+  not. The band is lower-scored, not lower-quality, and this is the strongest single argument
+  for reading it.
+- **The user was already applying into it by hand.** 40 applied rows (~34 after chain dedup):
+  6 in June, 23 in July, 11 in August — about **13% of all applications**, and still running in
+  the current month. The batch does not create this work; it systematizes triage already being
+  done through the UI. (Direction of travel is ambiguous: 13–14 applications fell 23 → 11 while
+  ≥15 rose 86 → 108. That is either a tightening standard or the UI's fit sort burying the
+  band, and these data cannot separate them.)
+- **Outcome data cannot adjudicate any band, and must not be used to.** Across **358 applied
+  rows** the entire employer-response history is **4 `recruiter_screen` + 1 `interview`** (plus
+  29 rejections, 261 notes). At that 1.4% response rate the 13–14 band's 40 applications have an
+  expected yield of **0.56** responses; the observed 0 is uninformative, exactly as the 2
+  screens observed at fit 16 and 17 fail to prove ≥15 is better. Written down because "the band
+  applied 40 times and never got a callback" is the reversal argument someone will reach for
+  first, and it is not evidence — the 202/0 bottleneck was diagnosed in resume-variant routing,
+  not in the score band.
+
+**Composition, and a falsifiable prediction for the first batch.** Of the 99 full-text 13–14
+rows pending at the change (96 LinkedIn, 3 Dice), **29% carry an AI / Power Platform / Copilot /
+automation / innovation title** — including Nixon Peabody's *AI Solution Manager* and Winston
+Taylor's *AI Adoption Specialist* (both on the law-firm lane built 2026-08-20), Stripe's
+*Forward Deployed AI Accelerator*, and Williams' *IT Analyst III — Everyday AI & PowerPlatform*.
+The other 71% are plain Data Analyst / Data Scientist / BI roles, the population the standing
+allocation deprioritized. **The prediction: a first batch's cold-apply recommendations should
+cluster inside that 29%.** Spread evenly across analyst titles instead, the batch has loosened
+its bars rather than found buried roles — a reversal signal, and one visible after a single
+batch.
+
+**One argument this entry does NOT make.** "The band hides under-scored roles a full-text read
+will rescue" has never been demonstrated by any instrument: across **261 paired opinions** in
+this band the second judge's mean Δfit is **−2.21**, its ceiling is **14**, and **zero** rows
+reached 15. The case for reading 13–14 rests on the first two findings above, not on rescue.
+
+**The estimate is an extrapolation, and the guard — not the estimate — is what protects the
+window.** Every calibration constant was measured on 4–14 row batches at INTEGER window
+resolution (a 1-point delta over 14 rows is ±50%), and a ~100-row batch is a 10x extrapolation
+inside one conversation whose context grows with every row read, so per-row cost may not be
+flat. Arithmetic replay: from 18% the batch truncates only if the true cost exceeds
+**0.314%/full row** against the calibrated 0.10% — a 3.1x margin, not the tenfold headroom a
+linear reading suggests; from a 40% start the same pending set already truncates to 99 full
+rows and 0 snippets. This is a disclosure requirement, not a blocker: the guard stops the batch
+between rows and the coverage line must say what was deferred. SKILL.md's calibration bullet now
+asks each batch to record the row count it calibrated on, and to flag a >2x divergence from the
+stored constant rather than blending it away — that divergence is the evidence for whether the
+popup's linear estimate needs a size term.
+
+**Tests.** The zone boundary is pinned from both sides as literals (PASS 13 batchable, PASS 12
+not in the zone); the three tests that used PASS 13 as their visible-not-batchable filler now use
+RECRUITER_ONLY rows, which is what that slice of the zone actually is. 949 pass.
+
+---
+
+## 2026-08-21 — Snippet-scored cards disclose a worse full-text reading of the same role
+
+**No verdict, score, routing, or filter changes** — a report surface only, the same
+appended-never-substituted shape as the evergreen date floor. A gates-passed card whose row
+was scored on a snippet (description <= 520 chars) now carries one diagnostics line —
+`eval quality: snippet-scored — the full-text read of this role says <verdict> <fit>/18` —
+whenever the role's most favorable full-text reading (> 2,000 chars, same normalized
+company+title) is strictly less favorable: a lower verdict, or the same verdict trailing by
+>= 2 fit points.
+
+**The measurement that bought it (2026-08-20):** snippet rows score systematically hot — one
+WSGR requisition scored PASS 16 from a 500-char Adzuna snippet and RECRUITER_ONLY 12 from
+the 9,327-char board text the same day, and 403 of 2,167 undecided snippet PASS rows at the
+cold-apply bar (19%) had a strictly-worse full-text reading of the same role, invisible
+because cross-source rows rarely chain. Taking the MOST favorable full-text reading is the
+conservative direction — Holland & Knight's AI Legal Engineer (two full GATE_FAILs, then a
+full PASS 16) rightly stays silent. Shipped against positive controls (WSGR, PepsiCo,
+Modern Family Law, Deloitte all fire; HK stays silent); corpus-wide disclosure rate 6.2% of
+evaluated snippet rows — evaluation-backed, unlike the vocabulary flag the same measurement
+vetoed at a 28–40% zone rate. The web UI does not render this yet: the readings map is a
+corpus-wide pass, a once-per-report cost but not yet a per-request one (the eval_issues
+column lesson) — the UI needs its own cached/denormalized step.
+
+---
+
+## 2026-08-20 — Workday joins the ATS lane; the re-apply guard's containment probe was head-anchored
+
+**Schema/provenance:** no column changes. `jobs.source` gains one value, `workday`, from a
+fourth board inside the existing `fetch_ats` — not a fifth source family, so the config shape,
+the title/location filters, and the per-board health facts are unchanged.
+
+**Why a new board rather than another aggregator query.** A census of the 8 law firms with the
+highest `fit>=15` yield in the DB found the ATS lane stocked with 37 vendor/AI-lab boards and
+**zero** law firms, while those firms sit on Workday (4) or iCIMS (3, untested). Wilson Sonsini
+had four AI reqs on its own board; the pipeline held one, and that one arrived 30+ days late
+through Adzuna. Evidence and method — including two scripted shortcuts that failed — in
+`tests/validation/results/ats_census_20260820.md`.
+
+**What the board carries that no aggregator does**, measured against two live tenants:
+`jobReqId` (a requisition identity), the employer's own precise `startDate`, the full JD in the
+detail call, and a truthful absence once a req is filled (Goodwin's `r04336` was gone from
+their board while a live Adzuna row still advertised it). This bears on routing because the
+aggregators re-date evergreen reqs: Adzuna dated Wilson Sonsini's R1579 `2026-08-18` against a
+Workday `startDate` of `2026-06-03`, and dated PNM's `2026-08-19` against a Jun 3 board
+opening — 76 and 78 days, both on rows the cold-apply bar's `<=14 days` leg had already
+admitted.
+
+**Mechanics.** Workday's CXS API is a POST for the paged list plus one detail GET per posting,
+so unlike the three GET-only boards its reader takes `conn` and skips known urls *before*
+paying for a detail fetch (the economics Dice's reader already states). `slug` is the composite
+`<tenant>/<dc>/<site>`, not derivable from the company name (`gtlaw`, `hklaw`), so each tenant
+is probed by hand once.
+
+**Separately — a re-apply guard defect, fixed the same day.** The A2 cross-source branch tested
+containment with a probe anchored at the HEAD of the shorter normalized JD. That survives a
+prefix on the long side (the PTG/Courser case it was built for) but not one on the short side,
+so `Bertelsmann | Power Platform Developer` never matched the **applied** `Arvato | Power
+Platform Developer` — one requisition, with Adzuna prepending `"Company Description "`. All four
+tiers returned `None`, and the failure that branch exists to prevent is applying twice to the
+same job. The probe now comes from the middle of the string. Measured before shipping with
+`tests/validation/reapply_probe_compare.py`: across 8,000 candidates the old and new operators
+produce zero old-only and zero new-only hits, so the change is strictly a sensitivity gain. That
+script keeps the old operator as a comparison arm and carries a **positive control**, because a
+silently-broken sweep returns a comfortable zero indistinguishable from a clean one.
+
+**Same day, follow-up — per-board `title_any_extra`.** Switching the four law-firm Workday
+boards on delivered almost nothing: the shared `settings.ats.title_any` is tuned for vendor
+SA/SE titles and admitted **2 of 11** AI-ish roles live on those boards (missing "AI Legal
+Engineer", "AI Systems Manager", "Sr. AI Developer"). A company entry may now carry
+`title_any_extra`, a per-board pattern list **unioned** with the shared one — never replacing
+it, so shared tuning keeps applying everywhere and a board-local list can only widen its own
+board; all-unusable extras degrade to shared-only (the safe, narrower direction). Vocabulary
+was measured against the four live boards before shipping: 2 → 10 of 11 admitted, +8 rows of
+which 6 are the intended AI seats and 2 are UK lawyer roles the gates will price at two cheap
+evals. "innovation" is deliberately in the list — the known Greenberg Traurig warm-channel
+target was titled "Innovation Manager Applied AI", and that board currently lists zero
+AI-titled roles, so the word is the watch for when one appears.
+
+**Same day — iCIMS joins the lane, and the location filter got two defects fixed.** The census
+left iCIMS (3 of the 8 resolved firms) untested; probing found the portal's outer page is a JS
+shell but the iframe variant it embeds is server-rendered HTML, logged-out, paged by `pr=N`,
+with a real JD in each detail page's ld+json — whose `datePosted` is **render-time fiction**
+(five "newest" postings all stamped now-minus-exactly-two-years, seconds apart, tracking the
+probe's own request pacing), so iCIMS rows store `date_posted` NULL and `first_seen` stands in,
+the LinkedIn convention. Wiring the lane through the FULL production config — the smoke the
+morning's Workday work skipped, which is how these surfaced — exposed two location-filter
+defects: (1) `_workday_rows` fed the filter only the primary city, so a multi-city req
+(Holland & Knight's AI Legal Engineer: primary "Operations Center - Tampa" + 29
+additionalLocations) was judged on one string — the filter now sees the full list; (2) some
+portal skins put no location on the job cards at all (careers-lw), which silently
+location-dropped every title match — card-less locations now fall back to the detail ld+json
+address. A company entry may also carry `location_any_extra` (unioned, widening-only, inert
+when the shared filter is absent) because the vendor-tuned shared city list had no
+Charlotte/Richmond/Tampa and would have zeroed the law boards. Yield under production config,
+all seven law boards: 20 rows, including six never-seen Latham innovation/AI seats (among them
+"Senior AI & RPA Solutions Consultant") and McGuireWoods' three regional "Legal AI Solutions
+Lead" reqs.
+
+**Same night — the lane scaled to every proven AI-hiring firm that resolves.** A two-stage
+sweep (`tests/validation/ats_board_sweep.py` / `ats_board_sweep2.py` — firm-site link
+reading, then slug guessing behind positive AND negative controls, including the measured
+Workday CXS discriminator: real tenant + wrong site → 404/"S21", nonexistent tenant → 422)
+plus a browser round took the law lane from 7 to **26 boards** (18 Workday, 7 iCIMS,
+1 Greenhouse), every hit org-name-verified before configuring. Two related guards landed:
+`_workday_rows` now warns aloud when a board overruns the page bound instead of silently
+truncating (White & Case's 3,500-role global board is deliberately NOT configured for
+exactly that reason), and the law boards carry an explicit no-location-filter anchor
+(`location_any_extra: ['re:.']`) because staff AI seats sit in cities the vendor-tuned hub
+list never names — measured: the shared filter would have zeroed the lane. Production-config
+smoke over the 19 new boards: 55 rows, including Sidley's "AI Product Evaluations Senior
+Analyst" and a Davis Polk "Senior AI Enablement Analyst" posted the same day.
+
+---
+
+## 2026-08-19 — Second-opinion layer: two zone bands cut, and disagreement re-baselined against the judge's offset
+
+**The one-week cost/yield review the 2026-08-12 entry scheduled ("a 2026-08-19 cost/yield
+review prunes any zero-yield band"). It pruned two of three.** Read-only measurement over the
+layer's first week: 631 collected opinions, $44.25, $6.32/day (promised band $3.6–7), 0.16%
+error rate.
+
+**The finding that drives everything else: the second judge is not a coin-flip arbiter of the
+primary, it is a consistently LOWER scale.** Mean Δfit −2.49, median −2/−3, and only **3 of 608
+paired rows scored HIGHER**. A "disagreement" flag built on raw action-bar crossings therefore
+fired on **82%** of all opinions — a flag on almost everything, which cannot rank and so cannot
+be triaged.
+
+- **PASS 13–14 (the "rescue" band) removed** — `second_judge.PASS_MIN_FIT` 13 → 15. Four
+  independent checks, all negative. (1) *Ceiling*: across 297 opinions the second judge's
+  highest score was **14**; not one reached 15, so under a −2.5 offset this band cannot lift a
+  row over the bar by construction. (2) *Not an evidence artifact*: non-Adzuna full-text rows
+  (n=164) also produced 0 at ≥15 with an 86% demote rate, indistinguishable from the truncated
+  ones (87%) — the 08-15 snippet exclusion did not change it. (3) *No decisions*: 297 opinions
+  produced **1** user decision, and that one (Courser *AI Business Analyst*) was an apply made
+  **against** a PASS/12 demotion; the 39 rows where both judges agreed at 13–14 produced 0
+  applies and 0 passes. The "filter" value is zero too — the all-DB apply rate at fit 13/14 is
+  0.4%/0.7%, so the band was already skipped by default. (4) *Structurally unreachable
+  downstream* — see below.
+- **RECRUITER_ONLY ≥15 removed** — the whole RO leg of the zone predicate is gone. Its 8 ⬆
+  promotions were noise: 7 landed at PASS **12–13**, at or below the cold-apply bar, i.e. not
+  rescues at all. The 8th (*Arcosa Inc. / Meyer Utility Structures — AI Solutions Architect*,
+  RO/15 → PASS/15) was re-judged by hand against the full JD and the primary was **right**: all
+  six gates pass and no code-enforced cap fires (`ai_artifact_depth`=2, `formal_leadership_required`
+  =false, `core_function`=internal_build), but the required column asks 5+ years and the Industry
+  variant's own summary line reads "3+ years of data analytics experience" — the cold-apply bar
+  ("the resume as written directly proves every requirement") fails on paper. The opinion had
+  argued the **gate** ("a stretch, not a wall" — correct) and let that carry the **verdict**;
+  gate ≠ cold-apply bar. Behaviourally the band was inert as well: 59 opinions → **0 contacts,
+  0 tasks, 0 stars, 0 decisions**, against a DB where **0 of 12** recorded contacts sit on a
+  RECRUITER_ONLY row at all.
+- **Why neither band could pay out, mechanically.** The only consumer that reads an opinion as
+  data is `notify_deepdive_batch`'s `batchable` subquery (`verdict='PASS' AND fit >= BATCH_MIN_FIT
+  AND NOT EXISTS(non-PASS opinion)`). PASS 13–14 fails its fit leg; RECRUITER_ONLY fails its
+  verdict leg. Measured: of the 38 rows the second judge removed from deepdive batches in the
+  week, **38 came from PASS ≥15 and 0 from either cut band**. `workflow.recruiter_route` does
+  not read `second_opinions` at all, so there was no pruning of that queue either.
+- **PASS ≥15 stays, and this is the evidence that keeps it**: those 38 rows/week (~5.4/day) are
+  real removed work — at the deepdive skill's own calibration (`minutes_per_full_row` 1.5,
+  `session_pct_per_full_row` 0.28) ≈ 8 min/day, and under `SESSION_GUARD_PCT` truncation that is
+  5.4 more genuine rows of coverage per day rather than merely saved time.
+- **`states.DISAGREEMENT_FIT_MARGIN` (new, =5).** A within-verdict demotion must now clear a
+  5-point fit drop on top of crossing an action bar. Derivation: the main band's measured median
+  offset (3) + one action-bar width (`RECRUITER_ROUTE_MIN_FIT − COLD_APPLY_MIN_FIT` = 2). Effect
+  on the main band: **78% → 22%**. Deliberately NOT applied to verdict-level moves (already only
+  14% of rows, categorical rather than scalar, and the leg `batchable` reads — margining it would
+  silently re-admit downgraded rows to the deepdive batch) nor to promotions (under a −3 median
+  offset, scoring level-or-higher has already beaten the offset by existing). Re-measure the
+  offset before moving this: it is a property of the judge PAIR, so a model change on either side
+  invalidates it — the same standing rule `ARBITRATION_BAND` carries.
+- **The doorbell's zone mirror is now deliberately broken**, documented in both docstrings and in
+  AGENTS.md. `notify_deepdive_batch.zone_rows` keeps PASS 13–14 and RECRUITER_ONLY ≥15 because it
+  answers a different question — what is in front of the user, not what we pay to re-read.
+  Realigning it would cut the popup's context counts ~⅓ while changing nothing the user triages.
+  Every other leg of that pair (status/filter_source/app_status, snippet exclusion, recency
+  through `recency_dt`) is still shared and still a two-file edit.
+- **Cost, corrected.** Forward spend $2.81/day → **$1.48/day** (−47%). The module's stated
+  $0.046/row was one lucky batch, not a unit cost: 24 batches ran 0–82% cache-shared with no size
+  relationship after 08-13, real mean **$0.070/row** (cache writes 58% of spend, 23.3k prompt
+  tok/row). **The documented `cache_control` fallback is NOT taken** — re-priced over all 24
+  batches, caching still saved $7.58 of $51.72 (15%); it only loses below 21.7% sharing and the
+  12 batches under that line cost $1.33 between them.
+- **Not a verdict change anywhere.** No historical row was rewritten, no `jobs.verdict`/`eval_json`
+  touched, no schema change; `second_opinions` keeps every existing row including the two cut
+  bands' 356 opinions (they are the evidence for this entry). Review, never re-route, unchanged.
+- **Reversal condition, written down:** if `notify_deepdive_batch.BATCH_MIN_FIT` ever drops to the
+  guide's 13, the PASS 13–14 band becomes reachable by a real consumer and the question genuinely
+  reopens.
+- Separately measured and **explicitly not credited to this layer**: manual evaluation traffic in
+  the claude.ai Project collapsed from 19.1 conversations/day (Aug 5–11) to 0.2/day (Aug 14–18).
+  The cliff is at **08-14**, the day the local `deepdive` skill and the local-first ruling landed
+  — not at 08-12. Project traffic on 08-12 (12) and 08-13 (33) was at or above the pre-period
+  mean. The time saving is deepdive's, not the second judge's.
+
+---
 
 ## 2026-08-18 — `fit_score` is validated at normalization: garbage can no longer cross the action bars
 

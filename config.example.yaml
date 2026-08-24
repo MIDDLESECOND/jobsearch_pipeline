@@ -81,12 +81,45 @@ settings:
     companies: []
     # companies:
     #   - slug: examplecorp        # board slug from the careers URL
-    #     board: greenhouse        # greenhouse | lever | ashby
-    #     name: Example Corp       # optional display name (Lever/Ashby payloads lack it;
-    #                              # defaults to the title-cased slug)
+    #     board: greenhouse        # greenhouse | lever | ashby | workday
+    #     name: Example Corp       # optional display name (Lever/Ashby/Workday payloads lack
+    #                              # it; defaults to the title-cased slug)
     #     tier: primary            # optional; default primary
     #   - slug: another-co
     #     board: lever
+    #   # Workday's slug is the composite "<tenant>/<dc>/<site>", all three read off the
+    #   # careers URL: https://<tenant>.<dc>.myworkdayjobs.com/<site>/...
+    #   # They are NOT derivable from the company name (Greenberg Traurig's tenant is
+    #   # `gtlaw`, Holland & Knight's is `hklaw`), so probe each one by hand once. Workday
+    #   # also costs one detail request per genuinely-new posting on top of the list call,
+    #   # so keep title_any tight for these boards.
+    #   - slug: examplefirm/wd1/External
+    #     board: workday
+    #     name: Example Firm LLP
+    #     # Optional per-board vocabulary: UNIONED with the shared title_any above (never
+    #     # replacing it), so it can only widen its own board and the shared list's tuning
+    #     # keeps applying everywhere. Same pattern dialect. Use it when one board's job
+    #     # titles speak a different language than the shared list was tuned for — e.g. a
+    #     # law firm titles its AI seats "AI Legal Engineer" / "AI Systems Manager", which
+    #     # vendor-tuned SA/SE patterns never match (measured 2026-08-20: 2 of 11 admitted
+    #     # without this, 10 of 11 with it).
+    #     title_any_extra:
+    #       - 're:\bAI\b'
+    #       - legal engineer
+    #       - innovation
+    #     # Optional per-board location vocabulary, same union rule — widening only, and
+    #     # inert when the shared location_any is absent (extras can never narrow). Useful
+    #     # when a board's location strings speak a different format than the shared list
+    #     # (iCIMS renders "US-NC-Charlotte"; Consilio uses a bare "US").
+    #     location_any_extra: ["us-", 're:^us$']
+    #   # iCIMS portals (added 2026-08-20): slug is the portal host prefix from
+    #   # https://<slug>.icims.com. The outer careers page is a JS shell, but the reader
+    #   # uses the server-rendered iframe variant, logged-out, no keys. iCIMS rows store
+    #   # date_posted NULL on purpose — the page's ld+json datePosted is fabricated at
+    #   # render time (measured 2026-08-20), so first_seen honestly stands in.
+    #   - slug: careers-examplefirm
+    #     board: icims
+    #     name: Example Firm LLP
 
   # Optional fourth source: Dice search pages (public, logged-out, no keys — the job list is
   # embedded in the page HTML). Active only for searches that define a `dice:` block (see the

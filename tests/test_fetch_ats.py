@@ -5,6 +5,8 @@ test ever touches the network."""
 
 import re
 
+import pytest
+
 import fetch
 from conftest import make_job
 from fetch import (
@@ -423,7 +425,11 @@ def test_fetch_ats_refuses_empty_title_any(conn, capsys):
 def test_fetch_ats_skips_bad_board(conn, monkeypatch, capsys):
     monkeypatch.setattr(fetch, "_ats_get", _fake_ats_get)
     monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
-    cfg = _ats_cfg(companies=[{"slug": "x", "board": "workday"}])
+    # The example board name must be one ATS_BOARDS really lacks. It was "workday" until
+    # 2026-08-20 and then "icims" until later the same day — each time the board got built,
+    # this test correctly went red. Keep it pointed at something with no build on the
+    # horizon (the census found no SmartRecruiters employer worth a reader).
+    cfg = _ats_cfg(companies=[{"slug": "x", "board": "smartrecruiters"}])
     assert fetch.fetch_ats(cfg, conn) == 0
     assert "bad companies entry" in capsys.readouterr().err
 
@@ -557,3 +563,557 @@ def test_fetch_ats_links_repost(conn, monkeypatch):
         ("https://boards.greenhouse.io/examplecorp/jobs/1",),
     ).fetchone()
     assert gh["repost_of"] == orig["job_url"]
+
+
+# ---------------------------------------------------------------- Workday (CXS)
+# Shapes captured 2026-08-20 from the LIVE boards wsgr.wd503/WSGR and
+# goodwinprocter.wd5/external_careers — the list POST and the per-posting detail GET,
+# trimmed to the fields _workday_rows reads. Not invented: an invented fixture is how 38
+# green Dice tests once covered a fetcher that extracted nothing from a real page.
+
+WD_LIST_PAGE = {
+    "total": 3,
+    "jobPostings": [
+        {"title": "AI Enablement Specialist",
+         "externalPath": "/job/Palo-Alto/AI-Enablement-Specialist_R1696",
+         "locationsText": "14 Locations", "postedOn": "Posted 29 Days Ago",
+         "bulletFields": ["R1696"]},
+        {"title": "Senior Trademark Paralegal",          # no title_any match
+         "externalPath": "/job/Seattle/Senior-Trademark-Paralegal_R1730-1",
+         "locationsText": "13 Locations", "postedOn": "Posted 27 Days Ago",
+         "bulletFields": ["R1730"]},
+        {"title": "AI Systems Manager",
+         "externalPath": "/job/Palo-Alto/AI-Systems-Manager_R1738-1",
+         "locationsText": "14 Locations", "postedOn": "Posted 7 Days Ago",
+         "bulletFields": ["R1738"]},
+    ],
+    "userAuthenticated": False,
+}
+WD_DETAIL = {
+    "/job/Palo-Alto/AI-Enablement-Specialist_R1696": {
+        "jobPostingInfo": {
+            "title": "AI Enablement Specialist", "jobReqId": "R1696",
+            "startDate": "2026-07-22", "location": "Palo Alto", "timeType": "Full time",
+            # additionalLocations shape from a live probe (2026-08-20): multi-city law reqs
+            # carry a primary plus a city list (WSGR had 13, Holland & Knight 29).
+            "additionalLocations": ["Salt Lake City", "San Diego"],
+            "jobDescription": "Join the firm's Innovation team. Full virtual opportunity.",
+        }},
+    "/job/Palo-Alto/AI-Systems-Manager_R1738-1": {
+        "jobPostingInfo": {
+            "title": "AI Systems Manager", "jobReqId": "R1738",
+            "startDate": "2026-08-13", "location": "Palo Alto", "timeType": "Full time",
+            "jobDescription": "Lead the AI Systems team.",
+        }},
+}
+
+
+def _wd_cfg(**over):
+    ats = {"title_any": ["ai enablement", "ai systems"], "delay_between_calls": 0,
+           "companies": [{"slug": "wsgr/wd503/WSGR", "board": "workday",
+                          "name": "Wilson Sonsini Goodrich & Rosati"}]}
+    ats.update(over)
+    return {"settings": {"max_description_chars": 12000, "ats": ats}}
+
+
+def _wd_patch(monkeypatch, detail_log=None):
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fetch, "_workday_post", lambda url, payload: (
+        WD_LIST_PAGE if payload["offset"] == 0 else {"total": 3, "jobPostings": []}))
+
+    def fake_get(url):
+        path = "/job/" + url.split("/job/", 1)[1]
+        if detail_log is not None:
+            detail_log.append(path)
+        return WD_DETAIL[path]
+
+    monkeypatch.setattr(fetch, "_ats_get", fake_get)
+
+
+def test_workday_parts_splits_and_rejects():
+    assert fetch._workday_parts("wsgr/wd503/WSGR") == ("wsgr", "wd503", "WSGR")
+    for bad in ("wsgr", "wsgr/wd503", "wsgr/wd503/WSGR/extra"):
+        try:
+            fetch._workday_parts(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should not parse as a workday slug")
+
+
+def test_fetch_ats_workday_inserts_with_employer_date(conn, monkeypatch):
+    _wd_patch(monkeypatch)
+    assert fetch.fetch_ats(_wd_cfg(), conn) == 2      # paralegal row filtered by title
+
+    rows = {r["job_url"]: r for r in conn.execute("SELECT * FROM jobs").fetchall()}
+    url = "https://wsgr.wd503.myworkdayjobs.com/WSGR/job/Palo-Alto/AI-Enablement-Specialist_R1696"
+    assert set(rows) == {
+        url,
+        "https://wsgr.wd503.myworkdayjobs.com/WSGR/job/Palo-Alto/AI-Systems-Manager_R1738-1",
+    }
+    r = rows[url]
+    assert r["source"] == "workday"
+    assert r["status"] == "new"
+    assert r["company"] == "Wilson Sonsini Goodrich & Rosati"
+    assert r["search_name"] == "ats:wsgr/wd503/WSGR"
+    # The employer's own startDate, NOT the day the row was fetched. Pinned as a literal:
+    # deriving it from _ats_date here would let the same bug pass on both sides.
+    assert r["date_posted"] == "2026-07-22"
+    assert r["location"] == "Palo Alto"
+    assert "Innovation team" in r["description"]
+    assert r["salary_min"] is None and r["salary_max"] is None
+
+
+def test_workday_skips_detail_fetch_for_known_urls(conn, monkeypatch):
+    """The load-bearing economics: a url already in `jobs` must never cost a detail GET."""
+    log = []
+    _wd_patch(monkeypatch, detail_log=log)
+    fetch.fetch_ats(_wd_cfg(), conn)
+    assert len(log) == 2                              # both new rows paid one detail each
+
+    log.clear()
+    assert fetch.fetch_ats(_wd_cfg(), conn) == 0      # idempotent second run
+    assert log == []                                  # and it paid for NOTHING
+
+
+def test_workday_title_filter_runs_before_the_detail_fetch(conn, monkeypatch):
+    """A title the filter rejects must not be paid for either — different outcome on each
+    side of the filter, so a no-op filter cannot pass this."""
+    log = []
+    _wd_patch(monkeypatch, detail_log=log)
+    fetch.fetch_ats(_wd_cfg(title_any=["ai enablement"]), conn)
+    assert log == ["/job/Palo-Alto/AI-Enablement-Specialist_R1696"]
+    assert conn.execute("SELECT COUNT(*) c FROM jobs").fetchone()["c"] == 1
+
+
+def test_workday_wrong_shaped_payload_fails_the_board(conn, monkeypatch, capsys):
+    """A renamed envelope must record FAILED, never success/returned_count=0 — the same rule
+    the Adzuna and ATS readers state."""
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fetch, "_workday_post", lambda url, payload: {"jobs": []})
+    assert fetch.fetch_ats(_wd_cfg(), conn) == 0
+    err = capsys.readouterr().err
+    assert "FAILED" in err and "workday" in err
+    # Nothing inserted — the contrast that matters: a silent [] would have inserted nothing
+    # too, but quietly, so the stderr FAILED above is the half of this assertion with teeth.
+    assert conn.execute("SELECT COUNT(*) c FROM jobs").fetchone()["c"] == 0
+
+
+def _extra_payload(slug):
+    # Minimal greenhouse shape (mirrors GH_PAYLOAD's 2026-07-02 probe fields). Same three
+    # titles on every board so the ONLY variable between boards is the config's
+    # title_any_extra — the point of the tests below.
+    def job(n, title):
+        return {
+            "absolute_url": f"https://boards.greenhouse.io/{slug}/jobs/{n}",
+            "title": title,
+            "company_name": slug.title(),
+            "location": {"name": "New York, NY"},
+            "first_published": "2026-08-01T08:00:00-04:00",
+            "content": "&lt;p&gt;Body&lt;/p&gt;",
+        }
+    return {"jobs": [job(1, "Data Analyst"),        # shared title_any match
+                     job(2, "AI Legal Engineer"),   # extra-only match
+                     job(3, "Receptionist")]}       # matches neither
+
+
+def test_fetch_ats_title_any_extra_widens_only_its_own_board(conn, monkeypatch):
+    # The union boundary, asserted on BOTH sides: the same title on two boards must land
+    # differently depending only on which board carries the extra vocabulary.
+    monkeypatch.setattr(
+        fetch, "_ats_get",
+        lambda url: _extra_payload("withextra" if "withextra" in url else "noextra"))
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    cfg = _ats_cfg(companies=[
+        {"slug": "withextra", "board": "greenhouse",
+         "title_any_extra": ["legal engineer"]},
+        {"slug": "noextra", "board": "greenhouse"},
+    ])
+
+    assert fetch.fetch_ats(cfg, conn) == 3
+
+    urls = {r["job_url"] for r in conn.execute("SELECT job_url FROM jobs")}
+    assert urls == {
+        # extra board: shared pattern still live AND the extra admits its title
+        "https://boards.greenhouse.io/withextra/jobs/1",
+        "https://boards.greenhouse.io/withextra/jobs/2",
+        # no-extra board: the identical title stays out — extra never leaks across boards
+        "https://boards.greenhouse.io/noextra/jobs/1",
+    }
+    # matches-neither stays out everywhere: the union widened, it did not open the gate
+    assert not any("jobs/3" in u for u in urls)
+
+
+def test_fetch_ats_unusable_extra_degrades_to_shared(conn, monkeypatch, capsys):
+    # All-unusable extras fall back to shared-only — the safe (narrower) direction — with
+    # a per-pattern notice naming the board, not a refusal like location_any's inverted case.
+    monkeypatch.setattr(fetch, "_ats_get", lambda url: _extra_payload("withextra"))
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    cfg = _ats_cfg(companies=[
+        {"slug": "withextra", "board": "greenhouse", "title_any_extra": ["re:", "  "]},
+    ])
+
+    assert fetch.fetch_ats(cfg, conn) == 1  # Data Analyst via the shared list only
+
+    urls = {r["job_url"] for r in conn.execute("SELECT job_url FROM jobs")}
+    assert urls == {"https://boards.greenhouse.io/withextra/jobs/1"}
+    err = capsys.readouterr().err
+    assert "title_any_extra [withextra]" in err
+
+
+def test_workday_location_filter_sees_additional_locations(conn, monkeypatch):
+    # Both sides of the boundary in one config: "salt lake" appears ONLY in the Enablement
+    # row's additionalLocations (probe-shaped fixture, 2026-08-20), never as a primary.
+    # Before the fix the filter saw [primary] alone, so this config inserted zero rows.
+    _wd_patch(monkeypatch)
+    assert fetch.fetch_ats(_wd_cfg(location_any=["salt lake"]), conn) == 1
+    rows = [r["job_url"] for r in conn.execute("SELECT job_url FROM jobs")]
+    assert rows == [
+        "https://wsgr.wd503.myworkdayjobs.com/WSGR/job/Palo-Alto/AI-Enablement-Specialist_R1696"
+    ]  # AI Systems Manager (primary-only "Palo Alto") correctly dropped by the same filter
+
+
+# --- iCIMS -------------------------------------------------------------------------------
+# Fixtures derived from captured probes (2026-08-20, staffcareers-mcguirewoods.icims.com):
+# the listing page's job-card <li> structure and the detail page's ld+json block, trimmed to
+# what the extractor reads. The fabricated datePosted is KEPT in the detail fixture — it is
+# real observed data (render-time minus exactly two years), and the test asserts we ignore it.
+
+ICIMS_CARD_AI = '''
+<li class="iCIMS_JobCardItem"> <div class="row"> <div class="col-xs-6 header left">
+<span class="sr-only field-label">Job Locations</span>
+<span > US-NC-Charlotte | US-VA-Richmond</span> </div>
+<div class="col-xs-12 title">
+<a href="https://staffcareers-mcguirewoods.icims.com/jobs/6861/ai-specialist---legal-document-specialist/job?in_iframe=1"
+   class="iCIMS_Anchor" title="6861 - AI Specialist - Legal Document Specialist">
+<span class="sr-only field-label">Job Title</span>
+<h3 > AI Specialist - Legal Document Specialist</h3> </a> </div> </div> </li>
+'''
+
+ICIMS_CARD_OTHER = '''
+<li class="iCIMS_JobCardItem"> <div class="row"> <div class="col-xs-6 header left">
+<span class="sr-only field-label">Job Locations</span>
+<span > US-VA-Richmond</span> </div>
+<div class="col-xs-12 title">
+<a href="https://staffcareers-mcguirewoods.icims.com/jobs/6900/legal-practice-assistant/job?in_iframe=1"
+   class="iCIMS_Anchor" title="6900 - Legal Practice Assistant">
+<span class="sr-only field-label">Job Title</span>
+<h3 > Legal Practice Assistant</h3> </a> </div> </div> </li>
+'''
+
+ICIMS_LIST_PAGE = ('<div class="iCIMS_MainWrapper iCIMS_ListingsPage">'
+                   + ICIMS_CARD_AI + ICIMS_CARD_OTHER + "</div>")
+ICIMS_EMPTY_PAGE = '<div class="iCIMS_MainWrapper iCIMS_ListingsPage"></div>'
+
+ICIMS_DETAIL_PAGE = '''
+<html><head>
+<script type="application/ld+json">
+{"@context": "http://schema.org/", "@type": "JobPosting",
+ "title": "AI Specialist - Legal Document Specialist",
+ "datePosted": "2024-08-21T01:48:54.574Z",
+ "description": "<p>Overview</p><p>McGuireWoods is seeking a technology-driven BRC AI Specialist to support the firm&rsquo;s investment in artificial intelligence, including Harvey and Jigsaw.</p>",
+ "jobLocation": [{"address": {"addressLocality": "Charlotte", "addressRegion": "NC", "@type": "PostalAddress"}}]}
+</script>
+</head><body><h1>AI Specialist - Legal Document Specialist</h1></body></html>
+'''
+
+
+def _icims_cfg(**over):
+    ats = {"title_any": ["ai specialist"], "delay_between_calls": 0,
+           "companies": [{"slug": "staffcareers-mcguirewoods", "board": "icims",
+                          "name": "McGuireWoods"}]}
+    ats.update(over)
+    return {"settings": {"max_description_chars": 12000, "ats": ats}}
+
+
+def _icims_patch(monkeypatch, fetch_log=None):
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    def fake_get(url):
+        if fetch_log is not None:
+            fetch_log.append(url)
+        if "/jobs/search" in url:
+            return ICIMS_LIST_PAGE if "pr=0" in url else ICIMS_EMPTY_PAGE
+        return ICIMS_DETAIL_PAGE
+
+    monkeypatch.setattr(fetch, "_icims_get", fake_get)
+
+
+def test_fetch_ats_icims_inserts_row_with_null_date(conn, monkeypatch):
+    _icims_patch(monkeypatch)
+    assert fetch.fetch_ats(_icims_cfg(), conn) == 1   # Legal Practice Assistant filtered
+
+    r = conn.execute("SELECT * FROM jobs").fetchone()
+    # Canonical url: the ?in_iframe=1 query is stripped
+    assert r["job_url"] == ("https://staffcareers-mcguirewoods.icims.com/jobs/6861/"
+                            "ai-specialist---legal-document-specialist/job")
+    assert r["source"] == "icims"
+    assert r["status"] == "new"
+    assert r["company"] == "McGuireWoods"
+    assert r["search_name"] == "ats:staffcareers-mcguirewoods"
+    assert r["location"] == "US-NC-Charlotte | US-VA-Richmond"
+    # Pinned literal: the fixture's ld+json datePosted is the observed render-time fiction,
+    # and the stored value must be NULL — first_seen stands in downstream (mode='seen').
+    assert r["date_posted"] is None
+    assert "Harvey and Jigsaw" in r["description"]     # ld+json description, HTML stripped
+    assert "<p>" not in r["description"]
+
+
+def test_icims_title_filter_and_known_urls_precede_detail(conn, monkeypatch):
+    # Economics boundary, both directions: the non-matching card's detail is never fetched,
+    # and a known url costs no detail fetch on the next cycle.
+    log = []
+    _icims_patch(monkeypatch, fetch_log=log)
+    fetch.fetch_ats(_icims_cfg(), conn)
+    details = [u for u in log if "/jobs/search" not in u]
+    assert details == ["https://staffcareers-mcguirewoods.icims.com/jobs/6861/"
+                       "ai-specialist---legal-document-specialist/job?in_iframe=1"]
+
+    log.clear()
+    fetch.fetch_ats(_icims_cfg(), conn)               # second cycle: url now known
+    assert [u for u in log if "/jobs/search" not in u] == []
+
+
+def test_icims_pagination_stops_on_repeated_ids(conn, monkeypatch):
+    # A portal that serves the same FULL page for every pr= must terminate via the
+    # no-new-ids check, not loop to the cap. The page must hold ICIMS_PAGE cards, or the
+    # short-page break fires first and this test exercises nothing (its first version did
+    # exactly that — 2 cards < 20 stopped after pr=0 with the repeat branch untouched).
+    full_page = '<div class="iCIMS_MainWrapper iCIMS_ListingsPage">' + "".join(
+        ICIMS_CARD_OTHER.replace("6900", str(7000 + i)) for i in range(fetch.ICIMS_PAGE)
+    ) + "</div>"
+    log = []
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    def same_page(url):
+        log.append(url)
+        return full_page if "/jobs/search" in url else ICIMS_DETAIL_PAGE
+
+    monkeypatch.setattr(fetch, "_icims_get", same_page)
+    fetch.fetch_ats(_icims_cfg(), conn)
+    assert len([u for u in log if "/jobs/search" in u]) == 2  # pr=0 full, pr=1 all-repeats stop
+
+
+def test_fetch_ats_location_any_extra_widens_only_its_own_board(conn, monkeypatch):
+    # Same portal data under two slugs; only one board carries the extra. The shared list
+    # matches nothing in "US-NC-Charlotte", so the row lands on exactly one board.
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    def fake_get(url):
+        if "/jobs/search" in url:
+            host = "withextra" if "withextra" in url else "noextra"
+            return (ICIMS_LIST_PAGE.replace("staffcareers-mcguirewoods", host)
+                    if "pr=0" in url else ICIMS_EMPTY_PAGE)
+        return ICIMS_DETAIL_PAGE
+
+    monkeypatch.setattr(fetch, "_icims_get", fake_get)
+    cfg = _icims_cfg(location_any=["new york"], companies=[
+        {"slug": "withextra", "board": "icims", "location_any_extra": ["us-"]},
+        {"slug": "noextra", "board": "icims"},
+    ])
+    assert fetch.fetch_ats(cfg, conn) == 1
+    urls = [r["job_url"] for r in conn.execute("SELECT job_url FROM jobs")]
+    assert urls == ["https://withextra.icims.com/jobs/6861/"
+                    "ai-specialist---legal-document-specialist/job"]
+
+
+def test_location_any_extra_cannot_narrow_an_absent_shared_filter(conn, monkeypatch):
+    # Guard boundary: shared location_any ABSENT means accept-everything; a board-local
+    # extra must not turn that into "only what the extra matches".
+    _icims_patch(monkeypatch)
+    cfg = _icims_cfg(companies=[
+        {"slug": "staffcareers-mcguirewoods", "board": "icims",
+         "location_any_extra": ["nowhere-that-matches"]},
+    ])
+    cfg["settings"]["ats"].pop("location_any", None)
+    assert fetch.fetch_ats(cfg, conn) == 1            # still accepted: extras only widen
+
+
+def test_icims_cardless_location_falls_back_to_detail_ld_json(conn, monkeypatch):
+    # careers-lw's portal skin renders NO location on the job cards (measured 2026-08-20),
+    # which silently location-dropped every title match. The detail ld+json address fills
+    # in. Boundary both ways: the derived "Charlotte, NC" passes a "charlotte" filter and
+    # fails a "new york" one.
+    bare_card = ICIMS_CARD_AI.replace(
+        '<span class="sr-only field-label">Job Locations</span>', "").replace(
+        "<span > US-NC-Charlotte | US-VA-Richmond</span>", "")
+    page = '<div class="iCIMS_MainWrapper iCIMS_ListingsPage">' + bare_card + "</div>"
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fetch, "_icims_get", lambda url: (
+        (page if "pr=0" in url else ICIMS_EMPTY_PAGE)
+        if "/jobs/search" in url else ICIMS_DETAIL_PAGE))
+
+    assert fetch.fetch_ats(_icims_cfg(location_any=["charlotte"]), conn) == 1
+    r = conn.execute("SELECT location FROM jobs").fetchone()
+    assert r["location"] == "Charlotte, NC"   # from the fixture's ld+json jobLocation
+
+    conn.execute("DELETE FROM jobs")
+    conn.commit()
+    assert fetch.fetch_ats(_icims_cfg(location_any=["new york"]), conn) == 0
+
+
+# The interstitial body is the observed shape (2026-08-20, careers-sidley / jobs-mayerbrown):
+# an iCIMS-SERVED page, so it carries the portal branding the empty-board guard looks for.
+# That is exactly why the branding guard cannot be the cookie check.
+ICIMS_INTERSTITIAL = ('<html><head><title>iCIMS</title></head>'
+                      '<body>Please Enable Cookies to Continue</body></html>')
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body.encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def test_icims_persistent_cookie_wall_raises_instead_of_reading_as_empty(monkeypatch):
+    # One retry IS the cookie test. If the interstitial survives it, the wall did not clear,
+    # and _icims_get is the last place that is legible: _icims_cards would find no cards, and
+    # the caller's branding guard cannot tell this iCIMS-served page from an empty board.
+    calls = []
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            return _FakeResp(ICIMS_INTERSTITIAL)
+
+    monkeypatch.setattr(fetch, "_ICIMS_OPENER", _Opener())
+    with pytest.raises(ValueError, match="cookie interstitial persisted"):
+        fetch._icims_get("https://careers-sidley.icims.com/jobs/search?pr=0")
+    assert len(calls) == 2                       # the retry ran; the SECOND one is the failure
+
+
+def test_icims_cookie_wall_that_clears_on_the_retry_still_succeeds(monkeypatch):
+    # The other side of the same boundary: the retry is not a new failure mode. A tenant whose
+    # jar is warm on attempt two reads normally.
+    bodies = [ICIMS_INTERSTITIAL, ICIMS_LIST_PAGE]
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            return _FakeResp(bodies.pop(0))
+
+    monkeypatch.setattr(fetch, "_ICIMS_OPENER", _Opener())
+    body = fetch._icims_get("https://careers-sidley.icims.com/jobs/search?pr=0")
+    assert "iCIMS_JobCardItem" in body
+    assert bodies == []                          # both reads consumed
+
+
+def test_icims_page_cap_warns_instead_of_silently_truncating(conn, monkeypatch, capsys):
+    # No silent caps, the rule _workday_rows already enforces. A portal that keeps serving
+    # full pages of NEW ids past ICIMS_MAX_PAGES must say the tail went unread — otherwise a
+    # 500-posting ceiling reads as full coverage on exactly the deep boards this lane targets.
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    counter = [0]
+
+    def endless(url):
+        if "/jobs/search" not in url:
+            return ICIMS_DETAIL_PAGE
+        # Every page is full AND entirely new, so neither break can fire.
+        cards = []
+        for _ in range(fetch.ICIMS_PAGE):
+            counter[0] += 1
+            cards.append(ICIMS_CARD_OTHER.replace("6900", str(10000 + counter[0])))
+        return '<div class="iCIMS_MainWrapper iCIMS_ListingsPage">' + "".join(cards) + "</div>"
+
+    monkeypatch.setattr(fetch, "_icims_get", endless)
+    fetch.fetch_ats(_icims_cfg(), conn)
+    err = capsys.readouterr().err
+    assert "page cap hit" in err
+    assert f"listed {fetch.ICIMS_MAX_PAGES * fetch.ICIMS_PAGE} postings" in err
+    assert "the tail was NOT read" in err
+
+
+def test_icims_card_href_must_be_this_tenants_own_host(conn, monkeypatch):
+    # The extracted url is BOTH stored as job_url and fetched for the JD, so a link in scraped
+    # page HTML must not be able to choose an outbound target. Both sides: the same card shape
+    # on the tenant's host is read, on a foreign host it is not.
+    foreign = ICIMS_CARD_AI.replace("staffcareers-mcguirewoods.icims.com", "evil.example.com")
+    page = ('<div class="iCIMS_MainWrapper iCIMS_ListingsPage">' + foreign
+            + ICIMS_CARD_OTHER + "</div>")
+    base = "https://staffcareers-mcguirewoods.icims.com"
+    assert [c["id"] for c in fetch._icims_cards(page, base)] == ["6900"]
+    assert [c["id"] for c in fetch._icims_cards(ICIMS_LIST_PAGE, base)] == ["6861", "6900"]
+
+    log = []
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+
+    def fake_get(url):
+        log.append(url)
+        if "/jobs/search" in url:
+            return page if "pr=0" in url else ICIMS_EMPTY_PAGE
+        return ICIMS_DETAIL_PAGE
+
+    monkeypatch.setattr(fetch, "_icims_get", fake_get)
+    assert fetch.fetch_ats(_icims_cfg(), conn) == 0      # the AI card was the only title match
+    assert not [u for u in log if "evil.example.com" in u]
+
+
+def test_icims_off_host_cards_are_counted_not_silently_skipped(conn, monkeypatch, capsys):
+    # The host check FILTERS rather than anchoring the pattern, so it can report what it
+    # dropped. An anchored regex would be silent, and a tenant whose real cards sit on an
+    # unpredicted host would read as an empty board -- the failure _icims_get's interstitial
+    # guard just closed, reintroduced through the fix for a different one.
+    foreign = ICIMS_CARD_AI.replace("staffcareers-mcguirewoods.icims.com", "evil.example.com")
+    page = ('<div class="iCIMS_MainWrapper iCIMS_ListingsPage">' + foreign
+            + ICIMS_CARD_OTHER + "</div>")
+    fetch._icims_cards(page, "https://staffcareers-mcguirewoods.icims.com")
+    err = capsys.readouterr().err
+    assert "dropped 1 job card(s)" in err
+    assert "evil.example.com" in err
+
+
+def test_icims_unreadable_cards_raise_instead_of_reading_as_empty(conn, monkeypatch):
+    # Every card off-host (a wrong slug-to-host assumption, or an iCIMS skin that moved the
+    # markup): cards ARE on the page and none parsed. That is a broken reader, not an empty
+    # board -- and the branding guard cannot tell them apart, since this page is iCIMS-served.
+    all_foreign = ('<div class="iCIMS_MainWrapper iCIMS_ListingsPage">'
+                   + ICIMS_CARD_AI.replace("staffcareers-mcguirewoods.icims.com", "elsewhere.example.com")
+                   + "</div>")
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fetch, "_icims_get", lambda url: (
+        all_foreign if "/jobs/search" in url else ICIMS_DETAIL_PAGE))
+    broken = fetch.fetch_ats(_icims_cfg(), conn)
+    # The board FAILED; it did not quietly succeed with zero postings. Asserted on the
+    # summary's unit outcome, not the inserted count -- both spellings insert 0, which is
+    # exactly why "0 rows" cannot be the signal here.
+    assert (broken.successes, broken.failures) == (0, 1)
+
+    # ...and a genuinely empty board still reads as SUCCESS: the guard has to separate the
+    # two, not just refuse the quiet one.
+    monkeypatch.setattr(fetch, "_icims_get", lambda url: (
+        ICIMS_EMPTY_PAGE if "/jobs/search" in url else ICIMS_DETAIL_PAGE))
+    empty = fetch.fetch_ats(_icims_cfg(), conn)
+    assert (empty.successes, empty.failures) == (1, 0)
+
+
+def test_workday_page_cap_warns_instead_of_silently_truncating(conn, monkeypatch, capsys):
+    # No-silent-caps: a board larger than the page bound must SAY the tail went unread
+    # (White & Case measured 3,500 roles on 2026-08-20 — the case this exists for).
+    monkeypatch.setattr(fetch, "WORKDAY_MAX_PAGES", 1)
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_: None)
+    full = {"total": 999, "jobPostings": [
+        {"title": f"Role {i}", "externalPath": f"/job/X/Role-{i}",
+         "locationsText": "X", "bulletFields": []} for i in range(fetch.WORKDAY_PAGE)]}
+    monkeypatch.setattr(fetch, "_workday_post", lambda url, payload: full)
+    monkeypatch.setattr(fetch, "_ats_get", lambda url: {"jobPostingInfo": {}})
+
+    fetch.fetch_ats(_wd_cfg(title_any=["nothing matches"]), conn)
+    err = capsys.readouterr().err
+    assert "page cap hit" in err and "of 999" in err
+
+    # Boundary's other side: a board that fits inside the cap stays silent.
+    monkeypatch.setattr(fetch, "_workday_post", lambda url, payload: WD_LIST_PAGE
+                        if payload["offset"] == 0 else {"total": 3, "jobPostings": []})
+    monkeypatch.setattr(fetch, "WORKDAY_MAX_PAGES", 15)
+    monkeypatch.setattr(fetch, "_ats_get", lambda url: WD_DETAIL[
+        "/job/" + url.split("/job/", 1)[1]])
+    conn.execute("DELETE FROM jobs")
+    conn.commit()
+    fetch.fetch_ats(_wd_cfg(), conn)
+    assert "page cap hit" not in capsys.readouterr().err

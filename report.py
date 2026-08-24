@@ -10,11 +10,13 @@ application is what gets a strong match seen; below the line, fit-only. Recency 
 metadata: it is never an eval-prompt input and never a filter.
 """
 
+import hashlib
 import json
 from datetime import date, datetime, time
 
-from core import BASE_DIR, PARSE_MIN, PARSE_MAX, recency_dt
-from chain import effective_decisions
+from core import (ADZUNA_SNIPPET_MAX_CHARS, BASE_DIR, PARSE_MIN, PARSE_MAX, parse_iso,
+                  recency_dt)
+from chain import effective_decisions, _norm_company, _norm_title
 from health import failed_fetch_targets, staleness_readings
 from second_judge import opinion_summaries
 from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
@@ -22,7 +24,7 @@ from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VER
                     STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED)
 
 
-def generate_report(cfg, conn, for_date=None):
+def generate_report(cfg, conn, for_date=None, *, maps=None):
     # Own the date contract HERE, not at the callers: for_date is parsed once at entry, so a
     # malformed value fails immediately with a clear ValueError before any work is done —
     # never mid-render at the anchor line below. `today` is read once and reused: a second
@@ -47,6 +49,13 @@ def generate_report(cfg, conn, for_date=None):
     # helpers below — same "inject the decision, don't fetch it" shape app.row_to_dict uses. Calling
     # effective_decision per row inside the render loops was an N+1 (one query per posting rendered).
     decisions = effective_decisions(conn, rows)
+    # The two corpus-wide evidence maps (see corpus_maps). Injected the same way `decisions`
+    # is, and for the same reason one step up: they do not depend on `d`, so a caller
+    # rebuilding several days computes them ONCE instead of re-scanning 240 MB of description
+    # text per day. `maps=None` keeps the single-day callers (`report --date`, the tests)
+    # working with no ceremony.
+    maps = corpus_maps(conn) if maps is None else maps
+    floors, ft_readings = maps["floors"], maps["ft_readings"]
 
     # Hard-fail overrides (your rules + manual rejects) are pulled out first so they don't
     # also appear under their model verdict (a manual reject keeps its original PASS verdict).
@@ -126,7 +135,7 @@ def generate_report(cfg, conn, for_date=None):
     if not passes:
         lines.append("*None today.*")
     for r in passes:
-        lines.extend(_render_scored_job(r, decisions[r["job_url"]], now))
+        lines.extend(_render_scored_job(r, decisions[r["job_url"]], now, floors, ft_readings))
 
     if recruiter:
         lines.append("## 🤝 Recruiter-only — route to a human, do NOT cold-apply")
@@ -138,7 +147,7 @@ def generate_report(cfg, conn, for_date=None):
         )
         lines.append("")
         for r in recruiter:
-            lines.extend(_render_scored_job(r, decisions[r["job_url"]], now))
+            lines.extend(_render_scored_job(r, decisions[r["job_url"]], now, floors, ft_readings))
 
     lines.extend(_second_opinion_lines(conn, passes + recruiter))
 
@@ -161,7 +170,7 @@ def generate_report(cfg, conn, for_date=None):
             seen = f" · first seen {_seen_day(dec)}" if dec["is_repost"] else ""
             lines.append(
                 f"- **{r['title']} — {r['company']}** · chain verdict **{dec['chain_verdict'] or '?'}**"
-                f"{_repost_tag(dec, r)}{_source_tag(r)}{_age_tag(r, now)}{seen} · [link]({r['job_url']})"
+                f"{_repost_tag(dec, r)}{_source_tag(r)}{_age_tag(r, now, floors)}{seen} · [link]({r['job_url']})"
             )
         lines.append("")
 
@@ -170,7 +179,7 @@ def generate_report(cfg, conn, for_date=None):
         lines.append("")
         for r in manual:
             lines.append(
-                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)} · [link]({r['job_url']})"
+                f"- {r['title']} — {r['company']} ({r['location']}){_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now, floors)} · [link]({r['job_url']})"
             )
         lines.append("")
 
@@ -187,7 +196,7 @@ def generate_report(cfg, conn, for_date=None):
         issues = ev.get("eval_issues") or []
         issue_tag = f" · 🔎 **{', '.join(issues)}** — verify before trusting this rejection" if issues else ""
         lines.append(
-            f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)}: `{r['failed_gate']}` — "
+            f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now, floors)}: `{r['failed_gate']}` — "
             f"{ev.get('gate_notes', '')}{issue_tag} · [link]({r['job_url']})"
         )
     lines.append("")
@@ -212,7 +221,7 @@ def generate_report(cfg, conn, for_date=None):
             # _repost_tag keeps the ALREADY APPLIED / passed / repost marker visible here too,
             # so a rule can't silently bury a relisting of a role you already applied to.
             lines.append(
-                f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now)} · {tag} · "
+                f"- **{r['title']} — {r['company']}**{_repost_tag(decisions[r['job_url']], r)}{_source_tag(r)}{_age_tag(r, now, floors)} · {tag} · "
                 f"gate `{r['filter_gate']}`{note} · [link]({r['job_url']})"
             )
         lines.append("")
@@ -222,7 +231,7 @@ def generate_report(cfg, conn, for_date=None):
         for r in errors:
             # Age matters most here: a fresh strong posting stuck in error is the one worth
             # a manual look right now.
-            lines.append(f"- {r['title']} — {r['company']}{_age_tag(r, now)} · [link]({r['job_url']})")
+            lines.append(f"- {r['title']} — {r['company']}{_age_tag(r, now, floors)} · [link]({r['job_url']})")
         lines.append("")
 
     out_dir = BASE_DIR / cfg["settings"]["reports_dir"]
@@ -448,23 +457,46 @@ def _span_label(hours):
     return f"{days}d ago" if days < 60 else f"{days // 30}mo ago"
 
 
-def posting_age(date_posted, first_seen, now=None):
+EVERGREEN_MIN_GAP_DAYS = 3   # below this a floor is noise, not a re-dating signal
+
+
+def posting_age(date_posted, first_seen, now=None, floor=None):
     """Human posting-age label: 'just now' / '3h ago' / '2d ago' for real timestamps;
     'seen 3h ago' when first_seen is standing in (no usable posting date, or a calendar date
     at/after the fetch day — either way a lower bound, never claimed as posting time);
     '2d ago' day-granularity for older date-only postings (never fake hour precision);
     '' when nothing is usable. Future/skewed dates clamp to 'just now'. `now` is injectable
-    for tests and for date-anchored report rebuilds."""
+    for tests and for date-anchored report rebuilds.
+
+    `floor` (a date, optional) is the EVERGREEN FLOOR: the earliest `date_posted` carried by
+    any row whose stored description is byte-identical to this one — i.e. the same posting
+    re-stamped with a newer date. When it is at least EVERGREEN_MIN_GAP_DAYS earlier than
+    this row's own reading, it is appended rather than substituted.
+
+    Appended, never substituted, for two reasons. It is a LOWER BOUND, not the truth —
+    measured 2026-08-20, the floor recovered Wilson Sonsini's R1579 to 40 days against an
+    employer `startDate` of 78 days, and missed PNM's evergreen req entirely because that
+    snippet appears once. And demoting a row on a floor would let a bound hide a live role,
+    which is the one failure this repo's discovery surfaces are not allowed to have (the same
+    rule that keeps needs_attention and dupe_candidates presentation-only)."""
     dt, mode = _recency_dt(date_posted, first_seen)
     if mode is None:
         return ""
     now = now or datetime.now()
     if mode == "posted_day":
         days = max((now.date() - dt.date()).days, 0)
-        return "today" if days == 0 else _span_label(days * 24)
-    hours = max((now - dt).total_seconds() / 3600.0, 0.0)
-    label = "just now" if hours < 1 else _span_label(hours)
-    return f"seen {label}" if mode == "seen" else label
+        label = "today" if days == 0 else _span_label(days * 24)
+    else:
+        hours = max((now - dt).total_seconds() / 3600.0, 0.0)
+        label = "just now" if hours < 1 else _span_label(hours)
+        if mode == "seen":
+            label = f"seen {label}"
+    if floor is not None:
+        gap = (dt.date() - floor).days
+        if gap >= EVERGREEN_MIN_GAP_DAYS:
+            age = max((now.date() - floor).days, 0)
+            label = f"{label} (same JD dated ≥{age}d ago)"
+    return label
 
 
 def recency_sort_key(row, fit=None):
@@ -485,23 +517,184 @@ def recency_sort_key(row, fit=None):
     return (0 if above else 1, -epoch if above else 0.0, -fit, -epoch)
 
 
-def _age_tag(r, now=None):
+def evergreen_floors(conn):
+    """{sha256(description) -> earliest `date_posted` anywhere for that exact text}.
+
+    Rows whose stored description is byte-identical but whose `date_posted` differs are one
+    requisition re-stamped with a fresher date — the shape that let a posting open since Jun 3
+    read as "1 day old" and clear the cold-apply bar. Measured on the live corpus 2026-08-20:
+    4,748 identical-JD Adzuna groups carry a nonzero date spread, 46% of them wider than the
+    entire 14-day window; inside the actionable zone it is 85 rows / 40 distinct texts, i.e.
+    17% of rows and 10% of requisitions.
+
+    Whole-corpus scan — measured 2026-08-23 at 1.5s over 107k rows / 240 MB of description
+    text, which is why the per-request web UI does not use it and why corpus_maps exists to
+    compute it ONCE per render batch rather than once per rendered day. Rows without a
+    description or without a `date_posted` cannot contribute a floor and are skipped, so the
+    map is a LOWER BOUND on its own coverage as well as on each date.
+
+    The key is the TEXT, not the employer, and 13.4% of floor-producing groups span more than
+    one company string (measured 2026-08-23: 699 of 5,203). Both kinds are in there and both
+    are wanted. Most are one employer under several spellings — `cla` / `clifton larson allen`
+    / `cliftonlarsonallen`, `jpmorgan chase` / `jpmorgan chase bank n a` — which the
+    company+title fingerprint splits into separate chains and this grouping sees through. The
+    rest are genuinely different posters sharing byte-identical text, i.e. staffing agencies
+    relisting one client requisition, which is the evergreen signal itself. The label says
+    "same JD", not "same employer", and it is appended rather than substituted, so a pooled
+    group can only add a caveat — never demote or hide a row.
+    """
+    floors = {}
+    for desc, dp in conn.execute(
+        "SELECT description, date_posted FROM jobs "
+        "WHERE description IS NOT NULL AND length(description) > 200 "
+        "AND date_posted IS NOT NULL AND date_posted <> ''"
+    ):
+        parsed = parse_iso(dp)
+        if not parsed:
+            continue
+        day = parsed[0].date()
+        key = hashlib.sha256(desc.encode("utf-8")).hexdigest()
+        if key not in floors or day < floors[key]:
+            floors[key] = day
+    return floors
+
+
+def corpus_maps(conn):
+    """The whole-corpus evidence maps every render needs, computed together, once.
+
+    Both are cross-row groupings over the ENTIRE jobs table and neither depends on which day
+    is being rendered, so the unit of work is the render BATCH, not the report. `pipeline.py`
+    rebuilds several days in one pass whenever rows were evaluated late (peak deferral, error
+    requeue, a fetch that outran the eval), and computing these inside generate_report re-ran
+    both scans per day for byte-identical results. Measured 2026-08-23 on the live corpus:
+    1.5s + 1.0s over 107k rows / 240 MB of description text.
+
+    Returned as a dict rather than a tuple so a third map can be added without touching every
+    call site's unpacking."""
+    return {"floors": evergreen_floors(conn), "ft_readings": fulltext_readings(conn)}
+
+
+def floor_for(r, floors):
+    """This row's evergreen floor, or None when floors is unset, the row has no usable text,
+    or its text is unique in the corpus (the common case — most postings appear once)."""
+    if not floors:
+        return None
+    desc = r["description"] if "description" in r.keys() else None
+    if not desc or len(desc) <= 200:
+        return None
+    return floors.get(hashlib.sha256(desc.encode("utf-8")).hexdigest())
+
+
+FULLTEXT_MIN_CHARS = 2000  # the fuller reading must be MEANINGFULLY fuller, not another stub
+CONTRA_FIT_MARGIN = 2      # within-verdict: the full-text fit must trail by at least this
+# The snippet bound is core.ADZUNA_SNIPPET_MAX_CHARS, imported rather than respelled: it is
+# the ONE reading of "this row's stored text is a truncation", already shared by
+# second_judge.pending_rows and notify_deepdive_batch.zone_rows. Verdict ranking is
+# states.VERDICT_FAVOR for the same reason — states.py owns that list, and a local copy would
+# rank a newly added verdict silently (this file already imports and uses it above).
+
+
+def fulltext_readings(conn):
+    """{(normalized company, normalized title) -> most favorable FULL-TEXT (verdict, fit)}.
+
+    The evidence-inversion hazard this feeds (measured 2026-08-20): snippet-scored rows run
+    systematically hot — the same WSGR requisition scored PASS 16 from a 500-char Adzuna
+    snippet and RECRUITER_ONLY 12 from the 9,327-char board text the same day, and of 2,167
+    undecided snippet PASS rows at the cold-apply bar, 403 (19%) had a full-text reading of
+    the same role saying strictly worse. The snippet rows carry the inflated number into
+    every ranked surface while the full-text verdict sits in a chain nobody opens.
+
+    Taking the MOST FAVORABLE full-text reading per role is the conservative direction: if
+    ANY full read clears the snippet's claim, no flag — e.g. Holland & Knight's AI Legal
+    Engineer carried two full-text GATE_FAILs and later a full-text PASS 16, which rightly
+    silences the flag. Same corpus-scan shape as evergreen_floors, for the same reason (a
+    cross-row grouping is not a per-request cost) — see corpus_maps, which owns both.
+
+    The key deliberately OMITS location, unlike chain's fingerprint. One requisition mass-posted
+    across many cities therefore collapses into a single reading, and cross-source location
+    strings rarely agree anyway (the same evidence trade dupe_candidates' blocking key makes).
+    Stated rather than left implicit: the direction is conservative — the most favorable of the
+    pooled cities wins, so pooling can only SILENCE a flag, never invent one — but a pooled key
+    is a weaker claim than a per-city one and the docstring has to say so.
+    """
+    readings = {}
+    for company, title, verdict, fit in conn.execute(
+        "SELECT company, title, verdict, fit_score FROM jobs "
+        "WHERE status='evaluated' AND verdict IS NOT NULL "
+        "AND description IS NOT NULL AND length(description) > ?",
+        (FULLTEXT_MIN_CHARS,),
+    ):
+        key = (_norm_company(company or ""), _norm_title(title or ""))
+        cur = readings.get(key)
+        cand = (VERDICT_FAVOR.get(verdict, -1), fit if fit is not None else -1, verdict, fit)
+        if cur is None or cand[:2] > cur[:2]:
+            readings[key] = cand
+    return {k: (v[2], v[3]) for k, v in readings.items()}
+
+
+def fulltext_contradiction(r, readings):
+    """The better-evidence reading this snippet row's judgment must answer to, or None.
+
+    Fires only when THIS row was actually scored on a truncation — an ADZUNA row whose stored
+    text is <= ADZUNA_SNIPPET_MAX_CHARS — and the role's most favorable full-text reading is
+    strictly less favorable: a lower verdict, or the same verdict trailing by >=
+    CONTRA_FIT_MARGIN fit points. Surfacing only, exactly like the evergreen floor: the row
+    keeps its own verdict and score, and nothing routes or filters on this — the reader is
+    being told a fuller read of the same role exists and what it said, so the snippet's number
+    stops being the only voice on ranked surfaces.
+
+    The source leg matches the two other readings of this bound (second_judge.pending_rows,
+    notify_deepdive_batch.zone_rows): a terse but COMPLETE ATS or Dice JD under the bound was
+    scored on whole evidence, so telling its card "snippet-scored" would be the mirror of the
+    short-but-complete-JD hazard those two guard with the same clause. A row missing the
+    column reads as not-adzuna — the silent direction.
+
+    NO OBSERVED TRIGGER, said out loud because in this repo a guard is read by default as
+    backed by an incident. Measured 2026-08-23 over the live corpus: of 58,425 evaluated rows
+    at/under the bound, 58,295 are adzuna and the 130 that are not (120 linkedin, 10 dice)
+    contribute ZERO flags either way — a short non-adzuna row needs a >FULLTEXT_MIN_CHARS
+    sibling reading of the same company+title to flag at all, and none has one. This leg
+    changes nothing today; it is here so the label cannot start lying as the ATS/Dice lanes
+    grow, which is the direction they are growing (five board families as of 2026-08-20).
+    """
+    if not readings or not r["verdict"]:
+        return None
+    keys = r.keys()
+    source = (r["source"] if "source" in keys else "") or ""
+    desc = r["description"] if "description" in keys else None
+    if source != "adzuna" or not desc or len(desc) > ADZUNA_SNIPPET_MAX_CHARS:
+        return None
+    ft = readings.get((_norm_company(r["company"] or ""), _norm_title(r["title"] or "")))
+    if ft is None:
+        return None
+    ft_verdict, ft_fit = ft
+    row_q = VERDICT_FAVOR.get(r["verdict"], -1)
+    ft_q = VERDICT_FAVOR.get(ft_verdict, -1)
+    if ft_q < row_q:
+        return ft
+    if (ft_q == row_q and ft_fit is not None and r["fit_score"] is not None
+            and ft_fit <= r["fit_score"] - CONTRA_FIT_MARGIN):
+        return ft
+    return None
+
+
+def _age_tag(r, now=None, floors=None):
     """Compact inline posting-age marker for one-liner sections (mirrors _source_tag, including
     its guard — this file mixes Row and dict rows, and dicts may omit the columns). `now` is
     the report's date anchor (see generate_report); None = wall clock (the live UI)."""
     dp = r["date_posted"] if "date_posted" in r.keys() else ""
     fs = r["first_seen"] if "first_seen" in r.keys() else ""
-    label = posting_age(dp, fs, now=now)
+    label = posting_age(dp, fs, now=now, floor=floor_for(r, floors))
     return f" · 🕐 {label}" if label else ""
 
 
-def _render_scored_job(r, dec, now=None):
+def _render_scored_job(r, dec, now=None, floors=None, ft_readings=None):
     """Render one gates-passed job (PASS or RECRUITER_ONLY) as report lines. `dec` is the row's
     precomputed chain decision (see _repost_info); `now` the report's date anchor."""
     ev = json.loads(r["eval_json"] or "{}")
     score = r["fit_score"]
     band = score_band(score)
-    out = [f"### {r['title']} — {r['company']}  ·  **{score}/18** ({band}){_age_tag(r, now)}"]
+    out = [f"### {r['title']} — {r['company']}  ·  **{score}/18** ({band}){_age_tag(r, now, floors)}"]
     out.extend(_repost_info(dec)[0])
     out.append(f"- {r['location']}  ·  tier: {r['tier']}  ·  search: `{r['search_name']}`{_source_tag(r)}")
     if r["bucket"]:
@@ -512,6 +705,11 @@ def _render_scored_job(r, dec, now=None):
     # caveats: they qualify how much to trust this card, not what the job is like.
     for iss in ev.get("eval_issues") or []:
         out.append(f"- 🔎 eval quality: {iss}")
+    contra = fulltext_contradiction(r, ft_readings)
+    if contra:
+        cv, cf = contra
+        detail = f"{cv} {cf}/18" if cf is not None else cv
+        out.append(f"- 🔎 eval quality: snippet-scored — the full-text read of this role says {detail}")
     out.append(f"- {ev.get('one_line', '')}")
     bd = ev.get("score_breakdown") or {}
     if bd:

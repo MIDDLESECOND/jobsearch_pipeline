@@ -42,9 +42,15 @@ from states import VERDICT_PASS, VERDICT_RECRUITER_ONLY, VERDICT_GATE_FAIL  # no
 
 RESULTS_DIR = Path(__file__).with_name("results")
 
-# deepseek-v4-flash output price (evaluation.MODEL_PRICES) — for the per-100-postings
-# cost line only; arbitration cost is ~all output tokens (input is cache-hit).
-OUT_PRICE = 0.28 / 1e6
+# Output price for the per-100-postings cost line only (arbitration cost is ~all
+# output tokens; input is cache-hit). READ from the one price table rather than
+# copied: this line held a stale 0.28 for three days after DeepSeek repriced on
+# 2026-08-16 while claiming in its own comment to mirror MODEL_PRICES.
+# Note for anyone comparing runs: JSONs written before 2026-08-19 priced their
+# `extra_usd_per_100` at the OLD card, so do not re-apply a repricing factor to them.
+from evaluation import MODEL_PRICES  # noqa: E402  (after the sys.path insert above)
+
+OUT_PRICE = MODEL_PRICES["deepseek-v4-flash"][1]
 
 
 def wilson(k, n, z=1.96):

@@ -66,7 +66,7 @@ from filters import (
 )
 from evaluation import (evaluate_new_jobs, deepseek_peak_end, in_deepseek_peak,
                         requeue_error_rows)
-from report import generate_report
+from report import corpus_maps, generate_report
 import second_judge
 from materials import snapshot_jd
 from outlook_shadow import (
@@ -763,8 +763,9 @@ def main():
                         "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
                     ).fetchone()[0]
                     print(f"[eval] deferred: DeepSeek peak-rate window "
-                          f"(UTC 01-04/06-10, 2x price) — {waiting} 'new' row(s) wait "
-                          f"for the next off-peak slot; a manual `run` evaluates now")
+                          f"(UTC 01-04/06-10 on Beijing weekdays, 2x price) — {waiting} "
+                          f"'new' row(s) wait for the next off-peak slot; a manual `run` "
+                          f"evaluates now")
                 else:
                     if not args.scheduled:
                         note = _peak_price_note(cfg)
@@ -778,9 +779,12 @@ def main():
                         (STATUS_NEW,))}
                     evaluate_new_jobs(cfg, conn)
                 stage = "report"
+                # The corpus-wide evidence maps are day-independent, so a multi-day rebuild
+                # scans the table once, not once per day (report.corpus_maps).
+                maps = corpus_maps(conn)
                 # Oldest first so today's report is written last, exactly as before.
                 for day in sorted(report_days):
-                    generate_report(cfg, conn, day)
+                    generate_report(cfg, conn, day, maps=maps)
                 if len(report_days) > 1:
                     older = ", ".join(sorted(report_days - {run_date}))
                     print(f"[report] also rebuilt {older} — rows first seen then were "
@@ -837,8 +841,9 @@ def main():
             # (collect returns their first_seen days) — a fixed today+yesterday pair
             # both missed late-landing older days and rewrote untouched reports on
             # every no-op scheduled slot.
+            maps = corpus_maps(conn) if days else None
             for day in sorted(days):
-                generate_report(cfg, conn, day)
+                generate_report(cfg, conn, day, maps=maps)
             if not days:
                 print("[second-judge] no opinions landed — reports unchanged")
     elif args.command == "stats":

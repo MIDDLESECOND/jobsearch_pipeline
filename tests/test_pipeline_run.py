@@ -133,7 +133,8 @@ def test_run_command_guards_each_fetcher_independently(conn, monkeypatch, capsys
     monkeypatch.setattr(pipeline, "skip_decided_reposts", _skip_stub("skip"))
     monkeypatch.setattr(pipeline, "skip_evaluated_reposts", _skip_stub("skip_eval"))
     monkeypatch.setattr(pipeline, "evaluate_new_jobs", lambda c, cn: calls.append("eval"))
-    monkeypatch.setattr(pipeline, "generate_report", lambda c, cn, d: calls.append("report"))
+    monkeypatch.setattr(pipeline, "generate_report",
+                        lambda c, cn, d, **k: calls.append("report"))
     monkeypatch.setattr(sys, "argv", ["pipeline.py", "run"])
 
     pipeline.main()

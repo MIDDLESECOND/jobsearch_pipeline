@@ -29,7 +29,7 @@ shift when postings flip in/out of the scored set, so the fit alert is PAIRED-on
   - verdict agreement vs baseline < 60%
   - |paired fit delta| > 1.2 (mean over postings scored in BOTH runs; per-pair sd
     1.97 -> mean sd ~0.6 at typical pair counts; 0731-scale drift measured -1.3)
-  - completion-token median ratio outside 0.6-1.6x  (0731 measured x2.8)
+  - PAIRED completion-token ratio outside 0.6-1.6x  (0731 measured x2.8)
   - parse failures + empty answers > 10% of draws   (0731: 0 -> 50-100/day)
 One tripped alert is a SIGNAL to run noise_probe.py / backtest_v2.py, not proof by
 itself. Cost per run: ~n x $0.001. `--recheck` re-runs the comparison of the LAST
@@ -195,11 +195,25 @@ def _compare(entry, base, stored_by_url):
         if abs(delta) > PAIRED_FIT_DELTA:
             alerts.append(f"paired fit delta {delta:+.2f}")
     if entry.get("tok_median") and base.get("tok_median"):
-        ratio = entry["tok_median"] / base["tok_median"]
+        unpaired = entry["tok_median"] / base["tok_median"]
         print(f"  tok median: {base['tok_median']:,.0f} -> {entry['tok_median']:,.0f} "
-              f"(x{ratio:.2f}; alert outside {TOK_RATIO[0]}-{TOK_RATIO[1]})")
+              f"(x{unpaired:.2f}; unpaired — reported, never alerted on)")
+    tok_pairs = [(base["toks"][u], entry["toks"][u]) for u in entry.get("toks", {})
+                 if base.get("toks", {}).get(u) and entry["toks"][u]]
+    if tok_pairs:
+        # Median of per-sentinel ratios, not a ratio of medians: a sentinel's own
+        # length is the dominant term and pairing removes it. The band is still the
+        # one set for the unpaired statistic — deliberately unchanged, because no
+        # paired noise floor has been measured yet. Tighten it only against data.
+        ratio = statistics.median(b / a for a, b in tok_pairs)
+        print(f"  paired tok ratio: x{ratio:.2f} over {len(tok_pairs)} sentinels drawn "
+              f"in both (alert outside {TOK_RATIO[0]}-{TOK_RATIO[1]})")
         if not TOK_RATIO[0] <= ratio <= TOK_RATIO[1]:
-            alerts.append(f"tok median x{ratio:.2f}")
+            alerts.append(f"paired tok ratio x{ratio:.2f}")
+    elif entry.get("tok_median") and base.get("tok_median"):
+        print("    (per-sentinel tokens missing on one side — paired ratio "
+              "unavailable until two entries recorded from 2026-08-19 on; "
+              "no token alert this run)")
     return alerts
 
 
@@ -282,6 +296,12 @@ def main():
         "tok_median": statistics.median(toks) if toks else None,
         "verdicts": {d["job_url"]: d.get("verdict") for d in draws},
         "fits": {d["job_url"]: d.get("fit_score") for d in ok},
+        # Per-sentinel completion tokens, so the token comparison can be PAIRED
+        # the way verdicts and fits already are. The tok_median aggregate cannot
+        # be: measured 2026-08-19, two runs ten minutes apart over the same
+        # sentinels gave unpaired ratios of x1.31 and x1.74 across a 1.6 alert
+        # line, i.e. the only alerting field was the only one compared unpaired.
+        "toks": {d["job_url"]: d.get("completion_tok") for d in draws},
         "rebaseline": bool(args.rebaseline),
     }
 

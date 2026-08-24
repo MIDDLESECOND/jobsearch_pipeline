@@ -34,17 +34,24 @@ def _opinion(conn, url, verdict="PASS"):
 
 # ----------------------------------------------------------------- zone membership
 
-def test_zone_spans_both_bars_but_only_pass_at_the_cold_bar_is_batchable(conn):
-    """The zone is context (it feeds the popup's "区内共" line); the batch scope is
-    narrower. Conflating them is what made pending undrainable."""
-    batchable = make_job(conn, verdict="PASS", fit_score=15, first_seen=_recent())
-    sub_bar = make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())
-    recruiter = make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())
+def test_zone_floor_is_pinned_from_both_sides_for_both_verdicts(conn):
+    """Since 2026-08-22 the batch reads PASS and RECRUITER_ONLY from one floor —
+    states.COLD_APPLY_MIN_FIT (13), a code-owned admission line, not the guide's apply
+    bar — so the boundary is pinned as literals on both sides for both verdicts: 13 is
+    batchable, 12 is not even zone material. The zone is still wider than the batch (it
+    feeds the popup's "区内共" line): a row past the 5-day apply window is visible but
+    may not drive the fire/skip decision."""
+    pass_at = make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())
+    pass_below = make_job(conn, verdict="PASS", fit_score=12, first_seen=_recent())
+    ro_at = make_job(conn, verdict="RECRUITER_ONLY", fit_score=13, first_seen=_recent())
+    ro_below = make_job(conn, verdict="RECRUITER_ONLY", fit_score=12, first_seen=_recent())
+    aged = make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent(days=9))
     rows = _rows(conn)
-    assert rows[batchable["job_url"]][1] is True
-    # both stay visible in the zone, neither may drive the fire/skip decision
-    assert rows[sub_bar["job_url"]][1] is False
-    assert rows[recruiter["job_url"]][1] is False
+    assert rows[pass_at["job_url"]][1] is True
+    assert rows[ro_at["job_url"]][1] is True
+    assert pass_below["job_url"] not in rows
+    assert ro_below["job_url"] not in rows
+    assert rows[aged["job_url"]][1] is False
 
 
 def test_zone_excludes_decided_filtered_and_unevaluated_rows(conn):
@@ -96,13 +103,23 @@ def test_zone_window_is_inclusive_at_day_14_matching_the_judge(conn):
 
 
 def test_second_judge_downgrade_removes_a_row_from_the_batch_scope(conn):
+    """A downgrade is an opinion strictly less favorable than the row's OWN verdict: for
+    a PASS row anything but PASS; for a RECRUITER_ONLY row only GATE_FAIL — an RO opinion
+    on an RO row is agreement, not a demotion. (The judge was retired 2026-08-22; its
+    stored opinions keep gating until they age out of the window.)"""
     agreed = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())
     demoted = make_job(conn, verdict="PASS", fit_score=17, first_seen=_recent())
+    ro_agreed = make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())
+    ro_demoted = make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())
     _opinion(conn, agreed["job_url"], "PASS")
     _opinion(conn, demoted["job_url"], "RECRUITER_ONLY")
+    _opinion(conn, ro_agreed["job_url"], "RECRUITER_ONLY")
+    _opinion(conn, ro_demoted["job_url"], "GATE_FAIL")
     rows = _rows(conn)
     assert rows[agreed["job_url"]][1] is True
     assert rows[demoted["job_url"]][1] is False      # still in the zone, never batched
+    assert rows[ro_agreed["job_url"]][1] is True
+    assert rows[ro_demoted["job_url"]][1] is False
 
 
 def test_snippet_flag_is_source_scoped_not_length_scoped(conn):
@@ -407,7 +424,7 @@ def test_arrivals_are_always_a_subset_of_pending(conn):
     """The popup nests them ("待看 N（其中新进 M）"), so M ⊆ N must hold — including the
     no-state case, which once printed a nested count larger than its own total."""
     make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())          # batchable, new
-    make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())          # sub-bar, new
+    make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())          # at the bar, new
     make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())  # RO, new
     for state in ({}, {"doorbell": {"arrivals_mark": _recent(days=1)}}):
         pending, new_rows = _counts(conn, state)
@@ -418,15 +435,16 @@ def test_arrivals_are_always_a_subset_of_pending(conn):
 def test_pending_snippet_count_stays_inside_pending(conn):
     """main() derives the full-text count by SUBTRACTING the snippet tally from pending,
     so the tally must be gathered over the same batchable/unprocessed subset. Counting
-    snippets over the wider zone instead — the easy slip, since sub-bar Adzuna rows are
-    the zone's bulk — makes that subtraction negative and the popup quote negative rows
-    and negative minutes. The pure batch_counts test cannot see this; only the real
+    snippets over the wider zone instead — the easy slip, since non-batchable Adzuna
+    rows (past the 5-day apply window) are a large share of the zone — makes that
+    subtraction negative and the popup quote negative rows and
+    negative minutes. The pure batch_counts test cannot see this; only the real
     derivation over a real zone can."""
     make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())            # full, batchable
     make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(),
              source="adzuna", description="x" * 500)                              # snippet, batchable
-    for _ in range(10):     # sub-bar snippets: in the zone, never batch material
-        make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent(),
+    for _ in range(10):     # aged snippets (9 days): in the zone, past the apply window
+        make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=9),
                  source="adzuna", description="x" * 500)
     pending, n_snippet, _ = nb.pending_split(nb.zone_rows(conn), set())
     assert n_snippet <= len(pending)
@@ -438,7 +456,7 @@ def test_processed_rows_leave_pending_and_can_empty_it(conn):
     """The no-popup branch must be reachable: a zone full of non-batchable rows plus
     fully-batched batchable ones means there is nothing to propose."""
     done = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
-    make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())    # never batchable
+    make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent(days=9))    # aged: never batchable
     pending, _ = _counts(conn, {"processed_urls": [done["job_url"]]})
     assert pending == []
 

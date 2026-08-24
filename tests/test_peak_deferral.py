@@ -1,5 +1,6 @@
 """Scheduled DeepSeek evals sit out the 2x peak-rate windows (evaluation.in_deepseek_peak
-+ pipeline._defer_eval_for_peak), effective on DeepSeek's side 2026-08-17.
++ pipeline._defer_eval_for_peak), effective on DeepSeek's side 2026-08-17; since
+2026-08-23 (Beijing) the windows bill 2x on Beijing-calendar weekdays only.
 
 Fail directions differ by half: a wrong False costs one eval batch at 2x price (annoying);
 a wrong True merely delays rows to the next off-peak slot — EXCEPT when it fires for a
@@ -20,6 +21,7 @@ from pipeline import _defer_eval_for_peak, _peak_price_note
 
 
 def _utc(h, m=0):
+    # 2026-08-20 is a Thursday — a Beijing weekday, so the windows are live.
     return datetime(2026, 8, 20, h, m, tzinfo=timezone.utc)
 
 
@@ -54,10 +56,41 @@ def test_peak_end_names_the_window_close():
     assert deepseek_peak_end(_utc(0, 30)) is None
 
 
+def _on(day, h, m=0):
+    return datetime(2026, 8, day, h, m, tzinfo=timezone.utc)
+
+
+def test_weekends_are_off_peak_on_the_beijing_calendar():
+    # Same hour inside the afternoon window (09:00 UTC = 17:00 Beijing) across the first
+    # weekend boundary AFTER the rule took effect, both sides pinned: Friday peak,
+    # Saturday and Sunday off-peak, Monday peak again.
+    assert in_deepseek_peak(_on(28, 9)) is True      # Fri 2026-08-28
+    assert in_deepseek_peak(_on(29, 9)) is False     # Sat
+    assert in_deepseek_peak(_on(30, 9)) is False     # Sun
+    assert in_deepseek_peak(_on(31, 9)) is True      # Mon
+    # The morning window too, and through the ONE reading: no window means no end.
+    assert in_deepseek_peak(_on(29, 1)) is False
+    assert deepseek_peak_end(_on(30, 2, 30)) is None
+    assert deepseek_peak_end(_on(31, 2, 30)) == _on(31, 4)
+
+
+def test_weekend_is_the_beijing_weekend_not_the_local_one():
+    # The US evening slot lands at 01:00 UTC = 09:00 Beijing the NEXT calendar day: a
+    # local Friday/Saturday evening is a Beijing Saturday/Sunday morning (off-peak),
+    # while a local Thursday evening is Beijing Friday and a local Sunday evening is
+    # already Beijing Monday (both peak). Local weekday is not the decision.
+    cdt = timezone(timedelta(hours=-5))
+    assert in_deepseek_peak(datetime(2026, 8, 27, 20, 30, tzinfo=cdt)) is True    # Thu
+    assert in_deepseek_peak(datetime(2026, 8, 28, 20, 30, tzinfo=cdt)) is False   # Fri
+    assert in_deepseek_peak(datetime(2026, 8, 29, 20, 30, tzinfo=cdt)) is False   # Sat
+    assert in_deepseek_peak(datetime(2026, 8, 30, 20, 30, tzinfo=cdt)) is True    # Sun
+
+
 # --------------------------------------------------------------------- the gate
 
 PEAK = _utc(2)
 OFF = _utc(12)
+WEEKEND_PEAK_HOUR = _on(29, 2)          # Saturday, inside [1,4) — off-peak since 08-23
 
 
 def _cfg(provider="deepseek"):
@@ -70,6 +103,12 @@ def test_gate_scheduled_deepseek_peak_defers():
 
 def test_gate_off_peak_runs():
     assert _defer_eval_for_peak(True, _cfg(), OFF) is False
+
+
+def test_gate_weekend_window_hour_runs():
+    # A scheduled slot inside the window on a Beijing weekend must NOT defer: under the
+    # weekend rule there is no cheaper later slot to wait for, only a delayed eval.
+    assert _defer_eval_for_peak(True, _cfg(), WEEKEND_PEAK_HOUR) is False
 
 
 def test_gate_manual_run_always_evaluates():
@@ -99,6 +138,12 @@ def test_note_in_peak_names_price_and_exit():
 
 def test_note_off_peak_is_silent():
     assert _peak_price_note(_cfg(), OFF) is None
+
+
+def test_note_weekend_window_hour_is_silent():
+    # The note reads deepseek_peak_end directly, so the weekend exemption must reach it:
+    # a 2x warning on a day billed at 1x would send the human away for nothing.
+    assert _peak_price_note(_cfg(), WEEKEND_PEAK_HOUR) is None
 
 
 def test_note_other_provider_is_silent():
@@ -135,7 +180,7 @@ def _drive_run(conn, monkeypatch, argv, peak):
     # Record the DAY: this run stage no longer rebuilds only run_date (see the report_days
     # set in main) — which day it rebuilds is now the load-bearing part.
     monkeypatch.setattr(pipeline, "generate_report",
-                        lambda c, cn, d: calls.append(f"report:{d}"))
+                        lambda c, cn, d, **k: calls.append(f"report:{d}"))
     monkeypatch.setattr(pipeline, "in_deepseek_peak", lambda now=None: peak)
     # The note path reads the clock through deepseek_peak_end; keep both patched
     # clocks telling the same story, with a plausible remaining-window span.

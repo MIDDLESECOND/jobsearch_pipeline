@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import evaluation
 import second_judge
+import states
 from conftest import make_job
 from states import classify_disagreement
 
@@ -28,12 +29,19 @@ def _urls(rows):
     return {r["job_url"] for r in rows}
 
 
-def test_zone_includes_pass13_pass15_and_ro15(conn):
-    a = make_job(conn, verdict="PASS", fit_score=13, first_seen=_recent())
-    b = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
-    c = make_job(conn, verdict="RECRUITER_ONLY", fit_score=15, first_seen=_recent())
+def test_zone_is_pass_at_the_bar_only(conn):
+    """2026-08-19: the zone is PASS >= PASS_MIN_FIT and nothing else. The PASS 13-14
+    rescue band and the RECRUITER_ONLY >= 15 band were cut for zero measured yield, so
+    the two rows that used to be the point of this test must now be OUT. Boundary is
+    pinned on both sides (14 out / 15 in), not just touched."""
+    at_bar = make_job(conn, verdict="PASS", fit_score=15, first_seen=_recent())
+    above = make_job(conn, verdict="PASS", fit_score=16, first_seen=_recent())
+    rescue_band = make_job(conn, verdict="PASS", fit_score=14, first_seen=_recent())
+    ro = make_job(conn, verdict="RECRUITER_ONLY", fit_score=16, first_seen=_recent())
     urls = _urls(second_judge.pending_rows(conn))
-    assert {a["job_url"], b["job_url"], c["job_url"]} <= urls
+    assert {at_bar["job_url"], above["job_url"]} <= urls
+    assert rescue_band["job_url"] not in urls
+    assert ro["job_url"] not in urls
 
 
 def test_zone_excludes_low_fit_decided_filtered_and_failed(conn):
@@ -345,18 +353,35 @@ def test_collect_ages_interrupted_submissions_into_errors(conn):
 
 
 def test_classify_disagreement_flags_bar_crossings_within_a_verdict():
-    # verdict-level moves
+    # verdict-level moves are UNMARGINED — they fire on a 1-point drop, and the demote
+    # leg is what notify_deepdive_batch's `batchable` subquery reads
     assert classify_disagreement("PASS", 16, "GATE_FAIL", None) == "demote"
     assert classify_disagreement("RECRUITER_ONLY", 15, "PASS", 16) == "promote"
-    # fit-band moves inside an unchanged verdict: crossing the cold-apply bar (13)
-    # or the recruiter-route bar (15) is a real action change
-    assert classify_disagreement("PASS", 16, "PASS", 14) == "demote"
-    assert classify_disagreement("PASS", 14, "PASS", 12) == "demote"
-    assert classify_disagreement("PASS", 12, "PASS", 14) == "promote"
+    assert classify_disagreement("PASS", 15, "RECRUITER_ONLY", 14) == "demote"
+    # promotions inside an unchanged verdict are unmargined too: under the measured
+    # -3 median offset, scoring level or higher has already beaten it
+    assert classify_disagreement("PASS", 12, "PASS", 13) == "promote"
+    # demotions inside an unchanged verdict must ALSO clear DISAGREEMENT_FIT_MARGIN,
+    # or the second judge's systematically lower scale flags nearly everything
+    assert classify_disagreement("PASS", 16, "PASS", 14) is None      # was "demote"
+    assert classify_disagreement("PASS", 14, "PASS", 12) is None      # was "demote"
     assert classify_disagreement("RECRUITER_ONLY", 16, "RECRUITER_ONLY", 8) == "demote"
+    assert classify_disagreement("PASS", 18, "PASS", 12) == "demote"
     # same band = agreement, whatever the raw delta
     assert classify_disagreement("PASS", 13, "PASS", 14) is None
     assert classify_disagreement("PASS", 16, "PASS", 17) is None
+
+
+def test_disagreement_margin_boundary_is_pinned_on_both_sides():
+    """A bar crossing at exactly DISAGREEMENT_FIT_MARGIN fires; one point short does
+    not. Both rows cross the SAME bar (13), so the margin is the only thing separating
+    them — touching the boundary from one side only would survive a `>=`/`>` mutation."""
+    assert states.DISAGREEMENT_FIT_MARGIN == 5
+    assert classify_disagreement("PASS", 17, "PASS", 12) == "demote"   # drop 5, at margin
+    assert classify_disagreement("PASS", 16, "PASS", 12) is None       # drop 4, under it
+    # and a big drop that crosses NO bar is still agreement — the margin adds a
+    # condition, it never becomes one on its own
+    assert classify_disagreement("PASS", 12, "PASS", 5) is None        # drop 7, same band
 
 
 def test_empty_anthropic_response_is_not_retried_and_still_bills(conn):

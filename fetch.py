@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The four posting source families: the LinkedIn scrape (python-jobspy guest endpoints), the
-Adzuna REST API, the per-company ATS board APIs (Greenhouse/Lever/Ashby — public, no auth), and
-the Dice search pages (public, logged-out — the job list is embedded in the page HTML).
+Adzuna REST API, the per-company ATS boards (Greenhouse/Lever/Ashby/Workday public JSON APIs
+plus iCIMS's server-rendered public portal pages — no auth on any of them), and the Dice
+search pages (public, logged-out — the job list is embedded in the page HTML).
 All insert unseen postings as status='new' and are otherwise source-agnostic from then on — the
 `source` column is provenance only. Imports core (the API-key resolver), posting_store (the
 shared normalize/fingerprint/insert path), health (the per-target attempt facts every fetcher
@@ -586,13 +587,339 @@ def _ats_rows_ashby(data, company):
     return rows
 
 
+# ------------------------------------------------------------------ Workday (CXS)
+#
+# Fourth board family, added 2026-08-20. Unlike Greenhouse/Lever/Ashby this is NOT one GET
+# of a whole board: Workday's public careers API ("CXS") is a POST for the paged list plus
+# a separate GET per posting for the description. Measured that day against two live
+# tenants (wsgr/wd503/WSGR and goodwinprocter/wd5/external_careers): 200, JSON,
+# `"userAuthenticated": false` — no keys, no login, no bot wall, scripted access works.
+#
+# Why it earns a reader (tests/validation/results/ats_census_20260820.md): the ATS lane held
+# 37 vendor/AI-lab boards and ZERO law firms, while the employers whose domain is a held
+# asset sit on Workday (4 of 8 censused: Wilson Sonsini, Goodwin Procter, Greenberg Traurig,
+# Holland & Knight) or iCIMS (3; NOT feasibility-tested — its lists render inside an iframe).
+# These boards carry what no aggregator does: the requisition id, the employer's own
+# `startDate`, the full JD, and a truthful absence once a req is filled (Goodwin's r04336
+# was gone from their board while a live Adzuna row still advertised it).
+#
+# `slug` encodes the three-part identity as "<tenant>/<dc>/<site>" so the config shape, the
+# entry validation, and the health target_label all stay exactly as they are for the other
+# boards. The parts are NOT derivable from the company name — Greenberg Traurig's tenant is
+# `gtlaw`, Holland & Knight's is `hklaw` — so each is probed by hand once, the same
+# maintenance shape as the existing Greenhouse/Lever/Ashby slugs.
+WORKDAY_PAGE = 20       # CXS caps `limit`; 20 is what its own UI sends
+WORKDAY_MAX_PAGES = 15  # 300 postings/board — a bound, not a target
+
+
+def _workday_parts(slug):
+    """'<tenant>/<dc>/<site>' → (tenant, dc, site). Raises so a malformed entry becomes that
+    board's FAILED attempt rather than aborting the run (fetch_ats catches per board)."""
+    parts = [p for p in str(slug).split("/") if p]
+    if len(parts) != 3:
+        raise ValueError("workday slug must be '<tenant>/<dc>/<site>' "
+                         f"(e.g. 'wsgr/wd503/WSGR'), got {slug!r}")
+    return parts[0], parts[1], parts[2]
+
+
+def _workday_post(url, payload):
+    """One CXS list call. Same explicit User-Agent rationale as _ats_get; no credentials live
+    in these URLs or bodies, so there is nothing to redact on the error path."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"User-Agent": "Mozilla/5.0 (jobsearch-pipeline)",
+                 "Content-Type": "application/json", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def _workday_rows(slug, name, title_any, conn, delay):
+    """List a Workday board, then fetch the JD only for genuinely-new, title-matching rows.
+
+    The detail GET is the expensive leg, so it runs LAST, behind both cheap filters: the
+    title patterns and "is this url already in jobs". That ordering is the same economics
+    Dice's reader states — a known url must never cost a detail fetch — and it is why this
+    reader takes `conn` when the GET-only boards do not.
+
+    A wrong-shaped 200 raises, exactly like the other readers: a silent [] here would log
+    success/returned_count=0 and keep every health light green while the board went dark.
+    """
+    tenant, dc, site = _workday_parts(slug)
+    base = f"https://{tenant}.{dc}.myworkdayjobs.com"
+    cxs = f"{base}/wday/cxs/{tenant}/{site}"
+    listed, rows, offset = [], [], 0
+    for _ in range(WORKDAY_MAX_PAGES):
+        payload = _workday_post(f"{cxs}/jobs", {
+            "appliedFacets": {}, "limit": WORKDAY_PAGE, "offset": offset, "searchText": "",
+        })
+        postings = payload.get("jobPostings") if isinstance(payload, dict) else None
+        if not isinstance(postings, list):
+            shape = (f"object with keys {sorted(payload)[:10]}" if isinstance(payload, dict)
+                     else type(payload).__name__)
+            raise ValueError(f"Workday response carried no jobPostings list ({shape})")
+        listed.extend(postings)
+        offset += WORKDAY_PAGE
+        total = payload.get("total")
+        if len(postings) < WORKDAY_PAGE or (isinstance(total, int) and offset >= total):
+            break
+        time.sleep(delay)
+    else:
+        # No silent caps: a board bigger than WORKDAY_MAX_PAGES*WORKDAY_PAGE would read as
+        # covered while an arbitrary tail went unread (White & Case's global board measured
+        # 3,500 roles on 2026-08-20 — deliberately NOT configured for this reason). Say so.
+        total = total if isinstance(total, int) else "?"
+        print(f"[ats] {slug} (workday): page cap hit — listed {len(listed)} of {total} "
+              f"postings; the tail was NOT read", file=sys.stderr)
+    for p in listed:
+        path = p.get("externalPath") or ""
+        title = p.get("title") or ""
+        if not path or not _ats_title_ok(title, title_any):
+            continue
+        url = f"{base}/{site}{path}"
+        if conn.execute("SELECT 1 FROM jobs WHERE job_url=?", (url,)).fetchone():
+            continue                      # known url — never pay a detail fetch for it
+        info = {}
+        try:
+            info = (_ats_get(f"{cxs}{path}") or {}).get("jobPostingInfo") or {}
+        except Exception as exc:          # noqa: BLE001 — one bad detail must not kill a board
+            print(f"[ats] {slug} (workday): detail fetch failed for {path} "
+                  f"({type(exc).__name__}) — listing it without a JD", file=sys.stderr)
+        loc = info.get("location") or p.get("locationsText") or ""
+        # Multi-city reqs are the law-board norm (measured 2026-08-20: Holland & Knight's
+        # AI Legal Engineer lists a primary of "Operations Center - Tampa" plus 29
+        # additionalLocations). Filtering on the primary alone drops a req whose other
+        # cities include a configured one, so the location filter sees ALL of them. The
+        # detail-failed fallback keeps the LIST's locationsText, which for multi-city reqs
+        # is a bare count ("14 Locations") — that row may drop, but the detail failure was
+        # already logged loudly above.
+        locations = [loc]
+        addl = info.get("additionalLocations")
+        if isinstance(addl, list):
+            locations += [a for a in addl if isinstance(a, str) and a]
+        rows.append({
+            "url": url,
+            "title": info.get("title") or title,
+            "company": name,
+            "location": loc,
+            "locations": locations,
+            # The employer's own posting date, precise where the aggregators guess: Adzuna
+            # dated Wilson Sonsini's R1579 "2026-08-18" while the board said 30+ days, and
+            # dated PNM's evergreen req "2026-08-19" against a Jun 3 opening.
+            "date_posted": _ats_date(info.get("startDate")),
+            "description": info.get("jobDescription") or "",
+            "remote": bool(info.get("remoteType")),
+        })
+        time.sleep(delay)
+    return rows
+
+
+ICIMS_PAGE = 20        # the portal renders 20 job cards per `pr=` page
+ICIMS_MAX_PAGES = 25   # 500 postings/board — a bound, not a target
+
+
+_ICIMS_OPENER = None
+
+
+def _icims_get(url):
+    """One iCIMS page fetch — HTML, not JSON, hence not _ats_get. Same explicit UA rule
+    (and specifically NOT a browser-imitating UA: iCIMS's WAF 405s a bare Chrome UA while
+    accepting this honest one — measured 2026-08-20).
+
+    Cookie handling: some tenants (careers-sidley, jobs-mayerbrown — a per-tenant setting)
+    answer the first cookieless request with a "Please Enable Cookies" interstitial whose
+    Set-Cookie is the whole test. A shared in-process cookie jar plus ONE retry when the
+    interstitial is detected clears it; no login, no credentials, still logged-out."""
+    global _ICIMS_OPENER
+    import urllib.request
+
+    if _ICIMS_OPENER is None:
+        from http.cookiejar import CookieJar
+
+        _ICIMS_OPENER = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(CookieJar()))
+
+    def _read():
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (jobsearch-pipeline)", "Accept": "text/html"},
+        )
+        with _ICIMS_OPENER.open(req, timeout=30) as resp:
+            return resp.read().decode("utf-8", "replace")
+
+    body = _read()
+    if "Please Enable Cookies" in body:
+        body = _read()                    # the jar now holds the interstitial's cookie
+        if "Please Enable Cookies" in body:
+            # The retry IS the cookie test, so a second interstitial means the wall did not
+            # clear -- and this is the only place that fact is still legible. Returning it
+            # hands the interstitial to _icims_cards, which finds no cards; the caller's
+            # branding guard cannot then tell an iCIMS-SERVED interstitial from an empty
+            # board, so a walled tenant would log success/0 forever, and the same page
+            # arriving mid-crawl (session expiry) would truncate the crawl through the
+            # no-new-ids break with nothing said. Raise: fetch_ats turns it into that
+            # board's FAILED attempt fact.
+            raise ValueError("iCIMS cookie interstitial persisted after the retry")
+    return body
+
+
+def _icims_cards(page_html, base):
+    """Extract (url, id, title, locations) from an iCIMS listing page's job cards.
+
+    Shape from a captured probe (2026-08-20, staffcareers-mcguirewoods): one
+    `<li class="iCIMS_JobCardItem">` per job, holding an `iCIMS_Anchor` link whose href is
+    `https://<host>/jobs/<id>/<title-slug>/job?...` and whose `title` attribute is
+    `"<id> - <title>"`, plus a `Job Locations` label followed by a pipe-joined value
+    ("US-NC-Charlotte | US-VA-Richmond"). The stored url is the canonical path with the
+    query stripped.
+
+    Cards are held to `base` (this tenant's own origin). The extracted url is BOTH stored as
+    `job_url` and fetched for the JD, so accepting any https host would let a link in scraped
+    page HTML choose an outbound request target -- the untrusted-input boundary. _workday_rows
+    is immune by construction (it interpolates a path into a fixed base); this reader has to
+    say so.
+
+    MATCH-THEN-FILTER, not an anchored pattern, and the difference is the whole point. An
+    anchored regex is silent by construction: a tenant whose real cards sit on a host this
+    reader did not predict would yield zero cards and read as an empty board -- the exact
+    class of failure _icims_get's interstitial guard was just built to close, reintroduced by
+    the fix for a different one. Filtering counts what it drops and says so, and _icims_rows'
+    page-0 guard turns "cards present, none readable" into a raise."""
+    cards, off_host = [], []
+    origin = base.rstrip("/")
+    for block in re.split(r'<li class="iCIMS_JobCardItem">', page_html)[1:]:
+        href = re.search(r'href="(https://[^"]+/jobs/(\d+)/[^/"]+/job)[^"]*"', block)
+        if not href:
+            continue
+        if not href.group(1).startswith(origin + "/"):
+            off_host.append(href.group(1))
+            continue
+        title = re.search(r'title="\d+ - ([^"]*)"', block)
+        if not title:
+            title = re.search(r"<h[23][^>]*>\s*(.*?)\s*</h[23]>", block, re.S)
+        loc = re.search(r'field-label">Job Locations</span>\s*<span[^>]*>\s*([^<]*)', block)
+        loc_text = html.unescape(loc.group(1)).strip() if loc else ""
+        cards.append({
+            "url": href.group(1),
+            "id": href.group(2),
+            "title": html.unescape(re.sub(r"\s+", " ", title.group(1))).strip() if title else "",
+            "locations": [s.strip() for s in loc_text.split("|") if s.strip()],
+        })
+    if off_host:
+        print(f"[ats] icims: dropped {len(off_host)} job card(s) whose href is not on "
+              f"{origin} (first: {off_host[0][:120]})", file=sys.stderr)
+    return cards
+
+
+def _icims_rows(slug, name, title_any, conn, delay):
+    """List an iCIMS portal, then fetch the JD only for genuinely-new, title-matching rows.
+
+    Feasibility probed 2026-08-20 (staffcareers-mcguirewoods / careers-lw / careers-consilio):
+    the portal's outer page is a JS shell — which is why the census could not read it in a
+    browser — but the iframe variant it embeds (`/jobs/search?ss=1&in_iframe=1`) is
+    server-rendered HTML, readable logged-out, paged by `pr=N`. Detail pages carry an
+    application/ld+json block whose `title`/`description`/`jobLocation` are real data.
+
+    `date_posted` is None ON PURPOSE: the ld+json `datePosted` is fabricated at render time —
+    measured 2026-08-20, five postings all stamped now-minus-exactly-two-years, seconds apart,
+    tracking the probe's own request pacing. first_seen stands in downstream (mode='seen'),
+    the same honest lower bound as LinkedIn rows. Do not "restore" that field.
+
+    Same economics as Workday and Dice: the detail GET runs last, behind the title filter and
+    the known-url check, so a known url never costs a fetch.
+
+    A zero-card first page on a response that doesn't even look like an iCIMS portal raises,
+    like the other readers' shape guards; zero cards WITH the portal branding is a genuinely
+    empty board (success, 0 listed)."""
+    base = f"https://{slug}.icims.com"
+    entries, seen_ids = [], set()
+    for page in range(ICIMS_MAX_PAGES):
+        page_html = _icims_get(f"{base}/jobs/search?ss=1&in_iframe=1&pr={page}")
+        cards = _icims_cards(page_html, base)
+        if page == 0 and not cards:
+            if "iCIMS_JobCardItem" in page_html:
+                # Cards ARE on the page and this reader read none of them: the card markup
+                # moved, or their href host is not the one derived from `slug`. That is a
+                # BROKEN READER, not an empty board, and the branding check below cannot
+                # tell them apart -- it passes on any iCIMS-served page, this one included.
+                raise ValueError("iCIMS page carries job cards this reader could not parse "
+                                 "(card markup or href host changed)")
+            if "iCIMS" not in page_html:
+                raise ValueError("iCIMS response carried no job cards and no portal branding")
+        fresh = [c for c in cards if c["id"] not in seen_ids]
+        if not fresh:
+            break
+        seen_ids.update(c["id"] for c in fresh)
+        entries.extend(fresh)
+        if len(cards) < ICIMS_PAGE:
+            break
+        time.sleep(delay)
+    else:
+        # No silent caps -- the same rule _workday_rows states, and the reason the law lane
+        # deliberately leaves oversized boards unconfigured. A portal deeper than
+        # ICIMS_MAX_PAGES*ICIMS_PAGE would otherwise read as fully covered while an
+        # arbitrary tail went unread. iCIMS's listing pages carry no total, so the notice
+        # reports what WAS read rather than inventing a denominator.
+        print(f"[ats] {slug} (icims): page cap hit — listed {len(entries)} postings over "
+              f"{ICIMS_MAX_PAGES} pages; the tail was NOT read", file=sys.stderr)
+    rows = []
+    for e in entries:
+        if not e["title"] or not _ats_title_ok(e["title"], title_any):
+            continue
+        if conn.execute("SELECT 1 FROM jobs WHERE job_url=?", (e["url"],)).fetchone():
+            continue                      # known url — never pay a detail fetch for it
+        data = {}
+        try:
+            detail = _icims_get(f"{e['url']}?in_iframe=1")
+            ld = re.search(r'<script type="application/ld\+json">\s*(\{.*?\})\s*</script>',
+                           detail, re.S)
+            if ld:
+                data = json.loads(ld.group(1))
+        except Exception as exc:          # noqa: BLE001 — one bad detail must not kill a board
+            print(f"[ats] {slug} (icims): detail fetch failed for job {e['id']} "
+                  f"({type(exc).__name__}) — listing it without a JD", file=sys.stderr)
+        locations = list(e["locations"])
+        if not locations:
+            # Some portal skins render no location field on the job cards at all (measured
+            # 2026-08-20: careers-lw's cards carry none, which silently location-dropped
+            # every title match). The detail's ld+json jobLocation has the address, and the
+            # detail is already in hand — zero extra cost.
+            for place in data.get("jobLocation") or []:
+                addr = place.get("address") if isinstance(place, dict) else None
+                if isinstance(addr, dict):
+                    text = ", ".join(p for p in (addr.get("addressLocality"),
+                                                 addr.get("addressRegion"))
+                                     if isinstance(p, str) and p)
+                    if text:
+                        locations.append(text)
+        rows.append({
+            "url": e["url"],
+            "title": data.get("title") or e["title"],
+            "company": name,
+            "location": " | ".join(locations),
+            "locations": locations,
+            "date_posted": None,   # ld+json datePosted is render-time fiction — see docstring
+            "description": _strip_html(data.get("description") or ""),
+            "remote": False,       # no reliable flag; remote reqs surface as location strings
+        })
+        time.sleep(delay)
+    return rows
+
+
 # One registry per board — (url template, payload extractor) — a single source of truth so
-# the config-validity guard and the dispatch in fetch_ats can't disagree.
+# the config-validity guard and the dispatch in fetch_ats can't disagree. Workday and iCIMS
+# carry None for both: neither is one GET plus a pure payload→rows extractor (see
+# _workday_rows/_icims_rows), so fetch_ats branches on the board name. The KEYS still belong
+# here, because this dict is what validates `board:` in config.
 ATS_BOARDS = {
     "greenhouse": ("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
                    _ats_rows_greenhouse),
     "lever": ("https://api.lever.co/v0/postings/{slug}?mode=json", _ats_rows_lever),
     "ashby": ("https://api.ashbyhq.com/posting-api/job-board/{slug}", _ats_rows_ashby),
+    "workday": (None, None),
+    "icims": (None, None),
 }
 
 
@@ -653,10 +980,17 @@ def _ats_get(url):
 
 
 def fetch_ats(cfg, conn) -> FetchSummary:
-    """Fetch postings from company ATS boards (the Greenhouse/Lever/Ashby public JSON APIs)
-    for every company under settings.ats.companies; insert unseen postings matching the shared
-    title/location filters as status='new', source='<board>'. No credentials — the gate is
-    config-only: no companies (or an empty title_any) → no-op with a notice."""
+    """Fetch postings from company ATS boards (the Greenhouse/Lever/Ashby/Workday public JSON
+    APIs, plus iCIMS's public portal pages) for every company under settings.ats.companies;
+    insert unseen postings matching the shared title/location filters as status='new',
+    source='<board>'. No credentials — the gate is config-only: no companies (or an empty
+    title_any) → no-op with a notice.
+
+    Three of the five boards are one GET returning the whole board as JSON. The two added
+    2026-08-20 are not: Workday is a POST for the paged list plus one detail GET per
+    genuinely-new posting, with a composite "<tenant>/<dc>/<site>" slug (see _workday_rows);
+    iCIMS is paged HTML, not an API at all, read through the portal's server-rendered iframe
+    variant with the same per-posting detail economics (see _icims_rows)."""
     s = cfg["settings"]
     ats = s.get("ats") or {}
     companies = _as_list(ats.get("companies"))
@@ -739,6 +1073,25 @@ def fetch_ats(cfg, conn) -> FetchSummary:
         # a title-cased slug is the fallback when `name` is unset.
         name = entry.get("name") or slug.replace("-", " ").title()
         tier = entry.get("tier") or "primary"  # `or`, not a .get default: `tier: null` → None
+        # Per-board vocabulary: `title_any_extra` UNIONS with the shared title_any — never
+        # replaces it, so the shared list's ongoing tuning keeps applying everywhere and a
+        # board-local list can only widen its own board. Bought 2026-08-20: the shared list
+        # is tuned for vendor SA/SE titles and admitted 2 of 11 AI-ish roles on the four
+        # law-firm Workday boards (measured live); per-board extras took that to 10 with
+        # zero effect on the other boards. All-unusable extras degrade to shared-only — the
+        # safe direction (misses roles rather than flooding), unlike location_any's inverted
+        # case above. The extra list rides inside `entry`, so definition_hash tracks it.
+        extra = _ats_clean_patterns(entry.get("title_any_extra"), f"title_any_extra [{slug}]")
+        eff_title_any = title_any + [p for p in extra if p not in title_any]
+        # Same union rule for locations, with one extra guard: when the shared location_any
+        # is ABSENT (accept-everything), a board-local extra must not narrow it — extras may
+        # only WIDEN their own board, in both filters. Bought by the same 2026-08-20
+        # measurement: the law boards' cities (Charlotte, Richmond, Tampa) sit outside the
+        # vendor-tuned shared list, which would have silently zeroed the lane.
+        extra_loc = _ats_clean_patterns(entry.get("location_any_extra"),
+                                        f"location_any_extra [{slug}]")
+        eff_location_any = (location_any + [p for p in extra_loc if p not in location_any]
+                            if location_any else [])
         url_template, extract = ATS_BOARDS[board]
         definition_hash = fetch_definition_hash({
             "source": "ats", "company": entry,
@@ -750,15 +1103,25 @@ def fetch_ats(cfg, conn) -> FetchSummary:
         # board inserts so the next company's commit can't ship them.
         kept = board_inserted = board_reposts = 0
         try:
-            data = _ats_get(url_template.format(slug=slug))
-            rows = extract(data, name)
+            if board == "workday":
+                # POST list + per-posting detail GET, and it needs `conn` to skip known urls
+                # before paying for a detail fetch — hence its own call instead of the shared
+                # (GET template → pure extractor) path. See _workday_rows.
+                rows = _workday_rows(slug, name, eff_title_any, conn, delay)
+            elif board == "icims":
+                # Paged HTML list + per-posting detail GET; same known-url economics as
+                # Workday/Dice, so it also takes `conn`. See _icims_rows.
+                rows = _icims_rows(slug, name, eff_title_any, conn, delay)
+            else:
+                data = _ats_get(url_template.format(slug=slug))
+                rows = extract(data, name)
             for r in rows:
                 url = r["url"]
                 if not isinstance(url, str) or not url:
                     continue
-                if not _ats_title_ok(r["title"], title_any):
+                if not _ats_title_ok(r["title"], eff_title_any):
                     continue
-                if not _ats_location_ok(r["locations"], r["remote"], location_any):
+                if not _ats_location_ok(r["locations"], r["remote"], eff_location_any):
                     continue
                 kept += 1
                 # Salaries stay NULL ("unstated", kept by the salary filter): boards rarely

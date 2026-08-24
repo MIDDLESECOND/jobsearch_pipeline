@@ -69,14 +69,68 @@ VERDICT_FAVOR = {VERDICT_PASS: 2, VERDICT_RECRUITER_ONLY: 1, VERDICT_GATE_FAIL: 
 # silently dropped by chain_verdict's `in VERDICT_FAVOR` filter — one list, one owner.
 VERDICTS = list(VERDICT_FAVOR)
 
-# The two fit-score action bars, code-owned so every consumer reads the same lines:
-# COLD_APPLY_MIN_FIT is the guide's PASS action bar ("apply at 13+" — the line
-# evaluation.ARBITRATION_BAND wraps); RECRUITER_ROUTE_MIN_FIT is the recruiter-route
-# bar (workflow's recruiter_route default) and the standing allocation's practical
-# cold-apply threshold. Both are real action lines, which is why classify_disagreement
-# below flags a crossing of EITHER inside an unchanged verdict.
+# The two fit-score action bars, code-owned so every consumer reads the same lines.
+#
+# CORRECTION 2026-08-22 — the previous comment here read "COLD_APPLY_MIN_FIT is the
+# guide's PASS action bar ('apply at 13+')" and that is NOT what the guide says. The
+# guide's standing allocation has read `fit >= 15, posted <= 14 days` since 2026-08-07
+# (briefly 14 that day, restored the same evening); 13 appears nowhere in it as an apply
+# line. The stale sentence was believed and propagated into three documents in one
+# session before anyone re-read the guide, which is why the correction is recorded here
+# rather than quietly deleted: a comment that names another file's rule is a claim, and
+# this one had silently gone false.
+#
+# What each constant actually is:
+#  - COLD_APPLY_MIN_FIT (13) is a CODE-OWNED lower action line, not a guide quote. It is
+#    the floor of evaluation.ARBITRATION_BAND's action-relevant span, the zone floor the
+#    doorbell counts from, and the deepdive batch's admission threshold for re-reading a
+#    row (notify_deepdive_batch.BATCH_MIN_FIT aliases it). Reading is not applying.
+#  - RECRUITER_ROUTE_MIN_FIT (15) is the recruiter-route bar (workflow's default) AND the
+#    number the guide's standing allocation uses for cold applies. The same value for two
+#    reasons; second_judge.PASS_MIN_FIT keeps its own literal for exactly this reason.
+#
+# Standing note on the 15: the guide sets it by a STRICTNESS GAP (bar minus the
+# gates-passed fit mean) — historically 4.1, deliberately 4.4 when the bar was restored
+# on 2026-08-07 against a scale of ~10.6. Measured 2026-08-22 the gates-passed mean is
+# ~9.5 (weekly 9.23-9.56 since 08-03), so that gap is now 5.4-5.8 and the bar is
+# materially more conservative than it was set to be; the guide's own rule would put it
+# at ~14.0 today. Moving it is a GUIDE edit gated on backtest_v2, not a code change here.
+#
+# Both are real action lines, which is why classify_disagreement below reads a crossing of
+# EITHER as the candidate signal inside an unchanged verdict. Candidate, not verdict: since
+# 2026-08-19 a crossing is necessary but no longer sufficient in the DEMOTE direction, which
+# must also clear DISAGREEMENT_FIT_MARGIN below.
 COLD_APPLY_MIN_FIT = 13
 RECRUITER_ROUTE_MIN_FIT = 15
+
+# How far a within-verdict fit drop must exceed the second judge's KNOWN OFFSET before
+# it counts as disagreement rather than scale.
+#
+# Measured 2026-08-19 over the review layer's first week (608 paired opinions, the
+# 2026-08-12 cost/yield review): the second judge is not a coin-flip arbiter of the
+# primary, it is a consistently LOWER scale — mean Δfit -2.49, median -3, and only 3 of
+# 608 rows scored HIGHER at all. Against a raw bar crossing that fired on 78% of the
+# main band, i.e. a flag on almost everything, which cannot rank and therefore cannot
+# be triaged. 5 = the main band's measured median offset (3) + one action-bar width
+# (RECRUITER_ROUTE_MIN_FIT - COLD_APPLY_MIN_FIT = 2); it takes that 78% to 22%.
+# Re-measure BOTH numbers before moving this — the offset is a property of the judge
+# pair, so a model change on either side invalidates it (same standing rule as
+# evaluation.ARBITRATION_BAND).
+#
+# Deliberately NOT applied to two cases:
+#  - Verdict-level moves. Those already fire on only 14% of rows, and a PASS -> RECRUITER_ONLY
+#    or -> GATE_FAIL move is a categorical judgment rather than a score difference: there is
+#    no offset to subtract from a category. (An earlier version of this comment added "and it
+#    is the leg notify_deepdive_batch's `batchable` subquery reads — margining it would
+#    silently re-admit downgraded rows to the deepdive batch." That is FALSE and was corrected
+#    2026-08-23: `batchable` compares raw `second_opinions.verdict` in SQL and never calls
+#    this function, so margining this leg could not have reached it. The two read the same
+#    FACT independently; neither guards the other. Kept rather than deleted for the same
+#    reason as the COLD_APPLY_MIN_FIT correction above — the wrong claim also reached the
+#    2026-08-19 CHANGELOG entry, and a silent deletion leaves that copy unchallenged.)
+#  - Promotions. Under a -3 median offset an opinion that scores level or higher has
+#    already beaten the offset by existing (3 of 608), so it is informative unmargined.
+DISAGREEMENT_FIT_MARGIN = 5
 
 
 def _fit_band(verdict, fit):
@@ -96,16 +150,24 @@ def classify_disagreement(row_verdict, row_fit, op_verdict, op_fit):
     with the primary", shared by the report section (report._second_opinion_lines) and
     the UI card warning (both via second_judge.opinion_summaries): change it here and
     both surfaces move together. A verdict-level move ranks by VERDICT_FAVOR; within a
-    shared verdict, crossing any action bar (_fit_band) counts — PASS 16→14 and
-    RECRUITER_ONLY 16→8 are real demotions even though the verdict held."""
+    shared verdict, crossing an action bar (_fit_band) counts — but a DEMOTION must
+    additionally clear DISAGREEMENT_FIT_MARGIN, because the second judge scores on a
+    systematically lower scale and a bar crossing it produces by offset alone is not a
+    disagreement (see that constant for the measurement). So RECRUITER_ONLY 16→8 is
+    still a demotion and PASS 16→14 is no longer one; promotions and verdict-level
+    moves are unmargined."""
     f1 = VERDICT_FAVOR.get(row_verdict, -1)
     f2 = VERDICT_FAVOR.get(op_verdict, -1)
     if f2 != f1:
         return "demote" if f2 < f1 else "promote"
     b1 = _fit_band(row_verdict, row_fit)
     b2 = _fit_band(op_verdict, op_fit)
-    if b2 != b1:
-        return "demote" if b2 < b1 else "promote"
+    if b2 > b1:
+        return "promote"
+    # `or 0` is _fit_band's own reading of a missing fit — shared here on purpose, so the
+    # bar crossing and the margin can never disagree about what None means.
+    if b2 < b1 and (row_fit or 0) - (op_fit or 0) >= DISAGREEMENT_FIT_MARGIN:
+        return "demote"
     return None
 
 

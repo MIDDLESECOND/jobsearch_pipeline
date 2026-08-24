@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 
 from core import ADZUNA_SNIPPET_MAX_CHARS, recency_dt, run_log
-from states import COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT
+from states import COLD_APPLY_MIN_FIT
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / ".deepdive_state.json"
@@ -60,14 +60,35 @@ SNIPPET_QUOTA = 3
 SESSION_GUARD_PCT = 50.0
 SESSION_LABEL = "5h 窗口"   # plan_usage's label for the window the guard watches
 # BATCHABLE = the row a batch can actually consume, mirroring ALL of the skill's batch
-# scope, not just its fit leg: PASS at/above the standing allocation's cold-apply bar,
-# no second-judge downgrade, and inside the apply window. Rows failing any leg stay in
-# the zone — the second judge still reviews them, the popup still counts them as
-# context — but they are never batch material, so they must not drive the fire/skip
-# decision or the size estimate. Getting this subset wrong in either direction is what
-# the 2026-08-15 reviews kept catching: too wide and "no popup" is unreachable, too
-# narrow and real work goes unannounced.
-BATCH_MIN_FIT = 15
+# scope, not just its fit leg: PASS or RECRUITER_ONLY at/above BATCH_MIN_FIT, no
+# second-judge downgrade (an opinion strictly less favorable than the row's own verdict),
+# and inside the apply window. Rows failing any leg stay in the zone — the popup still
+# counts them as context — but they are never batch material, so they must not drive the
+# fire/skip decision or the size estimate. Getting this subset wrong in either direction
+# is what the 2026-08-15 reviews kept catching: too wide and "no popup" is unreachable,
+# too narrow and real work goes unannounced.
+#
+# The floor is states.COLD_APPLY_MIN_FIT (13) — a CODE-OWNED admission line for
+# re-reading, NOT the guide's cold-apply bar, which reads 15 (see the correction recorded
+# in states.py; an earlier comment here got that wrong). Reading is not applying: the
+# batch produces a fresh full-text evaluation and the guide's bar governs THAT. Aliased
+# rather than a second literal because it is the same line the zone's fit leg uses.
+#
+# History, each step bought by a measurement (CHANGELOG 2026-08-22, three entries):
+#  - 15, PASS only (2026-08-16): a plan-budget assumption. The budget never bound — the
+#    day's batches moved the 5h window ~1 point each (batch _3: 14 rows, 4% -> 5%),
+#    calibration 0.10%/full row, and the guard never fired in its life.
+#  - 13, PASS only (2026-08-22 morning): PASS 13-14 is ~19 full-text rows/day, ~2 window
+#    points/day. Not 12: below both this line and the guide's gap-derived equivalent of
+#    its own bar (~14.0 on today's scale).
+#  - 13, PASS or RECRUITER_ONLY (2026-08-22 evening): the 14-day sweep of 2026-08-21 read
+#    RO 13-14 full text at 4.4% apply-grade (5/114) against PASS 13-14's 2.1% (3/144),
+#    and the user applied to all five; at this fit the primary's PASS/RO split is not an
+#    admission signal. +~20 full rows/day. The recruiter_route queue is untouched — that
+#    is the contacts surface for RO >= 15, and reading a row does not route it.
+# MIRRORED in SKILL.md's membership leg 1 — change one, change both, the same coupling
+# SNIPPET_QUOTA carries.
+BATCH_MIN_FIT = COLD_APPLY_MIN_FIT
 BATCH_FRESH_DAYS = 5       # the apply-window evidence: first 1-2 days / first review batch
 DEFAULT_MIN_PER_ROW = 4.0
 DEFAULT_KTOK_PER_ROW = 35.0
@@ -135,20 +156,34 @@ def zone_rows(conn):
     """Deepdive-actionable rows: undecided, at the action bars, fresh.
 
     Returns (url, first_seen, is_snippet, is_batchable). `is_batchable` marks the
-    narrower slice a batch can actually consume — ALL legs of the skill's scope: PASS at
-    the cold-apply bar, no second-judge downgrade, and within BATCH_FRESH_DAYS. The wider
-    zone (which also holds PASS 13–14 and RECRUITER_ONLY) is still returned, because the
-    popup reports zone context; but only batchable rows may drive the fire/skip decision
-    and the size estimate. Conflating the two is what made `pending` undrainable
-    (measured 2026-08-15: 5,983 of 9,669 zone rows can never enter a batch), and testing
-    only the fit leg still overstated it 3x (492 flagged vs 162 truly reachable).
+    narrower slice a batch can actually consume — ALL legs of the skill's scope: PASS or
+    RECRUITER_ONLY at BATCH_MIN_FIT, no second-judge downgrade (an opinion strictly less
+    favorable than the row's own verdict), and within BATCH_FRESH_DAYS. The wider zone
+    (the same verdicts and floor, but out to FRESH_DAYS, plus downgraded rows) is still
+    returned, because the popup reports zone context; but only batchable rows may drive
+    the fire/skip decision and the size estimate. Conflating the two is what made
+    `pending` undrainable (measured 2026-08-15 at the old PASS>=15 floor: 5,983 of 9,669
+    zone rows could never enter a batch), and testing only the fit leg still overstated
+    it 3x (492 flagged vs 162 truly reachable).
 
-    MIRRORS second_judge.pending_rows' zone predicate — that function owns it; this one
-    reproduces it for counting because the doorbell must not pull the judge's submit
-    window, chain dedup, or per-batch cap. Change one, change both: this pair has already
-    drifted twice (a missing filter_source clause here; a textual date_posted slice that
-    disagreed with recency_dt). The doorbell's own additions are the batchable flag and
-    the wider verdict set it keeps for context.
+    Membership history, each step bought by a measurement: PASS >= 15 only (2026-08-15);
+    PASS >= 13 (2026-08-22 morning — the plan budget the 15 assumed never bound);
+    RECRUITER_ONLY >= 13 added the same evening — the 14-day sweep of 2026-08-21 found RO
+    13-14 full-text rows yielding apply-grade reads at 4.4% (5/114) against PASS 13-14's
+    2.1% (3/144), with the user applying to all five, so at this fit the primary's
+    PASS/RO split carries no admission information. Reading is not routing: the batch
+    re-judges under the guide, and the recruiter_route queue (RO >= 15 with no contact)
+    is untouched.
+
+    Shares every NON-verdict leg with second_judge.pending_rows (status/filter_source/
+    app_status, the snippet flag, recency through recency_dt) — that pair drifted twice
+    while the judge was live (a missing filter_source clause; a textual date_posted slice
+    that disagreed with recency_dt), so an edit to those legs is still a two-file edit
+    even though the judge was retired on 2026-08-22 (CHANGELOG) and pending_rows now runs
+    only by hand. The verdict/fit legs are deliberately NOT shared: the judge's zone is
+    PASS >= 15 (what was worth paying a second model to re-read); this one is PASS or
+    RECRUITER_ONLY >= 13 (what the local batch reads). Aligning this query to the judge's
+    would cut the batch itself, not just the popup's context counts.
 
     Freshness runs through core.recency_dt — the ONE effective posted-at reading the
     report label, the triage sort, and second_judge's window all share (AGENTS.md).
@@ -167,17 +202,28 @@ def zone_rows(conn):
         SELECT j.job_url, j.first_seen, j.date_posted,
                (COALESCE(j.source,'')='adzuna'
                 AND length(COALESCE(j.description,'')) <= ?) AS snippet,
-               (j.verdict='PASS' AND j.fit_score >= ?
+               (j.fit_score >= ?
                 AND NOT EXISTS (SELECT 1 FROM second_opinions s
                                 WHERE s.job_url = j.job_url AND s.status='done'
-                                  AND s.verdict <> 'PASS')) AS batchable
+                                  -- "the opinion is STRICTLY LESS FAVORABLE than the row's
+                                  -- own verdict" == states.VERDICT_FAVOR's ordering
+                                  -- (PASS 2 > RECRUITER_ONLY 1 > GATE_FAIL 0), spelled in
+                                  -- SQL because it runs inside the query. That dict is the
+                                  -- DEFINITION and this is a copy: a verdict added there
+                                  -- without a rank here lands as "not a downgrade" and
+                                  -- silently stops removing rows. Change one, change both --
+                                  -- the coupling chain.chain_verdict / skip_evaluated_reposts
+                                  -- already carry. NOT states.classify_disagreement: that
+                                  -- reads the same fact for the report/UI and neither guards
+                                  -- the other (see the correction in states.py).
+                                  AND CASE WHEN j.verdict='PASS'
+                                           THEN s.verdict <> 'PASS'
+                                           ELSE s.verdict = 'GATE_FAIL' END)) AS batchable
         FROM jobs j
         WHERE j.status='evaluated' AND j.filter_source IS NULL AND j.app_status IS NULL
-          AND ((j.verdict='PASS' AND j.fit_score >= ?)
-               OR (j.verdict='RECRUITER_ONLY' AND j.fit_score >= ?))
+          AND j.verdict IN ('PASS','RECRUITER_ONLY') AND j.fit_score >= ?
         """,
-        (ADZUNA_SNIPPET_MAX_CHARS, BATCH_MIN_FIT,
-         COLD_APPLY_MIN_FIT, RECRUITER_ROUTE_MIN_FIT),
+        (ADZUNA_SNIPPET_MAX_CHARS, BATCH_MIN_FIT, COLD_APPLY_MIN_FIT),
     ).fetchall()
     out = []
     for url, first_seen, date_posted, snippet, batchable in rows:
@@ -364,8 +410,11 @@ def pending_split(fresh, processed, last_batch=""):
     * new_urls is a SUBSET of pending. The popup nests them ("待看 N（其中新进 M）"), and
       counting arrivals over the whole zone once printed 待看 494（其中新进 1256）.
 
-    Pending counts only BATCHABLE rows: the sub-bar rows a batch may never take would
-    otherwise keep it permanently non-empty and make "no popup" unreachable.
+    Pending counts only BATCHABLE rows: the rows a batch may never take would otherwise
+    keep it permanently non-empty and make "no popup" unreachable. Since 2026-08-22 that
+    remainder is the 5-14 day tail plus recorded downgrades — the zone and the batch
+    share verdicts (PASS, RECRUITER_ONLY) and floor, so every fresh undecided row at the
+    floor is batch material.
     """
     pending, n_snippet, new_rows = [], 0, []
     for url, first_seen, snippet, batchable in fresh:

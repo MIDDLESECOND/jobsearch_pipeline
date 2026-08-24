@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Head-to-head: run the SAME gate-eval prompt through Claude + DeepSeek V4 on a
 sample of real postings, then diff the verdicts. Quality test, not production.
 
 Reads DEEPSEEK_API_KEY + ANTHROPIC_API_KEY from env. Writes
 tests/validation/results/compare_results.json.
 """
+import io
 import json
 import os
 import sys
@@ -15,10 +15,8 @@ from typing import Any
 
 import httpx
 
-try:
+if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
-except Exception:
-    pass
 
 # Lives in tests/validation/ but imports the pipeline modules at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

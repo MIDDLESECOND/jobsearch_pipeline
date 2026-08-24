@@ -25,6 +25,7 @@ Read-only (sqlite mode=ro). Politely paced. Run:
     python tests/validation/ukg_board_watch.py
 """
 import datetime as dt
+import io
 import json
 import sqlite3
 import sys
@@ -32,10 +33,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))

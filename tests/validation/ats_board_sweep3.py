@@ -13,15 +13,14 @@ probing machinery verbatim, including its positive/negative controls.
 
 Run:  python tests/validation/ats_board_sweep3.py     (background-friendly, ~10 min)
 """
+import io
 import json
 import sys
 import time
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))

@@ -16,16 +16,15 @@ Two verification rules stage 3 lacked, each bought by a real false hit that nigh
 
 Run:  python tests/validation/ats_board_sweep4.py     (background-friendly, ~10-15 min)
 """
+import io
 import json
 import re
 import sys
 import time
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
@@ -128,12 +127,15 @@ ROSTER = {
 
 
 def _verify_icims(sub, tokens):
-    body = fetch._icims_get(f"https://{sub}.icims.com/jobs/search?ss=1&in_iframe=1")
+    # Same origin _icims_rows derives, so the count here is the count the reader would get:
+    # cards are held to the tenant's own host, and off-host ones are dropped, not counted.
+    base = f"https://{sub}.icims.com"
+    body = fetch._icims_get(f"{base}/jobs/search?ss=1&in_iframe=1")
     if "iCIMS" not in body:
         raise ValueError("no portal branding")
     m = re.search(r"<title>([^<]*)</title>", body)
     title = (m.group(1) if m else "").strip()
-    cards = len(fetch._icims_cards(body))
+    cards = len(fetch._icims_cards(body, base))
     if cards == 0:
         raise ValueError("empty shell (0 cards)")
     if not any(t in title.lower() for t in tokens):

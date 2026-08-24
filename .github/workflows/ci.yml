@@ -29,5 +29,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt pyright
+      # pyright's version comes pinned from requirements.txt — the gate moves only when
+      # the code moves. This job stays split from `test` for the fast, named signal;
+      # tests/test_typecheck.py runs the same check inside pytest, pre-push.
+      - run: pip install -r requirements.txt
       - run: pyright

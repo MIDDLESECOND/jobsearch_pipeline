@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Round-2-audit follow-ups (2026-08-01), two probes in one run:
 
 A. luna reasoning_effort=xhigh on the SAME 10 truncated postings the stratified
@@ -12,16 +11,15 @@ B. 10 fresh RANDOM truncated postings (deterministically pseudo-random, the 4
 
 Writes results/followup_results.json. Reuses compare_models callers + stratified pick.
 """
+import io
 import json
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))

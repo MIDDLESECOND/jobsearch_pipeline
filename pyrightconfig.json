@@ -8,7 +8,12 @@
   "reportMissingImports": "warning",
   "reportOptionalSubscript": "error",
   "reportArgumentType": "error",
-  "reportAttributeAccessIssue": "warning",
+  // "error" is basic's default, restored 2026-08-24 after living as "warning": the
+  // downgrade (plus 11 per-file `reportAttributeAccessIssue=false` pragmas, also removed)
+  // existed only to mute sys.stdout.reconfigure noise -- and muted the rule that catches
+  // the s2.verify_workday class of AttributeError, which at runtime rejected two real
+  // finds (ats_board_sweep4). The reconfigure sites now narrow via isinstance instead.
+  "reportAttributeAccessIssue": "error",
   "reportUnknownMemberType": false,
   "reportUnknownParameterType": false,
   "reportUnknownVariableType": false,

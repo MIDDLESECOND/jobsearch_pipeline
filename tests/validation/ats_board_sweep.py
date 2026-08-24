@@ -23,6 +23,7 @@ only writes are the results file. Politely paced (~0.6s between requests).
 
 Run:  python tests/validation/ats_board_sweep.py
 """
+import io
 import json
 import re
 import sys
@@ -31,10 +32,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE.parents[1]))

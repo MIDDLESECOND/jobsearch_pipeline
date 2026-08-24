@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Stratified, repeated model comparison — the audit follow-up to the 2026-07-31
 runs, whose 25-posting sample turned out to be 100% truncated Adzuna snippets
 from one search (see CHANGELOG 2026-08-01).
@@ -14,16 +13,15 @@ Design:
 
 Writes results/stratified_results.json. Reuses compare_models' callers/prompt.
 """
+import io
 import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))

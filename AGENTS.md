@@ -270,7 +270,10 @@ pure logic (normalization, fingerprint/repost, the 50/0 routing cap, filters, th
 machinery), never the real `jobs.db`. It includes `test_no_undefined_names.py`, a pyflakes gate that
 fails on any undefined name in a module — the cheap guard for the extraction-refactor footgun where
 a moved function references a name its new file forgot to import (a NameError on a path the network
-tests can't reach). Real-DB validation scripts live in `tests/validation/` (not collected by pytest —
+tests can't reach). `test_typecheck.py` runs pyright (version pinned in requirements.txt) the same
+way — arity, Optional flow, and attribute existence across every module, in ~12s; it exists
+because six consecutive red CI runs were the typecheck job alone, a gate that only ever ran
+after the push. Real-DB validation scripts live in `tests/validation/` (not collected by pytest —
 no `test_*.py` names there; all test/validation scripts, existing and future, belong under `tests/`):
 `python tests/validation/backtest_v2.py` (asserts expected verdicts on known postings — the
 eval-framework regression guard; the script is committed, its cases live in

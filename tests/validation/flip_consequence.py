@@ -24,6 +24,7 @@ Reads the newest results/noise_probe_*.json by default. Pure offline re-analysis
 no DB, no API calls, no cost. Writes results/flip_consequence_<stamp>.json.
 """
 import argparse
+import io
 import json
 import math
 import statistics
@@ -32,10 +33,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from states import VERDICT_PASS, VERDICT_RECRUITER_ONLY, VERDICT_GATE_FAIL  # noqa: E402

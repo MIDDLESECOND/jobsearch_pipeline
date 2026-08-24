@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """One-off arbiter for the 2026-07-31 model comparison: re-run every round-2
 disagreement posting through kimi-k3 (Moonshot's flagship) as an INDEPENDENT
 evaluator — k3 sees only the standard system prompt + posting, never the other
@@ -20,6 +19,7 @@ boundary a one-character delta can flip temp-0 verdicts, so before RE-running th
 arbitration, regenerate compare_results.json with compare_models.py — otherwise a
 prompt-byte flip gets attributed to model disagreement.
 """
+import io
 import json
 import sys
 import time
@@ -27,10 +27,8 @@ from pathlib import Path
 
 import httpx
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 # Lives in tests/validation/ but imports the pipeline modules at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

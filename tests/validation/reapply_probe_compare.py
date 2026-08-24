@@ -41,15 +41,14 @@ Run:  python tests/validation/reapply_probe_compare.py
       python tests/validation/reapply_probe_compare.py --limit 400   # smaller sweep
 """
 import argparse
+import io
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "jobs.db"

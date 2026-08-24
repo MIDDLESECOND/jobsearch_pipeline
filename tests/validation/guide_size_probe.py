@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Does a shorter evaluation guide change judgment, or just cost?
 
 Sends the SAME postings through the SAME model twice — once with the production
@@ -26,6 +25,7 @@ Needs DEEPSEEK_API_KEY. Cost is roughly (postings x conditions x reps) x $0.0012
 Writes tests/validation/results/guide_size_probe_<stamp>.json.
 """
 import argparse
+import io
 import json
 import random
 import sqlite3
@@ -37,10 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

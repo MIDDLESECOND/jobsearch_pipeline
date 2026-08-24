@@ -23,14 +23,13 @@ Run:  python tests/validation/guide_sync_check.py [--mirror PATH]
 import argparse
 import difflib
 import hashlib
+import io
 import re
 import sys
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

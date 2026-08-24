@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Sentinel canary for silent judge drift (the 0731 problem, made same-week visible).
 
 DeepSeek serves ONE moving build per model name: the 2026-07-31 swap changed output
@@ -39,6 +38,7 @@ The set file names real postings -> *.local.json (gitignored), same split as
 backtest_cases.local.json. DeepSeek-only by design: this watches the production judge.
 """
 import argparse
+import io
 import json
 import statistics
 import sys
@@ -48,10 +48,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

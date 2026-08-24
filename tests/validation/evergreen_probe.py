@@ -27,15 +27,14 @@ Run:  python tests/validation/evergreen_probe.py
 import collections
 import datetime as dt
 import hashlib
+import io
 import sqlite3
 import statistics
 import sys
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))

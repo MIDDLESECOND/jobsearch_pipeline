@@ -47,6 +47,7 @@ Run:
 """
 import argparse
 import datetime as dt
+import io
 import json
 import random
 import sqlite3
@@ -54,10 +55,8 @@ import statistics
 import sys
 from pathlib import Path
 
-try:
+if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
-except Exception:
-    pass
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
@@ -177,7 +176,7 @@ def report(path):
             continue
         adz = dt.date.fromisoformat(row["adzuna_date_posted"][:10])
         gap = (adz - emp).days
-        gaps.append((gap, is_floor, row))
+        gaps.append((gap, is_floor, emp, row))
         floors += 1 if is_floor else 0
 
     print(f"probe: {data['probe']}   created {data['created']}   seed {data['seed']}")
@@ -187,7 +186,7 @@ def report(path):
     if not gaps:
         print("nothing resolved yet -- fill employer_posted in the worksheet first.")
         return
-    v = sorted(g for g, _, _ in gaps)
+    v = sorted(g for g, _, _, _ in gaps)
     n = len(v)
     print("GAP = adzuna_date_posted - employer_posted, in days (positive = Adzuna says NEWER)")
     print("  median %.1f   mean %.1f   min %d   max %d" % (
@@ -197,12 +196,12 @@ def report(path):
         print("  gap > %2dd : %2d/%d  (%.0f%%)" % (thresh, k, n, 100.0 * k / n))
     print()
     # The decision-relevant count: rows the bar admitted that the employer's own date excludes.
-    busted = [(g, f, r) for g, f, r in gaps
-              if (dt.date.today() - _parse_employer(r["employer_posted"])[0]).days > FRESH_DAYS]
+    busted = [(g, f, e, r) for g, f, e, r in gaps
+              if (dt.date.today() - e).days > FRESH_DAYS]
     print("rows inside the <=%dd bar by Adzuna's date but OUTSIDE it by the employer's: %d/%d (%.0f%%)"
           % (FRESH_DAYS, len(busted), n, 100.0 * len(busted) / n))
-    for g, f, r in sorted(busted, key=lambda x: -x[0]):
-        true_age = (dt.date.today() - _parse_employer(r["employer_posted"])[0]).days
+    for g, f, e, r in sorted(busted, key=lambda x: -x[0]):
+        true_age = (dt.date.today() - e).days
         print("   %+5d%s  %-26s %-38s adzuna %s -> employer %s (真实 %d 天)" % (
             g, ">" if f else " ", r["company"][:25], r["title"][:37],
             r["adzuna_date_posted"][:10], r["employer_posted"], true_age))

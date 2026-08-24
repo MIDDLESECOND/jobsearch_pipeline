@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Does lowering DeepSeek V4 Flash's reasoning effort change judgment, or only cost?
 
 V4-Flash defaults to thinking-on at effort "high", and until 2026-08-07 production sent
@@ -29,6 +28,7 @@ Run:  python tests/validation/effort_probe.py [--reps N] [--per-stratum N]
 Needs DEEPSEEK_API_KEY. Writes tests/validation/results/effort_probe_<stamp>.json.
 """
 import argparse
+import io
 import json
 import random
 import sqlite3
@@ -40,10 +40,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

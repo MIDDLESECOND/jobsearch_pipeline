@@ -25,6 +25,7 @@ Output: results/ats_sweep2_20260820.md + ats_sweep2_resolved_20260820.json (for 
 
 Run:  python tests/validation/ats_board_sweep2.py       (~10-15 min, politely paced)
 """
+import io
 import json
 import re
 import sys
@@ -33,10 +34,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE.parents[1]))

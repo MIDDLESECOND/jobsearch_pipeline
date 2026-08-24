@@ -1,8 +1,10 @@
 python-jobspy>=1.1.80
-anthropic>=0.40.0
+anthropic>=0.40.0,<1  # 1.x swaps httpx->httpx2 and is an unverified judge harness; measure before crossing
+httpx>=0.27,<1       # _call_deepseek's transport (evaluation.py) — rode in via anthropic 0.x until 1.x dropped it
 pyyaml>=6.0
 flask>=3.0
 pypdf>=5.0          # application-material PDF text-layer / ATS checks
 pytest>=8.0          # unit tests in tests/ — run: python -m pytest
 pyflakes>=3.0        # static undefined-name gate (tests/test_no_undefined_names.py)
+pyright==1.1.411     # static type gate (tests/test_typecheck.py) — pinned: the gate moves only when the code moves
 msal[broker]>=1.25,<2; platform_system == "Windows"  # Outlook Mail.Read via Windows broker

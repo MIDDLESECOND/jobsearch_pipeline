@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Measure the judge's REAL verdict-flip rate on the production population.
 
 The stratified probes (guide_size_probe, effort_probe) measured a ~17-33% per-draw
@@ -26,6 +25,7 @@ Cost: n x reps x ~$0.0012 (high) — 60x3 ≈ $0.22.
 Writes tests/validation/results/noise_probe_<stamp>.json.
 """
 import argparse
+import io
 import json
 import math
 import random
@@ -38,10 +38,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

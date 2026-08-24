@@ -740,13 +740,17 @@ def _icims_get(url):
 
         _ICIMS_OPENER = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(CookieJar()))
+    # Bound to a local before the closure: _read is called later, so reading the global from
+    # inside it is the Optional the checker sees (and, jar aside, a different opener if
+    # anything ever reassigns it mid-call). Both retries must share this one jar.
+    opener = _ICIMS_OPENER
 
     def _read():
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (jobsearch-pipeline)", "Accept": "text/html"},
         )
-        with _ICIMS_OPENER.open(req, timeout=30) as resp:
+        with opener.open(req, timeout=30) as resp:
             return resp.read().decode("utf-8", "replace")
 
     body = _read()

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Watch the judge's scale for drift: daily fit-score mean, verdict mix, response
 verbosity, and per-eval output tokens.
 
@@ -29,6 +28,7 @@ that stays a human decision recorded in the guide + CHANGELOG.
 Run:  python tests/validation/fit_scale_watch.py [--days N]   (default 21)
 """
 import argparse
+import io
 import re
 import sqlite3
 import statistics
@@ -37,10 +37,8 @@ from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

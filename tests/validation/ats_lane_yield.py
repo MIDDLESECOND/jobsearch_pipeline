@@ -25,15 +25,14 @@ Read-only (sqlite mode=ro — any write raises). No network.
 Run:  python tests/validation/ats_lane_yield.py
 """
 import collections
+import io
 import sqlite3
 import statistics
 import sys
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportAttributeAccessIssue=false
 """Backtest the v2 (split-AI / RECRUITER_ONLY / bucket) prompt against known cases.
 
 Pulls real postings already stored in jobs.db, re-evaluates them through the SAME
@@ -38,16 +37,15 @@ Exit codes: 0 = all anchors measured and matched; 1 = a measured anchor missed i
 expectation (real regression signal); 3 = no mismatches but >=1 case could not be
 measured (infra error after retries — re-run later, nothing known to be broken).
 """
+import io
 import json
 import re
 import sys
 import time
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows console defaults to gbk
 
 # Lives in tests/validation/ but imports the pipeline modules at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

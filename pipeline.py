@@ -65,7 +65,7 @@ from filters import (
     load_filters, save_filters, _pattern_matches, validate_pattern, FILTERS_PATH,
 )
 from evaluation import (evaluate_new_jobs, deepseek_peak_end, in_deepseek_peak,
-                        requeue_error_rows)
+                        peak_overlap_minutes, requeue_error_rows)
 from report import corpus_maps, generate_report
 import second_judge
 from materials import snapshot_jd
@@ -452,23 +452,54 @@ def _cooldown_active(last_ok_iso, now, minutes=COOLDOWN_MINUTES):
         return False
 
 
-def _defer_eval_for_peak(scheduled, cfg, now=None):
+# Predicted eval throughput for the peak-crossing look-ahead, in postings per minute
+# INCLUDING arbitration draws and retry overhead (whole-batch wall measurements from
+# the 2026-08-27 log: 938 rows/~132 min, 591/~80, 384/~59, 254/~42 → 7.1/7.4/6.5/6.0
+# at eval concurrency 6). Deliberately the FLOOR of the measured band: a slow guess
+# predicts long, so a marginal batch defers (hours of latency, $0) rather than
+# crosses (a 2x tail). Re-measure if eval concurrency or the provider changes.
+EVAL_ROWS_PER_MIN = 6.0
+# A predicted overlap this small is cheaper to pay than to defer a whole batch for:
+# 15 min in-window ≈ ~90 rows' tail at the measured rate ≈ ~$0.2 of 2x surcharge on
+# the 2026-08-27 card, against hours of latency for every row in the batch.
+PEAK_CROSS_TOLERANCE_MIN = 15
+
+
+def _defer_eval_for_peak(scheduled, cfg, now=None, pending=0):
     """Scheduled DeepSeek evals sit out the 2x peak-rate windows (evaluation.
     in_deepseek_peak): rows stay 'new' and the next off-peak slot evaluates them.
+    Since 2026-08-27 the gate also looks AHEAD: a batch of `pending` rows whose
+    predicted span (EVAL_ROWS_PER_MIN) would cross INTO a window by more than
+    PEAK_CROSS_TOLERANCE_MIN defers too — the start-instant check alone was
+    falsified by the 00:17 replay of a missed 23:00 slot, whose 938-row eval ran
+    ~100 of ~140 minutes inside the 06-10 UTC window (≈ +$2.7, 2026-08-27 log).
     Only the paid stage waits — fetch/filters/report run normally, so discovery
     freshness is untouched. Manual runs always evaluate (same human-override
     philosophy as the cooldown guard). The provider read mirrors
     evaluate_new_jobs' default: a non-DeepSeek provider has no peak clock, and a
     True here would silently stop its evaluation entirely.
 
-    That default ("anthropic") is spelled in three places — here, _peak_price_note,
-    and evaluation.evaluate_new_jobs, which is the one that actually picks the
-    caller and therefore owns it. Change it there, change it here: a gate reading a
-    different default than the biller would defer runs Anthropic is billing, or bill
-    DeepSeek peak rates this was built to dodge."""
-    return (scheduled
-            and cfg["settings"].get("provider", "anthropic") == "deepseek"
-            and in_deepseek_peak(now))
+    That default ("anthropic") is spelled in four places — here, _peak_price_note,
+    _peak_cross_minutes, and evaluation.evaluate_new_jobs, which is the one that
+    actually picks the caller and therefore owns it. Change it there, change it
+    here: a gate reading a different default than the biller would defer runs
+    Anthropic is billing, or bill DeepSeek peak rates this was built to dodge."""
+    if not (scheduled
+            and cfg["settings"].get("provider", "anthropic") == "deepseek"):
+        return False
+    return (in_deepseek_peak(now)
+            or _peak_cross_minutes(cfg, pending, now) > PEAK_CROSS_TOLERANCE_MIN)
+
+
+def _peak_cross_minutes(cfg, pending, now=None):
+    """Predicted minutes of a `pending`-row eval batch starting now that would bill
+    inside a peak window (evaluation.peak_overlap_minutes over the measured
+    throughput floor). 0 for non-DeepSeek providers and empty batches, so callers
+    can read `> tolerance` without re-spelling the provider guard."""
+    if pending <= 0 or cfg["settings"].get("provider", "anthropic") != "deepseek":
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    return peak_overlap_minutes(now, pending / EVAL_ROWS_PER_MIN)
 
 
 def _peak_price_note(cfg, now=None):
@@ -488,6 +519,24 @@ def _peak_price_note(cfg, now=None):
     return (f"[price] DeepSeek peak-rate window: 2x price for ~{mins} more min. "
             f"This manual run evaluates anyway — to pay half, Ctrl-C and rerun "
             f"after {local_end} local (fetched rows wait as 'new'; nothing is lost)")
+
+
+def _peak_cross_note(cfg, pending, now=None):
+    """The manual-run counterpart of the gate's look-ahead leg: off-peak NOW, but
+    the pending batch is predicted to drag into a window (the 00:17-slot shape).
+    Printed only at eval start — the run-start note site has no row count yet.
+    Returns the message, or None while the span stays clear / inside a window
+    (there _peak_price_note already speaks) / on providers without a peak clock."""
+    if in_deepseek_peak(now):
+        return None
+    mins_over = _peak_cross_minutes(cfg, pending, now)
+    if mins_over <= PEAK_CROSS_TOLERANCE_MIN:
+        return None
+    est = round(pending / EVAL_ROWS_PER_MIN)
+    return (f"[price] {pending} rows ≈ ~{est} min of eval at the measured rate — "
+            f"predicted to cross into DeepSeek's peak-rate window for ~{round(mins_over)} "
+            f"min, and that tail bills 2x. This manual run evaluates anyway; to pay "
+            f"half, Ctrl-C and rerun off-peak (fetched rows wait as 'new')")
 
 
 def main():
@@ -757,18 +806,31 @@ def main():
                 # second_judge._ingested_days — the stage that changed the rows names the
                 # days, the report stage rebuilds exactly those.
                 report_days = {run_date}
-                eval_deferred = _defer_eval_for_peak(args.scheduled, cfg)
+                pending = conn.execute(
+                    "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
+                ).fetchone()[0]
+                eval_deferred = _defer_eval_for_peak(args.scheduled, cfg,
+                                                     pending=pending)
                 if eval_deferred:
-                    waiting = conn.execute(
-                        "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
-                    ).fetchone()[0]
-                    print(f"[eval] deferred: DeepSeek peak-rate window "
-                          f"(UTC 01-04/06-10 on Beijing weekdays, 2x price) — {waiting} "
-                          f"'new' row(s) wait for the next off-peak slot; a manual `run` "
-                          f"evaluates now")
+                    # Two firing modes, two log lines: inside a window (the original
+                    # gate) vs predicted to cross into one (the 2026-08-27 look-ahead)
+                    # — tuning EVAL_ROWS_PER_MIN later needs the log to say which
+                    # mode fired.
+                    if in_deepseek_peak():
+                        print(f"[eval] deferred: DeepSeek peak-rate window "
+                              f"(UTC 01-04/06-10 on Beijing weekdays, 2x price) — "
+                              f"{pending} 'new' row(s) wait for the next off-peak "
+                              f"slot; a manual `run` evaluates now")
+                    else:
+                        cross = _peak_cross_minutes(cfg, pending)
+                        print(f"[eval] deferred: {pending} 'new' row(s) ≈ "
+                              f"~{round(pending / EVAL_ROWS_PER_MIN)} min of eval, "
+                              f"predicted to cross into DeepSeek's peak-rate window "
+                              f"for ~{round(cross)} min (2x price) — rows wait for "
+                              f"the next off-peak slot; a manual `run` evaluates now")
                 else:
                     if not args.scheduled:
-                        note = _peak_price_note(cfg)
+                        note = _peak_price_note(cfg) or _peak_cross_note(cfg, pending)
                         if note:
                             print(note)
                     # GLOB, not a bare substr: a malformed first_seen would otherwise reach

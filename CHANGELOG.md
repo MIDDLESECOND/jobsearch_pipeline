@@ -6,6 +6,56 @@ substantive change. Day-to-day search-term edits in `config.yaml` don't belong h
 changes to *how postings are judged* do.
 
 ---
+## 2026-08-27 — Scheduled evals look AHEAD at the peak window; clearance requirements join the free filter layer
+
+Two cost-side changes out of the day's $0.92 → $8.20 spend audit (2026-07-30 vs today,
+same-methodology recount of the logs). No verdict, scoring, or routing change; one new
+pre-eval reject class.
+
+- **The peak-deferral gate predicts crossings now** (`pipeline._defer_eval_for_peak`
+  gains a `pending` row count; `evaluation.peak_overlap_minutes` is the look-ahead half
+  of the peak clock). The original design said "keep scheduled slots clear of the window
+  edges rather than teaching this to re-check mid-run" — falsified today by its own log:
+  Task Scheduler replayed the missed 23:00 slot at 00:17 with a 938-row backlog, and ~100
+  of its ~140 eval minutes billed inside the 06–10 UTC window (≈ +$2.7 on a $3.62
+  off-peak batch). A late-fired slot cannot be "kept clear" by placement. The gate now
+  defers a scheduled batch whose predicted span (`EVAL_ROWS_PER_MIN` = 6.0, the floor of
+  the four whole-batch wall measurements in today's log: 7.1/7.4/6.5/6.0 at concurrency
+  6) would overlap a window by more than `PEAK_CROSS_TOLERANCE_MIN` = 15 min (≈ $0.2 of
+  tail at the measured rate — cheaper to pay than to hold a whole batch for). Still no
+  mid-run re-check: the decision lands before the first paid call, so a batch is never
+  half-evaluated by the clock. Manual runs still always evaluate; an off-peak manual run
+  with a predicted crossing now gets the `[price]` warning shape at eval start (the
+  in-window warning is unchanged). Deferred-by-crossing prints its own log line — tuning
+  the throughput floor later needs the log to say which mode fired. The weekend exemption
+  reaches the look-ahead per-window (a Friday-night span into Saturday's window crosses
+  into nothing; a Sunday-night span into Monday's does), pinned by tests both ways.
+  21 new tests (987 total), including the tolerance boundary asserted with different
+  outcomes on each side (05:45 runs / 05:46 defers).
+- **`filters.yaml` gains `clearance_required` (gate `work_auth`)** — three
+  requirement-shaped regexes ("active/current … clearance", "… clearance (is) required",
+  "must/ability to obtain … clearance"). Clearance effectively requires citizenship, so
+  for an EAD holder these rows carry zero recall value and the judge GATE_FAILs them
+  anyway; this stops paying it to say so. Measured before shipping on 45 days / 80,350
+  rows: 987 distinct matches (~22/day, ~1 in 6 of `work_auth` GATE_FAILs), 775 of them
+  paid GATE_FAIL evals, and **zero matches at fit ≥ 13** (the 2 PASS + 1 RO matches all
+  sat at fit ≤ 12, below every action bar) — no measured false kill. Deliberately NOT
+  bare substrings: "security clearance"/"citizenship" alone would false-kill "does not
+  require a security clearance" and EEO boilerplate (both pinned as surviving in the
+  smoke test); "TS/SCI preferred" also survives to the judge. Worth ~$1.5–2/month — the
+  audit's estimate of $5–10 was wrong because clearance phrasings turn out to be a
+  sixth of `work_auth` failures, not most of them. Rule text lives in the gitignored
+  `filters.yaml`; delete the rule to reverse (pre-eval filters touch `status='new'` only).
+
+Not done, decided against or deferred with reasons, same audit: the three low-yield
+Adzuna tracks stay (78% of their fit≥13 admits are Adzuna-unique, 5 applied chains
+originated there incl. an Adzuna-exclusive legal-tech vendor, and the track family
+produced 1 of the 2 interview chains — cutting recall to save ~$30/month inverts the
+standing recall-first preference); the arbitration band moves only after a fresh
+`flip_consequence` run (fire rate measured 26.6% this week vs the ~20% design baseline —
+that instrument doubles as the drift watch, so rerun it before touching the band).
+
+---
 ## 2026-08-23 — Code review of the 08-19→08-22 batch: two silent-death holes in the iCIMS reader, and three claims that had gone false
 
 **No verdict, score, routing, filter, or schema change.** A max-effort review of the

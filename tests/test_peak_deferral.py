@@ -6,7 +6,12 @@ Fail directions differ by half: a wrong False costs one eval batch at 2x price (
 a wrong True merely delays rows to the next off-peak slot — EXCEPT when it fires for a
 non-DeepSeek provider or a manual run, where "defer" has no later slot with different
 economics and would silently stop evaluation. Those two must stay False, and the wiring
-tests pin that the deferred cycle still reports and still stamps the cooldown."""
+tests pin that the deferred cycle still reports and still stamps the cooldown.
+
+Since 2026-08-27 the gate also looks AHEAD (evaluation.peak_overlap_minutes over the
+pending row count): a batch predicted to drag INTO a window defers before its first paid
+call — the shape that billed a 938-row batch's ~100-minute tail at 2x when Task Scheduler
+replayed a missed 23:00 slot at 00:17. Same fail directions, same manual/provider outs."""
 
 import contextlib
 import sys
@@ -16,8 +21,9 @@ from conftest import make_job
 from core import meta_get
 import pipeline
 import report
-from evaluation import deepseek_peak_end, in_deepseek_peak
-from pipeline import _defer_eval_for_peak, _peak_price_note
+from evaluation import deepseek_peak_end, in_deepseek_peak, peak_overlap_minutes
+from pipeline import (EVAL_ROWS_PER_MIN, PEAK_CROSS_TOLERANCE_MIN,
+                      _defer_eval_for_peak, _peak_cross_note, _peak_price_note)
 
 
 def _utc(h, m=0):
@@ -86,6 +92,48 @@ def test_weekend_is_the_beijing_weekend_not_the_local_one():
     assert in_deepseek_peak(datetime(2026, 8, 30, 20, 30, tzinfo=cdt)) is True    # Sun
 
 
+# ----------------------------------------------------- the look-ahead (2026-08-27)
+# peak_overlap_minutes: how much of [start, start+minutes) lands inside a window.
+
+def test_overlap_zero_when_span_stays_clear():
+    assert peak_overlap_minutes(_utc(4, 10), 60) == 0.0        # the [4,6) gap
+
+
+def test_overlap_counts_only_the_in_window_tail():
+    # 05:00 + 120 min ends 07:00 — the 00:17-slot shape: off-peak start, 2x tail.
+    assert peak_overlap_minutes(_utc(5), 120) == 60.0
+
+
+def test_overlap_full_span_inside_a_window():
+    assert peak_overlap_minutes(_utc(6, 30), 60) == 60.0
+
+
+def test_overlap_stops_at_the_window_close():
+    assert peak_overlap_minutes(_utc(9, 30), 120) == 30.0
+
+
+def test_overlap_sums_both_windows():
+    # 00:30 + 10h spans [1,4) whole (180) and [6,10) whole (240).
+    assert peak_overlap_minutes(_utc(0, 30), 600) == 420.0
+
+
+def test_overlap_crosses_midnight_into_the_next_days_window():
+    # Thu 23:30 + 120 min ends Fri 01:30 — Friday's [1,4) is live.
+    assert peak_overlap_minutes(_utc(23, 30), 120) == 30.0
+
+
+def test_overlap_window_weekday_is_the_windows_own_day_not_the_spans():
+    # Fri 23:30 → Sat 01:30: the span starts on a weekday but the window it would
+    # hit belongs to Beijing Saturday — off-peak, nothing to cross into.
+    assert peak_overlap_minutes(_on(28, 23, 30), 120) == 0.0
+    # Sun 23:30 → Mon 01:30: span starts on the weekend, the window is Monday's.
+    assert peak_overlap_minutes(_on(30, 23, 30), 120) == 30.0
+
+
+def test_overlap_weekend_window_contributes_nothing():
+    assert peak_overlap_minutes(_on(29, 5), 300) == 0.0        # Sat 05:00–10:00
+
+
 # --------------------------------------------------------------------- the gate
 
 PEAK = _utc(2)
@@ -125,6 +173,50 @@ def test_gate_missing_provider_defaults_anthropic():
     assert _defer_eval_for_peak(True, {"settings": {}}, PEAK) is False
 
 
+# ------------------------------------------------- the gate's look-ahead leg
+
+CLEAR_5AM = _utc(5)                     # off-peak, one hour before the [6,10) window
+BIG = 900                               # 150 min at the 6.0 floor — deep crossing
+SMALL = 90                              # 15 min — finishes before the window opens
+
+
+def test_gate_scheduled_crossing_batch_defers():
+    assert _defer_eval_for_peak(True, _cfg(), CLEAR_5AM, pending=BIG) is True
+
+
+def test_gate_batch_that_finishes_before_the_window_runs():
+    assert _defer_eval_for_peak(True, _cfg(), CLEAR_5AM, pending=SMALL) is False
+
+
+def test_gate_crossing_tolerance_boundary():
+    # 180 rows = 30 min. Starting 05:45 the span overlaps [6,10) by exactly the
+    # 15-min tolerance (run); one minute later it overlaps 16 (defer). The two
+    # sides of the boundary must land on DIFFERENT outcomes.
+    assert PEAK_CROSS_TOLERANCE_MIN == 15          # the literal the pair encodes
+    assert _defer_eval_for_peak(True, _cfg(), _utc(5, 45), pending=180) is False
+    assert _defer_eval_for_peak(True, _cfg(), _utc(5, 46), pending=180) is True
+
+
+def test_gate_crossing_manual_never_defers():
+    assert _defer_eval_for_peak(False, _cfg(), CLEAR_5AM, pending=BIG) is False
+
+
+def test_gate_crossing_other_provider_unaffected():
+    assert _defer_eval_for_peak(True, _cfg("anthropic"), CLEAR_5AM, pending=BIG) is False
+
+
+def test_gate_crossing_into_a_weekend_window_runs():
+    # Sat 05:00 + 150 min would sit inside [6,10) — but Saturday bills off-peak,
+    # so there is nothing to dodge and deferral would only delay the rows.
+    assert _defer_eval_for_peak(True, _cfg(), _on(29, 5), pending=BIG) is False
+
+
+def test_gate_no_pending_keeps_the_start_instant_meaning():
+    # pending defaults to 0: callers without a row count get exactly the old gate.
+    assert _defer_eval_for_peak(True, _cfg(), CLEAR_5AM) is False
+    assert _defer_eval_for_peak(True, _cfg(), PEAK) is True
+
+
 # ------------------------------------------------------------- the manual note
 
 def test_note_in_peak_names_price_and_exit():
@@ -151,11 +243,33 @@ def test_note_other_provider_is_silent():
     assert _peak_price_note({"settings": {}}, PEAK) is None
 
 
+def test_cross_note_manual_crossing_names_the_tail():
+    note = _peak_cross_note(_cfg(), BIG, CLEAR_5AM)
+    assert note is not None and "[price]" in note
+    assert "2x" in note and "cross" in note
+    assert f"~{round(BIG / EVAL_ROWS_PER_MIN)} min" in note
+
+
+def test_cross_note_silent_when_the_span_stays_clear():
+    assert _peak_cross_note(_cfg(), SMALL, CLEAR_5AM) is None
+
+
+def test_cross_note_silent_inside_a_window():
+    # In-window is _peak_price_note's job; two [price] lines for one eval would
+    # read as two problems.
+    assert _peak_cross_note(_cfg(), BIG, PEAK) is None
+
+
+def test_cross_note_silent_for_other_provider_and_empty_batch():
+    assert _peak_cross_note(_cfg("anthropic"), BIG, CLEAR_5AM) is None
+    assert _peak_cross_note(_cfg(), 0, CLEAR_5AM) is None
+
+
 # ------------------------------------------------------------------ the wiring
 # Same harness as test_cooldown.py: drive the real main() run branch with every stage
 # stubbed; the peak clock is patched, not mocked time.
 
-def _drive_run(conn, monkeypatch, argv, peak):
+def _drive_run(conn, monkeypatch, argv, peak, cross=None):
     calls = []
 
     def fetcher(label):
@@ -188,6 +302,12 @@ def _drive_run(conn, monkeypatch, argv, peak):
         pipeline, "deepseek_peak_end",
         lambda now=None: (datetime.now(timezone.utc) + timedelta(minutes=30))
         if peak else None)
+    if cross is not None:
+        # The look-ahead leg, pinned to a constant overlap — the row count still
+        # comes from the real pending query, so a cross value only bites when the
+        # test actually inserted 'new' rows.
+        monkeypatch.setattr(pipeline, "peak_overlap_minutes",
+                            lambda start, minutes: cross)
     monkeypatch.setattr(sys, "argv", ["pipeline.py"] + argv)
     pipeline.main()
     return calls
@@ -290,3 +410,33 @@ def test_evaluated_run_is_not_marked_deferred(conn, monkeypatch):
     row = conn.execute("SELECT eval_deferred FROM pipeline_runs "
                        "ORDER BY id DESC LIMIT 1").fetchone()
     assert row["eval_deferred"] == 0
+
+
+# ------------------------------------------------- the look-ahead through the wiring
+
+
+def test_wiring_scheduled_offpeak_crossing_defers_before_the_first_paid_call(
+        conn, monkeypatch, capsys):
+    # The 00:17 shape end to end: off-peak clock, rows waiting, predicted overlap
+    # far past tolerance — the cycle completes, reports its own day, marks the run
+    # deferred, and the log line names the CROSSING mode (not the in-window one).
+    _waiting_row(conn, YESTERDAY)
+    calls = _drive_run(conn, monkeypatch, ["run", "--scheduled"], peak=False,
+                       cross=120.0)
+    out = capsys.readouterr().out
+    assert "evaluate_new_jobs" not in calls
+    assert "[eval] deferred" in out and "cross" in out
+    assert "[price]" not in out                      # the human warning is manual-only
+    assert [c for c in calls if c.startswith("report:")] == [f"report:{TODAY}"]
+    row = conn.execute("SELECT status, eval_deferred FROM pipeline_runs "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["status"] == "succeeded" and row["eval_deferred"] == 1
+
+
+def test_wiring_manual_offpeak_crossing_warns_once_and_evaluates(
+        conn, monkeypatch, capsys):
+    _waiting_row(conn, YESTERDAY)
+    calls = _drive_run(conn, monkeypatch, ["run"], peak=False, cross=120.0)
+    out = capsys.readouterr().out
+    assert "evaluate_new_jobs" in calls              # warned, never blocked
+    assert out.count("[price]") == 1 and "cross" in out

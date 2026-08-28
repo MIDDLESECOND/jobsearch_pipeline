@@ -313,9 +313,18 @@ Windows Task Scheduler.
   local-clock schedule would drift into peak at every DST change — and the weekend
   exemption is read on the Beijing calendar (UTC+8, no DST), which inside these windows
   is the UTC date.
+  Since 2026-08-27 the same gate also looks AHEAD (`evaluation.peak_overlap_minutes`
+  over the pending row count and a measured-throughput floor,
+  `pipeline.EVAL_ROWS_PER_MIN`): a batch predicted to drag INTO a window by more than a
+  small tolerance defers too. The start-instant check alone was falsified the day Task
+  Scheduler replayed a missed 23:00 slot at 00:17 local with a 938-row backlog — ~100 of
+  its ~140 eval minutes billed inside the 06–10 UTC window (≈ +$2.7) — so "keep slots
+  clear of the window edges" is not a placement problem the schedule can solve. There is
+  still no mid-run re-check: the look-ahead decides before the first paid call.
   Manual runs and non-DeepSeek providers always evaluate; a manual run inside the window
   gets a `[price]` warning (at run start and again at eval start) naming when off-peak
-  resumes on the local clock, but is never blocked.
+  resumes on the local clock — and since 2026-08-27 an off-peak manual run whose batch is
+  predicted to cross gets the same warning shape at eval start — but is never blocked.
   Because a row can now be fetched on one calendar day and evaluated by a run whose
   `run_date` is the next one, **the report stage rebuilds the days the run's rows belong to,
   not just `run_date`**: the eval stage collects the `first_seen` day of every row it is

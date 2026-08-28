@@ -366,10 +366,15 @@ MODEL_PRICES = {
 # is the calendar it is written in; inside today's windows (09:00–18:00 Beijing) the
 # Beijing date IS the UTC date, so the two frames cannot disagree — the Beijing read
 # exists so a window that ever straddles Beijing midnight (16:00 UTC) is still judged
-# on the billing day. Checked once at eval-stage start, not per request: a batch that
-# starts off-peak and drags across a boundary pays peak for its tail, so keep
-# scheduled slots clear of the window edges rather than teaching this to re-check
-# mid-run.
+# on the billing day. Checked once at eval-stage start, not per request — but since
+# 2026-08-27 the start check looks AHEAD (peak_overlap_minutes + the pending row count
+# pipeline._defer_eval_for_peak passes in). The first version of this comment said
+# "keep scheduled slots clear of the window edges" instead; that answer was falsified
+# the day Task Scheduler replayed a missed 23:00 slot at 00:17 local with a 938-row
+# backlog: ~100 of its ~140 eval minutes landed inside the 06-10 UTC window (≈ +$2.7,
+# 2026-08-27 log) — a slot fired late by the scheduler cannot be "kept clear" of
+# anything. There is still deliberately no mid-run re-check: the look-ahead decides
+# before the first paid call, so a batch is never half-evaluated by the clock.
 DEEPSEEK_PEAK_HOURS_UTC = ((1, 4), (6, 10))  # [start, end) hour windows
 DEEPSEEK_CALENDAR = timezone(timedelta(hours=8))  # Beijing: the weekend rule's calendar
 
@@ -396,6 +401,30 @@ def deepseek_peak_end(now=None):
         if lo <= now.hour < hi:
             return now.replace(hour=hi, minute=0, second=0, microsecond=0)
     return None
+
+
+def peak_overlap_minutes(start, minutes):
+    """Minutes of the span [start, start+minutes) that fall inside peak windows —
+    the look-ahead half of the peak clock (deepseek_peak_end answers "am I in one
+    NOW", this answers "how much of a batch starting now would land in one").
+    `start`: aware datetime, any tz — same contract as in_deepseek_peak. Reads the
+    window table and the weekend rule through the SAME constants; each window's
+    weekday is judged at the window's own start, which inside every window is the
+    same Beijing-calendar read deepseek_peak_end makes (windows never straddle
+    midnight UTC, so a window has one date)."""
+    start = start.astimezone(timezone.utc)
+    end = start + timedelta(minutes=minutes)
+    total = timedelta(0)
+    day = start.date()
+    while day <= end.date():
+        for lo, hi in DEEPSEEK_PEAK_HOURS_UTC:
+            ws = datetime(day.year, day.month, day.day, lo, tzinfo=timezone.utc)
+            if ws.astimezone(DEEPSEEK_CALENDAR).weekday() >= 5:
+                continue
+            we = ws.replace(hour=hi)
+            total += max(min(end, we) - max(start, ws), timedelta(0))
+        day += timedelta(days=1)
+    return total / timedelta(minutes=1)
 
 # Claude 5-era models reject any non-default `temperature` outright. This is an
 # ALLOWLIST of the older ids that still accept it, not a denylist of the ones that

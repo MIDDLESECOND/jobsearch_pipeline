@@ -1004,6 +1004,162 @@ def test_icims_cookie_wall_that_clears_on_the_retry_still_succeeds(monkeypatch):
     assert bodies == []                          # both reads consumed
 
 
+# Verbatim from a captured healthy search page (2026-08-24, careers-cravath, cookieless
+# 200, one message occurrence): the portal ships the cookie message on EVERY page as an
+# inert display:none template that client JS un-hides only when cookies truly fail. Probed
+# the same day, this markup is byte-identical on all 12 configured tenants and on both
+# builds in the fleet (183.4.0 and 186.3.1), so it is not one build's quirk — and the
+# 2026-08-20 capture of staffcareers-mcguirewoods already carried it on a healthy 20-card
+# page, four days before the blackout. The bare substring detector read it as a persisted
+# interstitial and failed all 12 boards at once (last success run 87, every board failed
+# from run 89 through run 96 that day).
+ICIMS_HIDDEN_COOKIE_TEMPLATE = (
+    '<div id="iCIMS_NoCookiesMessage" class="iCIMS_ErrorMsg iCIMS_ErrorMessage '
+    'iCIMS_NoCookies" style="display: none">\n'
+    '<div class="iCIMS_ErrorMsgTitle">Please Enable Cookies to Continue</div>\n'
+    'Please enable cookies in your browser to experience all the personalized features '
+    'of this site, including the ability to apply for a job.</div>')
+
+
+def test_icims_hidden_cookie_template_on_healthy_page_is_not_the_wall(monkeypatch):
+    # The 2026-08-24 outage shape: a healthy listings page whose only cookie-message
+    # occurrence is the inert hidden template. Must read as content on the FIRST attempt —
+    # no retry burned, no ValueError, cards still reachable.
+    calls = []
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            return _FakeResp(ICIMS_HIDDEN_COOKIE_TEMPLATE + ICIMS_LIST_PAGE)
+
+    monkeypatch.setattr(fetch, "_ICIMS_OPENER", _Opener())
+    body = fetch._icims_get("https://careers-cravath.icims.com/jobs/search?pr=0")
+    assert "iCIMS_JobCardItem" in body
+    assert len(calls) == 1                       # healthy page: the retry stays unspent
+
+
+def test_icims_cookie_template_rendered_visible_still_raises(monkeypatch):
+    # The template shown instead of hidden — the shape a build would serve if it moved the
+    # reveal back to the server. Hypothetical: no such page has been captured. Flipping the
+    # value rather than deleting the attribute is presentation, not rigor (measured, both
+    # constructions land on the same "one message, nothing explains it" input), but it reads
+    # as the page a build would emit. Must still be the wall: loud, never success/0.
+    visible = ICIMS_HIDDEN_COOKIE_TEMPLATE.replace('style="display: none"',
+                                                   'style="display: block"')
+    calls = []
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            return _FakeResp(visible)
+
+    monkeypatch.setattr(fetch, "_ICIMS_OPENER", _Opener())
+    with pytest.raises(ValueError, match="cookie interstitial persisted"):
+        fetch._icims_get("https://careers-cravath.icims.com/jobs/search?pr=0")
+    assert len(calls) == 2                       # the retry ran before the failure
+
+
+def test_icims_wall_beside_the_hidden_template_still_raises(monkeypatch):
+    # The other side of the count boundary, and the likelier wall on these builds: the page
+    # keeps the boilerplate hidden template AND carries a second, visible copy of the same
+    # component. Two occurrences, one hidden template to explain them -> wall. This is the
+    # ONLY case that proves `explained` is SUBTRACTED rather than merely checked for zero:
+    # mutate the comparison to `_icims_explained_copies(body) == 0` and every other test in
+    # this file still passes.
+    wall = (ICIMS_HIDDEN_COOKIE_TEMPLATE
+            + '<div class="iCIMS_ErrorMsg"><div class="iCIMS_ErrorMsgTitle">'
+              'Please Enable Cookies to Continue</div></div>')
+    calls = []
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            return _FakeResp(wall)
+
+    monkeypatch.setattr(fetch, "_ICIMS_OPENER", _Opener())
+    with pytest.raises(ValueError, match="cookie interstitial persisted"):
+        fetch._icims_get("https://careers-cravath.icims.com/jobs/search?pr=0")
+    assert len(calls) == 2
+
+
+def test_icims_hidden_template_markup_variants_are_not_the_wall():
+    # NOT invented external evidence: every variant below is the SAME captured template
+    # rewritten the ways HTML lets you write it — attribute order, quoting, a trailing
+    # semicolon, a second style property. A byte-exact matcher calls each one a wall and
+    # takes all 12 boards dark, which is the outage this detector exists to end, so the
+    # tolerance is the behaviour under test.
+    open_tag = ('<div id="iCIMS_NoCookiesMessage" class="iCIMS_NoCookies" '
+                'style="display: none">')
+    for variant in (
+        open_tag.replace('style="display: none"', "style='display:none'"),
+        open_tag.replace('style="display: none"', 'style="display: none;"'),
+        open_tag.replace('style="display: none"', 'style="color:red;display:none"'),
+        open_tag.replace('style="display: none"', 'style="display:none"'),
+        ('<div style="display: none" class="iCIMS_NoCookies" '
+         'id="iCIMS_NoCookiesMessage">'),
+        "<div id='iCIMS_NoCookiesMessage' style='display: none'>",
+    ):
+        page = (variant + '<div class="iCIMS_ErrorMsgTitle">'
+                'Please Enable Cookies to Continue</div></div>' + ICIMS_LIST_PAGE)
+        assert fetch._icims_interstitial(page) is False, variant
+
+    # The hiding MECHANISM is deliberately not generalized: an unobserved way of hiding the
+    # template reads as a wall (loud) rather than as content (silent zero).
+    unhidden = ('<div id="iCIMS_NoCookiesMessage" class="iCIMS_NoCookies" hidden>'
+                '<div class="iCIMS_ErrorMsgTitle">'
+                'Please Enable Cookies to Continue</div></div>')
+    assert fetch._icims_interstitial(unhidden + ICIMS_LIST_PAGE) is True
+
+
+# A real wall: the message rendered for real, with no inert template to account for it.
+ICIMS_VISIBLE_WALL = ('<div class="iCIMS_ErrorMsg"><div class="iCIMS_ErrorMsgTitle">'
+                      'Please Enable Cookies to Continue</div></div>')
+
+
+def test_icims_lookalike_divs_cannot_absorb_a_wall():
+    # Every decoy here earned a "hidden template" credit in this fix's first draft, and ONE
+    # unearned credit is all it takes to absorb a real wall's copy and log success/0 — the
+    # loosening that bought tolerance for harmless markup variation also bought this, which
+    # is why the tolerant direction has to be pinned too. Adversarial inputs, not a claim
+    # about captured markup; the id-prefix pair is the one with a real argument behind it,
+    # since this platform names its own parts iCIMS_ErrorMsgTitle / iCIMS_JobsTable and a
+    # wrapper/title split is therefore the likely next shape.
+    #
+    # The wall goes INSIDE the decoy element, and that placement is the whole test. With the
+    # wall outside, the decoy is an empty element that earns nothing whether or not the
+    # regexes match it — the assertions pass identically against maximally-loosened regexes
+    # (measured: 0 of 7 guards pinned) and pin nothing. Inside, a decoy that IS mistaken for
+    # a template explains the message it now contains and the wall goes quiet, so each
+    # assertion fails on exactly one side of its guard (7 of 7).
+    for decoy in (
+        '<div id="iCIMS_NoCookiesMessageTitle" style="display:none">',       # id is a PREFIX
+        '<div id="iCIMS_NoCookiesMessage_v2" style="display:none">',
+        '<div data-id="iCIMS_NoCookiesMessage" style="display:none">',       # not the id attr
+        '<div id="iCIMS_NoCookiesMessage" data-style="display:none">',       # not style attr
+        '<div id="iCIMS_NoCookiesMessage" style="color:red;--display:none">',  # custom prop
+        '<div id="iCIMS_NoCookiesMessage" style="display:none-such">',       # not the value
+        '<div id="icims_nocookiesmessage" style="display:none">',            # ids are cased
+    ):
+        assert fetch._icims_interstitial(decoy + ICIMS_VISIBLE_WALL + "</div>") is True, decoy
+        # ...and the same element with the REAL id/style does absorb it — the other side of
+        # every guard above, so none of these assertions can pass by accident.
+    real = '<div id="iCIMS_NoCookiesMessage" style="display:none">'
+    assert fetch._icims_interstitial(real + ICIMS_VISIBLE_WALL + "</div>") is False
+
+
+def test_icims_template_credit_is_earned_by_a_message_not_by_a_tag():
+    # A template div containing no message explains no message. Crediting one per matching
+    # TAG let an empty template — or one whose </div> never arrives, so its extent is
+    # unknown — hand its credit to a wall standing right beside it.
+    empty = '<div id="iCIMS_NoCookiesMessage" style="display:none"></div>'
+    unclosed = '<div id="iCIMS_NoCookiesMessage" style="display:none">'
+    assert fetch._icims_interstitial(empty + ICIMS_VISIBLE_WALL) is True
+    assert fetch._icims_interstitial(unclosed + ICIMS_VISIBLE_WALL) is True
+    # The captured template does contain one, and explains exactly that one — the other side
+    # of the same boundary, on the same page shape.
+    assert fetch._icims_interstitial(ICIMS_HIDDEN_COOKIE_TEMPLATE + ICIMS_LIST_PAGE) is False
+
+
 def test_icims_page_cap_warns_instead_of_silently_truncating(conn, monkeypatch, capsys):
     # No silent caps, the rule _workday_rows already enforces. A portal that keeps serving
     # full pages of NEW ids past ICIMS_MAX_PAGES must say the tail went unread — otherwise a

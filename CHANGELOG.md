@@ -56,6 +56,71 @@ standing recall-first preference); the arbitration band moves only after a fresh
 that instrument doubles as the drift watch, so rerun it before touching the band).
 
 ---
+## 2026-08-24 — The cookie guard added yesterday took all 12 iCIMS boards dark; the detector now counts what the page's own template explains
+
+**No verdict, score, routing, filter, or schema change.** The entry below logged `_icims_get`
+learning to raise on a surviving "Please Enable Cookies" interstitial. Its detector was a
+bare substring test, and iCIMS ships that message on every HEALTHY page inside a
+`display:none` template div — so from run 89 (03:17 UTC) all 12 configured law-firm boards
+failed `parse_or_validation` on every run through run 96, ~22 hours, while
+`pipeline_fetch_attempts` recorded exactly what it should and nothing read it. Last healthy
+run was 87, 00:13–00:17 UTC. 966 tests pass (7 new); every new behavioral test was
+mutation-checked, and the two guards that turned out NOT to be are why half this entry exists.
+
+- **The build story was wrong, and getting it right changed the fix.** The obvious reading —
+  a new platform build introduced the template that morning — is refuted by the repo's own
+  08-20 probe capture: staffcareers-mcguirewoods was already `platform_183.4.0.260723` and
+  already carried the div, on a healthy 20-card page, four days earlier. Nothing about the
+  markup was new. What changed is WHERE it is served: the message now returns on the cookie'd
+  retry as well as the cold first read, so the retry stopped clearing it. Why the boards ran
+  fine for three days is inferred and cannot be checked retroactively; the docstring says so
+  rather than asserting the tidy version. Keying anything to "183.4.0" would also have been
+  wrong — three tenants (ropesgray, willkie, ebglaw) serve 186.3.1 with identical markup.
+- **The detector counts copies, not strings.** A page is the wall when it carries more copies
+  of the message than its inert templates account for — counted INSIDE each hidden template's
+  own element, so a template containing no message explains no message. The first draft
+  credited one per matching TAG, which let an empty
+  `<div id="iCIMS_NoCookiesMessage" style="display:none"></div>` hand its credit to a real
+  wall standing beside it. An unbalanced template earns nothing: its extent is unknown, and
+  the convenient guess (run to end of document) swallows exactly the copy this must notice.
+- **Loosening a matcher is how you buy a fail-open, and this fix bought one before review
+  caught it.** Widening the id match to tolerate quoting variants made it a PREFIX match, so
+  `iCIMS_NoCookiesMessageTitle` and `..._Wrapper` earned template credit — and this platform
+  names its own parts `iCIMS_ErrorMsgTitle`/`iCIMS_JobsTable`, which makes a wrapper/title
+  split the likely next shape and two credits for one message an absorbed wall. Every
+  tolerance is now bounded on the side that would let a template claim more than it is: the
+  id ends where the name ends, the id VALUE stays case-sensitive (HTML ids are) while tag and
+  attribute names do not, attribute and property names must be whole words (`data-id=`,
+  `data-style=`, `--display:none`), and the value must be `none`, not `none-such`. The hiding
+  MECHANISM is deliberately not generalized — a build that hides the template some other way
+  fails CLOSED, loud, rather than silently reading a wall as content.
+- **Seven adversarial assertions that pinned nothing.** The test written to pin those guards
+  put its decoy element beside the wall instead of around it, so each decoy was empty and
+  earned nothing whether or not the regexes matched it: measured, all seven passed
+  identically against maximally-loosened regexes — 0 of 7 guards pinned, the exact failure
+  the third test rule in AGENTS.md names. With the wall inside the decoy, 7 of 7 pin, and
+  each of the five regex guards is now killed by a mutation.
+- **KNOWN LIMIT, stated instead of papered over.** On these builds a cookie refusal is
+  undetectable here: the reveal is client-side, so those server bytes are a healthy page's
+  minus the cards — which is also what a genuinely empty board looks like, and no marker
+  separates them (`iCIMS_JobsTable`, `iCIMS_ListingsPage`, and even the literal "No Results"
+  all ship on card-bearing pages). No stored fact would catch it either: `returned_count`
+  counts genuinely-NEW postings, so it has been zero on all but 9 of 277 iCIMS attempts —
+  flat-at-zero is what HEALTHY looks like here. The first draft named that column as the
+  fallback evidence channel, which was simply false.
+- **`tests/validation/icims_template_probe.py`** re-measures the claim the detector rests on
+  — template byte-identical across tenants and builds — against the live fleet, and names any
+  tenant that drifted or is about to go dark. First recorded run: 12/12 healthy, 12/12
+  byte-identical, two builds.
+- **Not fixed, and not this bug: `careers-willkie` is still dark.** Its listing page serves
+  cards whose hrefs point at `uscareers-willkie.icims.com` while the configured slug derives
+  `careers-willkie`, so the origin guard drops all 7 and the page-0 shape guard raises — that
+  guard working exactly as designed (cards present, none readable → loud, not an empty
+  board). `uscareers-willkie` was probed and reads all 7, including a Knowledge & Innovation
+  Attorney seat, but changing a board slug rewrites its stored urls: a config decision, not a
+  parser fix.
+
+---
 ## 2026-08-23 — Code review of the 08-19→08-22 batch: two silent-death holes in the iCIMS reader, and three claims that had gone false
 
 **No verdict, score, routing, filter, or schema change.** A max-effort review of the

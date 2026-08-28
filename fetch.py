@@ -722,6 +722,109 @@ ICIMS_MAX_PAGES = 25   # 500 postings/board — a bound, not a target
 
 _ICIMS_OPENER = None
 
+_ICIMS_COOKIE_MSG = "Please Enable Cookies"
+# The inert copy of the cookie message the portal ships on every HEALTHY page: a
+# display:none template div that client-side JS un-hides only when document.cookie actually
+# fails. Platform boilerplate, byte-identical across all 12 configured tenants and across
+# BOTH builds in the fleet (2026-08-24: nine on platform_183.4.0.260723, with
+# careers-ropesgray/careers-willkie/careers-ebglaw on 186.3.1) — so it is not one build's
+# novelty and must not be keyed to a build number. That reading is a re-runnable
+# measurement, not a one-time assertion: tests/validation/icims_template_probe.py takes it
+# against the live fleet and names any tenant whose template has drifted.
+#
+# The div is matched STRUCTURALLY rather than byte-exactly, and that is the whole lesson of
+# the outage below: attribute order, single quotes, a trailing semicolon and extra style
+# properties are all free variation this platform may emit tomorrow, and under a byte-exact
+# match every one of them reads as a wall and takes all 12 boards dark again. What is
+# deliberately NOT generalized is the hiding MECHANISM: only the observed inline
+# display:none counts as hidden, so a later build that hides the template some other way (a
+# `hidden` attribute, a CSS class) fails CLOSED — loud, and fixed in a day — not open.
+#
+# Every loosening is bounded on the side that would let a template claim MORE than it is,
+# because a credit it did not earn is a credit that absorbs a real wall's copy. Adversarial
+# review of this fix's own first draft supplied each boundary: the id must END where the
+# name ends (`iCIMS_NoCookiesMessageTitle` and `..._Wrapper` earned credit off a prefix
+# match, and this platform's naming style — `iCIMS_ErrorMsgTitle`, `iCIMS_JobsTable` —
+# makes that wrapper/title split the likely next shape); the id VALUE stays case-sensitive
+# because HTML ids are, while tag and attribute names do not; names must be whole words, so
+# `data-id=`, `data-style=` and the CSS custom property `--display:none` cannot pose as the
+# real thing; and the value must be `none`, not `none-such`.
+_ICIMS_NOCOOKIES_DIV = re.compile(
+    r'<div\b[^>]*(?<![-\w])id=["\']?(?-i:iCIMS_NoCookiesMessage)(?=["\'\s>])[^>]*>', re.I)
+_ICIMS_DISPLAY_NONE = re.compile(
+    r'(?<![-\w])style\s*=\s*["\'][^"\']*(?<![-\w])display\s*:\s*none(?![-\w])', re.I)
+_ICIMS_DIV_TOKEN = re.compile(r"</?div\b", re.I)
+
+
+def _icims_explained_copies(body):
+    """How many copies of the cookie message the page's INERT hidden templates contain.
+
+    Counted INSIDE each hidden template's own element rather than one credit per matching
+    tag, because a credit no message was actually spent on is a credit left over to absorb a
+    real wall's copy: while this was tag-counted, an empty
+    `<div id="iCIMS_NoCookiesMessage" style="display:none"></div>` sitting beside a visible
+    refusal made the page read as healthy. Counting inside the element also makes the
+    "one template explains one occurrence" claim something the code enforces instead of
+    something a comment asserts about markup nobody has captured.
+
+    A template whose `</div>` never arrives earns nothing. Its extent is unknown, and the
+    convenient guess — run to the end of the document — is the one that swallows whatever
+    follows it, which is exactly the wall copy this is meant to notice."""
+    total = 0
+    for m in _ICIMS_NOCOOKIES_DIV.finditer(body):
+        if not _ICIMS_DISPLAY_NONE.search(m.group(0)):
+            continue
+        depth, pos = 1, m.end()
+        while depth:
+            tok = _ICIMS_DIV_TOKEN.search(body, pos)
+            if not tok:
+                break
+            depth += -1 if tok.group(0)[1] == "/" else 1
+            pos = tok.end()
+        if not depth:
+            total += body.count(_ICIMS_COOKIE_MSG, m.end(), pos)
+    return total
+
+
+def _icims_interstitial(body):
+    """True when the page carries more cookie-message copies than its inert template explains.
+
+    A bare `"Please Enable Cookies" in body` was the detector until 2026-08-24, when all 12
+    iCIMS boards failed together (pipeline_fetch_attempts: last success run 87, 00:13–00:17
+    UTC; every board failed from run 89, 03:17–03:20 UTC, and stayed failed through run 96).
+    The tempting story is that a new build introduced the hidden template that morning. It
+    did not: the 2026-08-20 probe capture of staffcareers-mcguirewoods is already
+    platform_183.4.0.260723 and already carries the div on a healthy 20-card page, four days
+    before the blackout. What changed is WHERE the message is served: measured 2026-08-24,
+    the div comes back on a cold jar and a warm one alike, so the retry can no longer clear
+    it. Why the boards nevertheless ran fine for three days is INFERRED and cannot be
+    checked retroactively — the only mechanism that fits is that the message used to reach
+    the cookieless first read only, leaving the retry (jar warmed by
+    icimsCookiesEnabledCheck) clean and quietly spending a second request per page. Treat
+    that half as a hypothesis; the two dated captures above are the facts.
+
+    A hidden template explains the copies of the message it actually CONTAINS (on today's
+    fleet, one — its ErrorMsgTitle line; the sentence below it is lower-case and does not
+    match). An occurrence no template accounts for — the message with no hidden template at
+    all (the pre-template wall), or a second copy beside one (the same component rendered
+    visible) — is the wall, and still raises.
+
+    KNOWN LIMIT, deliberately not papered over: on these builds a cookie refusal is
+    un-detectable here, because the reveal is client-side. Those server bytes are a healthy
+    page's bytes minus the job cards, which is also what a genuinely empty board looks like
+    (jobs-mayerbrown served exactly that shape on 2026-08-24), and no marker separates them —
+    iCIMS_JobsTable, iCIMS_ListingsPage and even the literal "No Results" all ship on
+    card-bearing pages too. Such a page therefore reads as an empty board, and NO stored
+    fact would catch it either: pipeline_fetch_attempts.returned_count counts genuinely-new
+    postings (known urls are skipped before the detail fetch), so it has been zero on all
+    but 9 of 277 iCIMS attempts — flat-at-zero is what a HEALTHY board looks like here, and
+    a silent refusal is invisible in it. The listed-card count that WOULD show it is not
+    recorded anywhere. Do not restore a broader message test to chase it: that is the exact
+    trade that cost 12 boards a day of coverage."""
+    if _ICIMS_COOKIE_MSG not in body:
+        return False
+    return body.count(_ICIMS_COOKIE_MSG) > _icims_explained_copies(body)
+
 
 def _icims_get(url):
     """One iCIMS page fetch — HTML, not JSON, hence not _ats_get. Same explicit UA rule
@@ -731,7 +834,9 @@ def _icims_get(url):
     Cookie handling: some tenants (careers-sidley, jobs-mayerbrown — a per-tenant setting)
     answer the first cookieless request with a "Please Enable Cookies" interstitial whose
     Set-Cookie is the whole test. A shared in-process cookie jar plus ONE retry when the
-    interstitial is detected clears it; no login, no credentials, still logged-out."""
+    interstitial is detected clears it; no login, no credentials, still logged-out.
+    What counts as the interstitial is _icims_interstitial's call — every healthy page
+    carries the same message inert and must not burn the retry."""
     global _ICIMS_OPENER
     import urllib.request
 
@@ -754,9 +859,9 @@ def _icims_get(url):
             return resp.read().decode("utf-8", "replace")
 
     body = _read()
-    if "Please Enable Cookies" in body:
+    if _icims_interstitial(body):
         body = _read()                    # the jar now holds the interstitial's cookie
-        if "Please Enable Cookies" in body:
+        if _icims_interstitial(body):
             # The retry IS the cookie test, so a second interstitial means the wall did not
             # clear -- and this is the only place that fact is still legible. Returning it
             # hands the interstitial to _icims_cards, which finds no cards; the caller's

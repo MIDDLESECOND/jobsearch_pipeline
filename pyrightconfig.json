@@ -1,6 +1,15 @@
 {
   "typeCheckingMode": "basic",
   "pythonVersion": "3.12",
+  // Pinned for the same reason as pythonVersion: left unset, pyright reads the platform
+  // off whichever host it runs on, so identical code + config returned 0 errors on the
+  // Windows dev box and 1 on the ubuntu CI job (ctypes.windll, which typeshed declares
+  // only under win32). That split is what let 6970655 -- the commit whose whole point was
+  // running this gate BEFORE the push -- go green locally and red on CI: a pre-push gate
+  // stands in for CI only if the two reach the same verdict. Windows is the deployment
+  // target (Task Scheduler, the .bat wrappers, setx, the MessageBoxTimeoutW doorbell), so
+  // it is the platform the gate should judge -- and now judges from every runner.
+  "pythonPlatform": "Windows",
   // linkedin/ is in-repo but gitignored (post working folders), so CI never checks it
   // out; scanning it locally would fail the gate on files CI cannot see. An explicit
   // exclude replaces pyright's defaults, so those are re-listed.

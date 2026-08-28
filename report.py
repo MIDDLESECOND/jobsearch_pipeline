@@ -90,7 +90,8 @@ def generate_report(cfg, conn, for_date=None, *, maps=None):
     # Rows still awaiting the paid eval when this rendered. NO bucket above can hold them
     # (each selects on a verdict or a terminal status), so the headline count would exceed
     # the sections' sum with nothing saying why. Used to mean "the eval crashed"; since the
-    # peak-rate deferral (pipeline._defer_eval_for_peak) it is a normal twice-a-day state.
+    # peak-rate deferral (pipeline._defer_eval_for_peak) it is a normal state around the
+    # peak windows — a slot inside one, or (2026-08-27) a batch predicted to cross into one.
     # Transient by design: `run` rebuilds this day's report once these rows are evaluated,
     # and the line disappears — an unexplained gap must never be the resting state.
     awaiting = [r for r in rows if r["status"] == STATUS_NEW]

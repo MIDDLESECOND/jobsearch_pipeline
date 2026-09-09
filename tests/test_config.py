@@ -85,3 +85,25 @@ def test_bool_is_not_a_number():
     cfg["settings"]["hours_old"] = True  # YAML `hours_old: yes` — a real footgun
     with pytest.raises(ValueError, match="hours_old"):
         core.validate_config(cfg)
+
+
+def test_corpus_mode_knobs_are_type_checked():
+    # Both optional: absent passes; the right types pass; the wrong ones are collected.
+    cfg = _valid()
+    cfg["settings"]["evaluate"] = False
+    cfg["settings"]["eval_max_age_days"] = 14
+    assert core.validate_config(cfg) is cfg
+    cfg = _valid()
+    cfg["settings"]["evaluate"] = "false"      # a truthy string would silently evaluate
+    cfg["settings"]["eval_max_age_days"] = 0   # nothing could ever be inside the window
+    with pytest.raises(ValueError) as e:
+        core.validate_config(cfg)
+    msg = str(e.value)
+    assert "settings.evaluate should be true or false" in msg
+    assert "settings.eval_max_age_days should be a positive whole number" in msg
+    for bad in ("14", 14.5, True):
+        cfg = _valid()
+        cfg["settings"]["eval_max_age_days"] = bad
+        with pytest.raises(ValueError, match="eval_max_age_days"):
+            core.validate_config(cfg)
+

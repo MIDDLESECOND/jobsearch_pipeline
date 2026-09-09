@@ -24,7 +24,12 @@ authoritative sequence):
     skip_evaluated_reposts     NEW member of an
                                evaluated chain     -> REPOST_EVALUATED (reversed on unlink while
                                undecided; details in chain.skip_evaluated_reposts)
+    apply_age_valve            NEW first seen more
+                               than settings.
+                               eval_max_age_days ago -> AGED_OUT  (terminal; corpus mode — runs
+                               AFTER the forward skips on purpose, see filters.apply_age_valve)
     evaluate_new_jobs          remaining NEW       -> EVALUATED | NEEDS_MANUAL | ERROR
+                               (skipped entirely under settings.evaluate: false)
     reject (manual override)   a never-evaluated row
                                (NEW or REPOST_EVALUATED) -> RULE_FILTERED (undone if never evaluated)
 
@@ -52,9 +57,13 @@ STATUS_RULE_FILTERED = "rule_filtered"
 STATUS_REPOST_DECIDED = "repost_decided"
 STATUS_REPOST_EVALUATED = "repost_evaluated"
 STATUS_ERROR = "error"
+# Corpus-mode valve (filters.apply_age_valve, 2026-09-09): a 'new' row first seen more than
+# settings.eval_max_age_days ago when the eval stage is reached is aged out of the paid eval
+# for good. Terminal — no stage reads it back; the row stays as fetched evidence only.
+STATUS_AGED_OUT = "aged_out"
 STATUSES = (STATUS_NEW, STATUS_EVALUATED, STATUS_NEEDS_MANUAL, STATUS_SALARY_FILTERED,
             STATUS_RULE_FILTERED, STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED,
-            STATUS_ERROR)
+            STATUS_ERROR, STATUS_AGED_OUT)
 
 VERDICT_PASS = "PASS"
 VERDICT_GATE_FAIL = "GATE_FAIL"

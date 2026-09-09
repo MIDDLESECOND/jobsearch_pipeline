@@ -347,6 +347,18 @@ def validate_config(cfg):
     if prefix and isinstance(model, str) and not model.startswith(prefix):
         errors.append(f"settings.provider '{provider}' expects a '{prefix}-*' model, "
                       f"got '{model}'")
+    # Corpus-mode knobs (2026-09-09), both optional. `evaluate: false` runs the fetch and
+    # the zero-cost stages and skips the paid eval; `eval_max_age_days` is the valve that
+    # ages 'new' rows out of the eval window for good (filters.apply_age_valve). A wrong
+    # type here would either silently evaluate (a truthy string like "false") or crash in
+    # the valve's date arithmetic after the fetch — caught pre-spend like the rest.
+    ev = s.get("evaluate")
+    if ev is not None and not isinstance(ev, bool):
+        errors.append(f"settings.evaluate should be true or false, got {ev!r}")
+    age = s.get("eval_max_age_days")
+    if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 1):
+        errors.append("settings.eval_max_age_days should be a positive whole number of "
+                      f"days, got {age!r}")
     searches = cfg.get("searches")
     if not isinstance(searches, list):
         errors.append("`searches:` must be a list (it may be empty for an ATS-only setup)")

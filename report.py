@@ -21,7 +21,7 @@ from health import failed_fetch_targets, staleness_readings
 from second_judge import opinion_summaries
 from states import (VERDICT_PASS, VERDICT_GATE_FAIL, VERDICT_RECRUITER_ONLY, VERDICT_FAVOR,
                     STATUS_NEEDS_MANUAL, STATUS_NEW, STATUS_ERROR, STATUS_SALARY_FILTERED,
-                    STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED)
+                    STATUS_REPOST_DECIDED, STATUS_REPOST_EVALUATED, STATUS_AGED_OUT)
 
 
 def generate_report(cfg, conn, for_date=None, *, maps=None):
@@ -95,6 +95,10 @@ def generate_report(cfg, conn, for_date=None, *, maps=None):
     # Transient by design: `run` rebuilds this day's report once these rows are evaluated,
     # and the line disappears — an unexplained gap must never be the resting state.
     awaiting = [r for r in rows if r["status"] == STATUS_NEW]
+    # Corpus mode (2026-09-09): rows the age valve parked for good. Same "no bucket above
+    # can hold them" logic as `awaiting`, but the opposite lifetime — this count is a
+    # resting state, so it names itself as never-evaluated rather than as waiting.
+    aged_out = [r for r in rows if r["status"] == STATUS_AGED_OUT and not r["filter_source"]]
     lines = [f"# Job Pipeline Report — {d}", ""]
     # The health warning renders at the very top: this report is the ONE surface a human
     # reads every day, and the 2026-08-18 seam audit showed a dead schedule (a missing log
@@ -117,6 +121,7 @@ def generate_report(cfg, conn, for_date=None, *, maps=None):
         f"{len(manual)} need manual review | {len(salary_filtered)} salary-filtered | "
         f"{len(hard_filtered)} hard-filtered | {len(repost_skipped) + len(repost_evaluated)} repost-skipped | {len(errors)} errors"
         + (f" | **{len(awaiting)} awaiting evaluation**" if awaiting else "")
+        + (f" | {len(aged_out)} aged out (never evaluated)" if aged_out else "")
     )
     if reposts:
         n = len(reposts)

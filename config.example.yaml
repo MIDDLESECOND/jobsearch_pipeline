@@ -27,6 +27,15 @@ settings:
   # the wait (no quality change — same model/prompt/routing). 6 is a safe default;
   # raise cautiously (higher risks provider rate-limits / 429s). 1 = fully serial.
   eval_concurrency: 6
+  # Corpus mode (2026-09-09): keep fetching at zero API cost and skip the paid eval.
+  #   evaluate: false       -> fetch + free filters + report still run; no LLM calls. Rows
+  #                            stay 'new' (the report says "N awaiting evaluation").
+  #   eval_max_age_days: 14 -> a 'new' row first seen more than N days ago is aged out of
+  #                            the eval for good (status 'aged_out'), so flipping evaluate
+  #                            back on bills only the last N days, never the whole backlog.
+  # Both optional; absent = evaluate everything, forever (the pre-2026-09-09 behavior).
+  # evaluate: true
+  # eval_max_age_days: 14
   max_description_chars: 12000
   db_path: "jobs.db"
   reports_dir: "reports"

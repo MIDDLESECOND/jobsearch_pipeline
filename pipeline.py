@@ -61,7 +61,7 @@ from health import (
     start_pipeline_run,
 )
 from filters import (
-    apply_salary_filter, apply_hard_filters,
+    apply_salary_filter, apply_hard_filters, apply_age_valve,
     load_filters, save_filters, _pattern_matches, validate_pattern, FILTERS_PATH,
 )
 from evaluation import (evaluate_new_jobs, deepseek_peak_end, in_deepseek_peak,
@@ -721,9 +721,14 @@ def main():
         #   skip_evaluated_reposts (fwd)   'new' relisting of an evaluated role -> 'repost_evaluated'
         #                                  (after the decided pass — a user decision is the more
         #                                  informative skip reason when both apply)
+        #   apply_age_valve                'new' first seen > settings.eval_max_age_days ago -> 'aged_out'
+        #                                  (corpus mode; AFTER the forward skips on purpose — the
+        #                                  one exception to the rule two lines down, so a relisting
+        #                                  becomes repost_* before age may park it; no-op unset)
         #   evaluate_new_jobs              remaining 'new'        -> 'evaluated' | 'needs_manual' | 'error'
         #                                  (--scheduled + DeepSeek sits out the 2x peak-rate
-        #                                  window: rows stay 'new' for the next off-peak slot)
+        #                                  window: rows stay 'new' for the next off-peak slot;
+        #                                  settings.evaluate: false skips this stage outright)
         # A new pre-eval filter must mirror this: set a non-'new' status so evaluate_new_jobs skips it.
         # run_log tees this whole cycle into the day's logs/pipeline-YYYY-MM-DD.log so a manual
         # terminal run is captured like a scheduled one (the .bat no longer redirects — that
@@ -794,6 +799,12 @@ def main():
                 skip_decided_reposts(conn, restore=False)
                 stage = "skip_evaluated_reposts"
                 skip_evaluated_reposts(conn, restore=False)
+                # Corpus-mode valve, AFTER the forward skips on purpose (the one exception
+                # to "new pre-eval filters run before them" — filters.apply_age_valve says
+                # why): a relisting must be able to become repost_decided/repost_evaluated
+                # before age is allowed to park it. No-op without eval_max_age_days.
+                stage = "age_valve"
+                apply_age_valve(cfg, conn)
                 stage = "evaluation"
                 # Which days' reports this cycle can change. run_date always — but ALSO the
                 # first_seen day of every row this run is about to evaluate, read BEFORE the
@@ -809,37 +820,49 @@ def main():
                 pending = conn.execute(
                     "SELECT count(*) FROM jobs WHERE status=?", (STATUS_NEW,)
                 ).fetchone()[0]
-                eval_deferred = _defer_eval_for_peak(args.scheduled, cfg,
-                                                     pending=pending)
-                if eval_deferred:
-                    # Two firing modes, two log lines: inside a window (the original
-                    # gate) vs predicted to cross into one (the 2026-08-27 look-ahead)
-                    # — tuning EVAL_ROWS_PER_MIN later needs the log to say which
-                    # mode fired.
-                    if in_deepseek_peak():
-                        print(f"[eval] deferred: DeepSeek peak-rate window "
-                              f"(UTC 01-04/06-10 on Beijing weekdays, 2x price) — "
-                              f"{pending} 'new' row(s) wait for the next off-peak "
-                              f"slot; a manual `run` evaluates now")
-                    else:
-                        cross = _peak_cross_minutes(cfg, pending)
-                        print(f"[eval] deferred: {pending} 'new' row(s) ≈ "
-                              f"~{round(pending / EVAL_ROWS_PER_MIN)} min of eval, "
-                              f"predicted to cross into DeepSeek's peak-rate window "
-                              f"for ~{round(cross)} min (2x price) — rows wait for "
-                              f"the next off-peak slot; a manual `run` evaluates now")
+                if not cfg["settings"].get("evaluate", True):
+                    # Fetch-only (corpus) mode, CHANGELOG 2026-09-09: the paid stage is
+                    # switched OFF in config, not deferred — rows stay 'new' until the age
+                    # valve above parks them. Deliberately NOT recorded as eval_deferred:
+                    # that column means "runs at the next off-peak slot", and a health read
+                    # that counted every corpus-mode run as a deferral would drown the
+                    # peak-window signal it exists for. The evidence is this log line plus
+                    # the report's "N awaiting evaluation" count.
+                    eval_deferred = False
+                    print(f"[eval] disabled (settings.evaluate: false) — {pending} 'new' "
+                          f"row(s) kept unevaluated as corpus; set evaluate: true to resume")
                 else:
-                    if not args.scheduled:
-                        note = _peak_price_note(cfg) or _peak_cross_note(cfg, pending)
-                        if note:
-                            print(note)
-                    # GLOB, not a bare substr: a malformed first_seen would otherwise reach
-                    # generate_report's date parser and abort the run at the report stage.
-                    report_days |= {d for (d,) in conn.execute(
-                        "SELECT DISTINCT substr(first_seen,1,10) FROM jobs WHERE status=? "
-                        "AND first_seen GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'",
-                        (STATUS_NEW,))}
-                    evaluate_new_jobs(cfg, conn)
+                    eval_deferred = _defer_eval_for_peak(args.scheduled, cfg,
+                                                         pending=pending)
+                    if eval_deferred:
+                        # Two firing modes, two log lines: inside a window (the original
+                        # gate) vs predicted to cross into one (the 2026-08-27 look-ahead)
+                        # — tuning EVAL_ROWS_PER_MIN later needs the log to say which
+                        # mode fired.
+                        if in_deepseek_peak():
+                            print(f"[eval] deferred: DeepSeek peak-rate window "
+                                  f"(UTC 01-04/06-10 on Beijing weekdays, 2x price) — "
+                                  f"{pending} 'new' row(s) wait for the next off-peak "
+                                  f"slot; a manual `run` evaluates now")
+                        else:
+                            cross = _peak_cross_minutes(cfg, pending)
+                            print(f"[eval] deferred: {pending} 'new' row(s) ≈ "
+                                  f"~{round(pending / EVAL_ROWS_PER_MIN)} min of eval, "
+                                  f"predicted to cross into DeepSeek's peak-rate window "
+                                  f"for ~{round(cross)} min (2x price) — rows wait for "
+                                  f"the next off-peak slot; a manual `run` evaluates now")
+                    else:
+                        if not args.scheduled:
+                            note = _peak_price_note(cfg) or _peak_cross_note(cfg, pending)
+                            if note:
+                                print(note)
+                        # GLOB, not a bare substr: a malformed first_seen would otherwise reach
+                        # generate_report's date parser and abort the run at the report stage.
+                        report_days |= {d for (d,) in conn.execute(
+                            "SELECT DISTINCT substr(first_seen,1,10) FROM jobs WHERE status=? "
+                            "AND first_seen GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'",
+                            (STATUS_NEW,))}
+                        evaluate_new_jobs(cfg, conn)
                 stage = "report"
                 # The corpus-wide evidence maps are day-independent, so a multi-day rebuild
                 # scans the table once, not once per day (report.corpus_maps).

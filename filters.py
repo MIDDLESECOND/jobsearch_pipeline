@@ -10,12 +10,13 @@ enter the DB and the paid eval, not just which rules fire.
 
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import yaml
 
 from core import BASE_DIR
-from states import STATUS_NEW, STATUS_SALARY_FILTERED, STATUS_RULE_FILTERED, VERDICT_GATE_FAIL
+from states import (STATUS_NEW, STATUS_SALARY_FILTERED, STATUS_RULE_FILTERED,
+                    STATUS_AGED_OUT, VERDICT_GATE_FAIL)
 
 FILTERS_PATH = BASE_DIR / "filters.yaml"
 
@@ -177,3 +178,43 @@ def apply_hard_filters(cfg, conn):
     conn.commit()
     if filtered:
         print(f"[filter] {filtered} postings auto-failed by hard rules (eval skipped, cost saved)")
+
+
+# -------------------------------------------------------------- age valve (corpus mode)
+
+def apply_age_valve(cfg, conn, now=None):
+    """Corpus-mode valve: a 'new' row first seen more than settings.eval_max_age_days ago
+    when the eval stage is reached is stamped AGED_OUT and never evaluated. Setting absent
+    or null = no valve (every 'new' row waits for the eval, as before). Built 2026-09-09
+    for fetch-only operation (settings.evaluate: false): the JD corpus keeps growing at
+    zero API cost, and when evaluation is switched back on only the rows inside the window
+    are billed — without this valve, re-enabling the eval would bill the whole accumulated
+    backlog in one run (~450 eval-eligible rows/day at Sep-2026 volume).
+
+    Placement is the ONE deliberate exception to "a new pre-eval filter runs BEFORE the
+    forward skip passes": this valve runs AFTER them, immediately before the eval. Age is
+    the least informative reason to park a row — a relisting of an applied role must
+    become repost_decided (the re-apply guard reads that status), and a relisting of an
+    evaluated role must become repost_evaluated (the chain verdict reads it). Both passes
+    select 'new' rows, so a valve stamping first would hide those rows from them.
+
+    The cutoff is on first_seen — the ONE trustworthy age here: date_posted is re-stamped
+    by aggregators (measured: every Adzuna row arrives "posted within 3 days") and is NULL
+    for iCIMS — and is strictly "older than N days": a row first seen exactly N days ago
+    is still inside the window. Reversal is deliberately not offered: the setting's
+    contract is "never", and the rows stay in the DB as fetched evidence
+    (title/company/location/JD), which is the point of running fetch-only at all."""
+    days = (cfg.get("settings") or {}).get("eval_max_age_days")
+    if days is None:
+        return 0
+    now = now or datetime.now()
+    cutoff = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    cur = conn.execute(
+        "UPDATE jobs SET status=? WHERE status=? AND first_seen < ?",
+        (STATUS_AGED_OUT, STATUS_NEW, cutoff),
+    )
+    conn.commit()
+    if cur.rowcount:
+        print(f"[age-valve] {cur.rowcount} 'new' posting(s) first seen more than {days} days "
+              f"ago aged out of the eval window (never evaluated; kept as corpus)")
+    return cur.rowcount

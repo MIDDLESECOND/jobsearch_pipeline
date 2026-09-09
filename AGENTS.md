@@ -343,7 +343,18 @@ Windows Task Scheduler.
   wins order-independently — its forward pass upgrades `repost_evaluated` rows — and the
   restore-before-filters order is behaviorally pinned by tests). A new
   pre-eval filter must set a non-`new` status, mirroring the existing salary/hard-filter passes,
-  and must run BEFORE the forward skip passes so their reconciles see its stamps. All four
+  and must run BEFORE the forward skip passes so their reconciles see its stamps.
+  The ONE exception is the corpus-mode age valve (`filters.apply_age_valve`, 2026-09-09):
+  it runs AFTER the forward skips, immediately before the eval, because age is the least
+  informative reason to park a row — a stale relisting must still become `repost_decided`
+  (the re-apply guard) or `repost_evaluated` before it may be aged out. Corpus mode itself is
+  two optional settings: `evaluate: false` skips the paid stage outright (rows stay `new`;
+  logged, and deliberately NOT recorded as `eval_deferred`, which means "runs at the next
+  off-peak slot"), and `eval_max_age_days: N` stamps `new` rows first seen more than N days
+  ago `aged_out` for good, so switching evaluation back on bills only the last N days, never
+  the backlog. The cutoff reads `first_seen`, never `date_posted` (re-stamped by aggregators,
+  NULL for iCIMS). `run_reminder.bat` is the scheduler-side half: message-box check-ins so
+  the corpus gets re-pointed and actually analyzed instead of silently accumulating. All four
   fetchers (`fetch_new_jobs` for LinkedIn, then `fetch_adzuna`, then `fetch_ats`, then
   `fetch_dice`) run first and only
   insert `status='new'` rows, so everything downstream is source-agnostic — the `source` column is

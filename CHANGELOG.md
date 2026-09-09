@@ -6,6 +6,49 @@ substantive change. Day-to-day search-term edits in `config.yaml` don't belong h
 changes to *how postings are judged* do.
 
 ---
+## 2026-09-09 — Corpus mode: fetch-only operation with an age valve; Adzuna dropped from the searches
+
+The search is ending (a signed offer is imminent), but the fetched JD corpus is worth
+keeping for the next move: skill demand, titles, salary bands. Evaluation is about the
+candidate, not the market, so the paid stage is what stops. No verdict, scoring, or routing
+change; one new terminal status.
+
+- **`settings.evaluate: false`** (optional, default true) skips the paid eval outright.
+  Fetch, the free filters, both skip passes, and the report still run; rows stay `new` and
+  the report's "N awaiting evaluation" line says so. Logged as
+  `[eval] disabled (settings.evaluate: false)`; deliberately NOT recorded in
+  `pipeline_runs.eval_deferred`, whose meaning is "runs at the next off-peak slot".
+- **`settings.eval_max_age_days: N`** (optional, default unlimited) is the valve: at the eval
+  stage, `new` rows first seen more than N days ago become **`aged_out`** (new
+  `states.STATUS_AGED_OUT`, so CHECK-bearing DBs rebuild once at next open) and are never
+  evaluated. Without it, flipping `evaluate` back on would bill the entire accumulated
+  backlog; with N=14 the re-entry bill is ~14 × ~450 eval-eligible rows × ~$0.004 ≈ $25.
+  Cutoff on `first_seen` (strictly older than N days), never `date_posted`.
+  **Placement is the one exception to "new pre-eval filters run before the forward skip
+  passes"**: the valve runs AFTER them, so a stale relisting of an applied role becomes
+  `repost_decided` (the re-apply guard) rather than `aged_out`. Pinned behaviorally: the
+  same two rows come out differently if the valve is moved ahead of the skips.
+- **Adzuna removed from all nine searches** (config.yaml; the API block and the fetcher stay).
+  Measured over the last 30 days: 39,060 rows at 500 characters each, 36% PASS against
+  LinkedIn's 23% (the judge cannot see gates in a snippet), `date_posted` within 3 days on
+  100% of rows (re-stamped, so useless for timing), and Lensa-style company/title artifacts
+  in the mix. Its one unique asset is stated salary on 13.6% of rows vs LinkedIn's 6.3% —
+  not enough to carry a skill-demand corpus. During the active search it earned its place
+  (33 applied chains, 2 recruiter screens, Consilio was Adzuna-only); that argument does not
+  survive the search.
+- **`run_reminder.bat`** + two Task Scheduler entries (`JobSearchReminder-BayArea`, one-shot
+  2026-11-01: re-point the searches to the Bay Area and revisit Adzuna;
+  `JobSearchReminder-Quarterly`, Jan/Apr/Jul/Oct 4th from 2027: run the demand analysis over
+  the corpus, building the script if it does not exist yet). The message text lives in the
+  .bat behind two keywords because schtasks caps a task's command at 261 characters. A corpus
+  nobody reads is a pile; the reminders are the other half of this entry.
+
+Operational sequence: `evaluate` stays true until the offer is signed; then flip it, and
+disable the doorbell (`JobSearchSecondJudge`) and canary (`jobsearch-canary`) tasks. The
+daily pipeline task keeps running; backups keep running (the corpus grows ~200 MB/month).
+8 new tests.
+
+---
 ## 2026-09-09 — DeepSeek V4.1 Flash announced: price card updated, judge swap pending confirmation
 
 DeepSeek's 2026-09-09 email: V4.1 Flash ships around 2026-09-10 (Beijing), and from

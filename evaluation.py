@@ -327,19 +327,24 @@ def normalize_result(result):
 # _ensure_api_key (used by both the Adzuna fetch and the eval) moved to core.py (re-imported above).
 
 
-# (input cache-miss, output) USD per token. DeepSeek repriced effective 2026-08-16
-# 16:00 UTC and now bills clock-dependent rates, so these entries are the OFF-PEAK
-# card. Off-peak is the honest default here because --scheduled runs deliberately sit
-# out the peak windows (pipeline._defer_eval_for_peak); a manual run inside
-# 01:00-04:00 / 06:00-10:00 UTC on a Beijing weekday pays 2x and this line under-reports
-# it by that factor.
-# Flash carries the values the 2026-08-17 invoice reconciliation closed to the cent
-# (0.22 uncached in / 0.007 cache hit / 0.66 out per 1M). Pro is DERIVED from the
-# published multiplier chart (one decimal: x1.5 uncached in, x2.3 out on the old list),
-# so it is an estimate rather than a card reading — it only moves the cost line if
-# someone actually runs Pro. Cache-hit input is ~$0.007/1M for flash (auto-cached
-# prefix), still far below the 0.1x the tally assumes — so the DeepSeek cost line
-# stays a slight over-estimate on the cache leg, which is the safe direction.
+# (input cache-miss, output) USD per token. DeepSeek bills clock-dependent rates since
+# 2026-08-16 16:00 UTC, so these entries are the OFF-PEAK card. Off-peak is the honest
+# default here because --scheduled runs deliberately sit out the peak windows
+# (pipeline._defer_eval_for_peak); a manual run inside 01:00-04:00 / 06:00-10:00 UTC on a
+# Beijing weekday pays 2x and this line under-reports it by that factor.
+# Flash carries the V4.1-Flash card DeepSeek announced by email on 2026-09-09, effective
+# 2026-09-10 04:00 UTC (0.15 uncached in / 0.003 cache hit / 0.60 out per 1M; peak 2x,
+# windows unchanged). No effective-date gate, same as the 08-16 repricing: the cost line
+# is a log estimate, and the runs between this edit and the cutover are mispriced by
+# ~10% on one day. The previous card (0.22 / 0.007 / 0.66) was the one the 2026-08-17
+# invoice reconciliation closed to the cent; the new one is an ANNOUNCEMENT reading
+# until the first invoice under it is reconciled. Pro is set EQUAL to Flash on purpose:
+# the same email routes every Pro request to V4.1 Flash at Flash's price until V4.1 Pro
+# ships, so a Pro entry that still said x1.5/x2.3 would over-bill anyone who runs it.
+# Cache-hit input is 0.003/1M (0.02x the uncached rate); the tally still assumes 0.1x,
+# so the DeepSeek cost line stays a slight over-estimate on the cache leg, which is the
+# safe direction — and on this pipeline's mix (Sep 2026: ~96% of spend is output
+# tokens) the cache leg barely moves the total anyway.
 MODEL_PRICES = {
     "claude-sonnet-4-6":          (3.0 / 1e6, 15.0 / 1e6),
     "claude-haiku-4-5":           (1.0 / 1e6, 5.0 / 1e6),
@@ -349,8 +354,8 @@ MODEL_PRICES = {
     "claude-sonnet-5":            (3.0 / 1e6, 15.0 / 1e6),
     "claude-opus-5":              (5.0 / 1e6, 25.0 / 1e6),
     "claude-fable-5":             (10.0 / 1e6, 50.0 / 1e6),
-    "deepseek-v4-flash":          (0.22 / 1e6, 0.66 / 1e6),
-    "deepseek-v4-pro":            (0.653 / 1e6, 2.00 / 1e6),
+    "deepseek-v4-flash":          (0.15 / 1e6, 0.60 / 1e6),
+    "deepseek-v4-pro":            (0.15 / 1e6, 0.60 / 1e6),  # routed to V4.1 Flash, see above
 }
 
 # DeepSeek bills clock-dependent rates from 2026-08-17 (same pricing page): peak =

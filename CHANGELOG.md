@@ -6,6 +6,29 @@ substantive change. Day-to-day search-term edits in `config.yaml` don't belong h
 changes to *how postings are judged* do.
 
 ---
+## 2026-09-09 — DeepSeek V4.1 Flash announced: price card updated, judge swap pending confirmation
+
+DeepSeek's 2026-09-09 email: V4.1 Flash ships around 2026-09-10 (Beijing), and from
+2026-09-10 04:00 UTC the Flash card is $0.15 uncached in / $0.003 cache hit / $0.60 out per
+1M (off-peak; peak stays 2x on the unchanged 01–04 / 06–10 UTC weekday windows), with every
+Pro request routed to V4.1 Flash at Flash's price until V4.1 Pro ships. No verdict, scoring,
+or routing change here; two things recorded.
+
+- **`evaluation.MODEL_PRICES`**: Flash 0.22/0.66 → 0.15/0.60; Pro set equal to Flash for
+  the routing period. Peak gate untouched (windows and 2x multiplier unchanged). On the
+  current token mix output is ~96% of spend, so the card alone is worth about −11% per row
+  (2026-09-09's run: $1.47 → $1.30 at real cache rates), not the −32% the input line suggests.
+- **The judge may already have moved before the announcement.** Production output tokens per
+  call held 3.0–3.3k from 08-10 through 09-01 and stepped to 3.8–4.1k from 09-04 on (+25%,
+  every day since); the 09-07 canary alerted (paired fit −1.56 over 9 sentinels, token median
+  ×1.81, verdict agreement 70%). Both readings are consistent with an in-place cutover of the
+  `deepseek-v4-flash` endpoint — the 07-31 and 08-13 precedent — but neither proves it; the
+  0731 build was also still drifting on its own. At +25% output the announced card is a net
+  cost INCREASE of ~+14% per row versus August, not a cut. Confirmation plan: canary after the
+  04:00 UTC cutover, then `noise_probe`/`backtest_v2` per the canary's own instructions;
+  `--rebaseline` only after the new judge is accepted. A confirmed swap gets its own entry.
+
+---
 ## 2026-08-27 — Scheduled evals look AHEAD at the peak window; clearance requirements join the free filter layer
 
 Two cost-side changes out of the day's $0.92 → $8.20 spend audit (2026-07-30 vs today,

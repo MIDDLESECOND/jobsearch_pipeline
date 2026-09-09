@@ -93,7 +93,9 @@ def generate_report(cfg, conn, for_date=None, *, maps=None):
     # peak-rate deferral (pipeline._defer_eval_for_peak) it is a normal state around the
     # peak windows — a slot inside one, or (2026-08-27) a batch predicted to cross into one.
     # Transient by design: `run` rebuilds this day's report once these rows are evaluated,
-    # and the line disappears — an unexplained gap must never be the resting state.
+    # and the line disappears — an unexplained gap must never be the resting state. Under
+    # corpus mode (settings.evaluate: false, 2026-09-09) it is instead a bounded resting
+    # state: rows wait here until the age valve parks them as aged_out, counted next.
     awaiting = [r for r in rows if r["status"] == STATUS_NEW]
     # Corpus mode (2026-09-09): rows the age valve parked for good. Same "no bucket above
     # can hold them" logic as `awaiting`, but the opposite lifetime — this count is a

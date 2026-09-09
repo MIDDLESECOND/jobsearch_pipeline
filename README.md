@@ -89,7 +89,7 @@ One module per stage, importing strictly downward (a one-way DAG — no circular
 | `posting_store.py` | shared normalized insertion for fetched and manual postings |
 | `intake.py` | validated, explicit local intake of externally found roles |
 | `outlook_shadow.py` | exact-sender Outlook job-alert scan and report-only DB comparison |
-| `filters.py` | deterministic pre-eval filters (salary, hard rules) |
+| `filters.py` | deterministic pre-eval filters (salary, hard rules, corpus-mode age valve) |
 | `fetch.py` | the four sources: LinkedIn, Adzuna, ATS boards, Dice |
 | `evaluation.py` | the LLM gate-check: prompt, providers, hard routing caps, arbitration |
 | `second_judge.py` | second-opinion review over the actionable zone (Batch API, never re-routes) |

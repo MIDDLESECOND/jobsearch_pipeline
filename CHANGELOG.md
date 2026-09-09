@@ -8,7 +8,7 @@ changes to *how postings are judged* do.
 ---
 ## 2026-09-09 — Corpus mode: fetch-only operation with an age valve; Adzuna dropped from the searches
 
-The search is ending (a signed offer is imminent), but the fetched JD corpus is worth
+The active search is ending, but the fetched JD corpus is worth
 keeping for the next move: skill demand, titles, salary bands. Evaluation is about the
 candidate, not the market, so the paid stage is what stops. No verdict, scoring, or routing
 change; one new terminal status.
@@ -34,7 +34,7 @@ change; one new terminal status.
   100% of rows (re-stamped, so useless for timing), and Lensa-style company/title artifacts
   in the mix. Its one unique asset is stated salary on 13.6% of rows vs LinkedIn's 6.3% —
   not enough to carry a skill-demand corpus. During the active search it earned its place
-  (33 applied chains, 2 recruiter screens, Consilio was Adzuna-only); that argument does not
+  (33 applied chains, 2 recruiter screens, one of them Adzuna-only); that argument does not
   survive the search.
 - **`run_reminder.bat`** + two Task Scheduler entries (`JobSearchReminder-BayArea`, one-shot
   2026-11-01: re-point the searches to the Bay Area and revisit Adzuna;

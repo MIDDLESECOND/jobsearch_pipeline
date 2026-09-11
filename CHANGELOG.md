@@ -6,6 +6,41 @@ substantive change. Day-to-day search-term edits in `config.yaml` don't belong h
 changes to *how postings are judged* do.
 
 ---
+## 2026-09-11 — Corpus retarget: role families follow the career decision, not the landing search
+
+The search that built this corpus was a landing search: bridge titles plus a BA/DA safety net
+plus the Power Platform tool stack. The active search ended (2026-09-09 entry), so the corpus's
+job changed to "what does the next rung demand" — and the canonical career repository
+(`D:\Github\learning_path`), not this one, owns that answer. Its decision dated 2026-09-11 (see
+that repository's `decisions/DECISION_LOG.md`; accepted the same day) retires the "BA/BI as
+tactical fallback" clause, ratifies the 2026-09-09 corpus mode after the fact, and names the
+families this file implements:
+
+- **Dropped** the three analyst tracks (`business_analyst`, `data_bi_analyst`, `legal_analyst`)
+  and the two Power Platform tracks (`power_platform`, `power_automate_ai_builder`), plus the
+  `business analyst` / `data analyst` patterns in the ATS `title_any` list. Measured before
+  cutting (chain-level, a chain credited to every track it touches; "ever" reads the
+  `app_events` history, "now" the cached `outcome_status`): the analyst tracks were 33% of
+  LinkedIn+Dice inflow since corpus mode began, 103 applied chains, 1 of which ever reached a
+  screen or interview (none now); the Power Platform tracks were 21%, 132 applied chains,
+  1 ever/1 now; for scale the kept bridge tracks were 170 chains, 5 ever/3 now. The ATS
+  analyst patterns hit 0 rows in 30 days. Power Platform stays held capability — postings
+  that mention it inside a kept family still enter through that family.
+- **Added** `ai_ml_engineering` (AI engineer / applied AI / ML engineer / AI platform / LLM
+  engineer / MLOps), the 2–5 year expansion rung that no search targeted: in the 30 days before,
+  MLOps titles were 10 rows, LLM 38, ML engineer 42, and the 696 "AI engineer" rows all
+  arrived by accident through other searches. No seniority exclusion: a read-only corpus
+  keeps staff/principal rows because they show where the ladder goes.
+- **Kept** the bridge tracks (`sa_ai_automation`, `se_consultant`, `applied_ai_delivery`) and
+  the `legal_tech` domain lane. Locations unchanged; the 2026-11-01 reminder now also checks
+  the new track is capturing, so that check-in does not only move cities.
+
+Evaluation is untouched (still `evaluate: false`). The dropped tracks' rows keep their
+`tier`/`search_name` columns, so the historical analyst population stays analyzable; nothing
+was deleted. AGENTS.md's Frontier Radar paths now point at `D:\Github\learning_path` — the
+`../learning_path` spelling resolved to nothing from `C:\Github`.
+
+---
 ## 2026-09-09 — Corpus mode: fetch-only operation with an age valve; Adzuna dropped from the searches
 
 The active search is ending, but the fetched JD corpus is worth

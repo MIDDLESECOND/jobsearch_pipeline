@@ -696,11 +696,14 @@ Windows Task Scheduler.
 
 Read `CLAUDE.md` for the repository's existing workflow and evidence rules.
 
-For career-related claims, also read:
+For career-related claims, also read (the canonical repository lives on D:, not beside this
+one; the `../learning_path` spelling used here until 2026-09-11 resolved to nothing):
 
-- `../learning_path/governance/CROSS_PROJECT_RULES.md`
-- `../learning_path/assumptions/AI_CAREER_CLAIM_LEDGER.md`
-- `../learning_path/decisions/D-2026-08-03_CAREER_REALIGNMENT.md`
+- `D:\Github\learning_path\governance\CROSS_PROJECT_RULES.md`
+- `D:\Github\learning_path\assumptions\AI_CAREER_CLAIM_LEDGER.md`
+- `D:\Github\learning_path\decisions\D-2026-08-03_CAREER_REALIGNMENT.md`
+- `D:\Github\learning_path\decisions\DECISION_LOG.md` — its 2026-09-11 row is the decision
+  that sets which role families this pipeline's corpus fetches
 
 If the canonical files are unavailable, report the missing access instead of reconstructing them
 from memory.
